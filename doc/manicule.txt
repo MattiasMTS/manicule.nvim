@@ -79,8 +79,9 @@ configurable via the `ui.submit_keys` / `ui.cancel_keys` arrays.
 
 Each comment is rendered as a per-record floating popup anchored to its
 line. The popup title is the short record id (`c<6 chars>`) and the
-footer is a hint for the edit/delete `<Plug>` maps. Multiple comments
-on the same line stack above each other in id order.
+footer shows the last-touched timestamp (`updated_at` or `created_at`)
+followed by the keymap hint for the edit/delete `<Plug>` maps. Multiple
+comments on the same line stack above each other in id order.
 
 Set `ui.sticky = true` to keep every popup visible at all times; the
 default (`false`) shows popups only for records whose line is currently

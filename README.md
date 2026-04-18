@@ -22,10 +22,12 @@ whatever you plug in.
 Each comment tints its anchor line's number column via `ManiculeLineNr`
 (default-linked to `DiagnosticSignInfo`, overridable) and is shown as a
 small floating popup pinned to the anchor line, titled with the short
-id (`c<6 chars>`) and footered with the edit/delete hint. Multiple
-comments on the same line stack above one another. By default popups
-only appear when the anchor line is in the current viewport; set
-`ui.sticky = true` to keep every popup visible at all times.
+id (`c<6 chars>`) and footered with the edit/delete hint. Popup footers
+show the last-touched timestamp (`updated_at` or `created_at`) followed
+by the keymap hint. Multiple comments on the same line stack above one
+another. By default popups only appear when the anchor line is in the
+current viewport; set `ui.sticky = true` to keep every popup visible at
+all times.
 
 ## Why the name
 

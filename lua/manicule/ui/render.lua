@@ -128,6 +128,21 @@ local function comment_hint_text()
   return table.concat(parts, " | ")
 end
 
+---Compose the popup footer: "<Mon DD HH:MM> · <hint>". Falls back to
+---just the timestamp when no keymap hint is bound, just the hint when
+---the record has neither timestamp, and nil when both are absent.
+---@param record table
+---@return string?
+local function comment_footer_text(record)
+  local ts = record and (record.updated_at or record.created_at)
+  local ts_str = type(ts) == "number" and os.date("%b %d %H:%M", ts) or nil
+  local hint = comment_hint_text()
+  if ts_str and hint then
+    return ts_str .. " · " .. hint
+  end
+  return ts_str or hint
+end
+
 ---Find any window (in any tab) currently showing `bufnr`.
 ---@param bufnr integer
 ---@return integer?
@@ -338,7 +353,7 @@ local function render_comment_popup(record, handle, records)
     return true
   end
 
-  local hint = comment_hint_text()
+  local footer = comment_footer_text(record)
   local body_lines = split_lines(record.body)
 
   local max_line_width = 0
@@ -351,8 +366,8 @@ local function render_comment_popup(record, handle, records)
 
   local win_width = vim.api.nvim_win_get_width(anchor_win)
   local max_popup_width = math.max(24, math.floor(win_width * 0.52))
-  local hint_width = hint and vim.fn.strdisplaywidth(hint) or 0
-  local content_width = math.min(math.max(max_line_width, hint_width), max_popup_width)
+  local footer_width = footer and vim.fn.strdisplaywidth(footer) or 0
+  local content_width = math.min(math.max(max_line_width, footer_width), max_popup_width)
 
   local display_lines = {}
   for _, line in ipairs(body_lines) do
@@ -397,7 +412,14 @@ local function render_comment_popup(record, handle, records)
   local border = "rounded"
   win_config.border = border
 
-  float.apply_title_footer(win_config, border, string.format(" c%s ", short_id(record.id)), "left", hint or nil, "left")
+  float.apply_title_footer(
+    win_config,
+    border,
+    string.format(" c%s ", short_id(record.id)),
+    "left",
+    footer or nil,
+    "left"
+  )
 
   local popup_winid = float.open_or_reconfigure(handle.popup_winid, popup_bufnr, false, win_config)
   handle.popup_winid = popup_winid
