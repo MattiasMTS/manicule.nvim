@@ -27,13 +27,16 @@ no parallel render pipeline.
           ▼                       ▼                       ▼
    ┌────────────┐          ┌────────────┐          ┌─────────────┐
    │ anchor.lua │          │  store.lua │          │   ui.lua    │
-   │ (extmarks) │          │ (JSON I/O) │          │ (vim.ui.*)  │
-   └────────────┘          └────────────┘          └─────────────┘
-                                 │
-                                 ▼
-                          ┌──────────────┐
-                          │  sinks/init  │─► sinks/clipboard.lua
-                          │  (registry)  │   (reference adapter)
+   │ (extmarks) │          │ (JSON I/O) │          │ (facade)    │
+   └────────────┘          └────────────┘          └──────┬──────┘
+                                 │                        │
+                                 ▼                        ▼
+                          ┌──────────────┐       ┌────────────────┐
+                          │  sinks/init  │       │ ui/ submodules │
+                          │  (registry)  │       │  editor.lua    │
+                          │      │       │       │  render.lua    │
+                          │      ▼       │       │  quickfix.lua  │
+                          │ clipboard.lua│       └────────────────┘
                           └──────────────┘
 
                   handlers.lua  ← STUB (v2 render handlers)
@@ -41,6 +44,29 @@ no parallel render pipeline.
 
 `init.lua` lazy-requires everything it needs; users with a `cmd = {...}`
 lazy spec pay no startup cost.
+
+### UI layer
+
+The `ui/` submodule hosts the floating-window comment editor, the
+inline render pipeline, and the quickfix formatter — all three were
+ported from `codediff.nvim` (PR #332) and trimmed to fit manicule's
+buffer-agnostic model.
+
+- `ui/editor.lua` — scratch-buffer floating window with a title,
+  footer hint, configurable submit/cancel keys, and winblend. Entry
+  point is `editor.open({ title, default, anchor_pos, cfg }, cb)`.
+  Only one editor is live at a time.
+- `ui/render.lua` — paints a `" ☞ body…"` virtual-text preview on each
+  commented line using the same namespace as `anchor.lua`, so the sign
+  column glyph and the preview belong to the same extmark family.
+  Public API: `attach_all`, `attach_one`, `refresh_one`, `detach`.
+- `ui/quickfix.lua` — formats records into quickfix items
+  (`[ ]`/`[x]` + line range + truncated first line of the body) and
+  delegates to `setqflist` + `copen`. Replaces the raw quickfix call
+  that lived in `init.list`.
+
+`lua/manicule/ui.lua` stays as a thin facade: `prompt` hands off to
+`ui/editor`, `select_sink` still uses `vim.ui.select`.
 
 ## 3. Data flow: add comment
 
@@ -52,7 +78,7 @@ plugin/manicule ──► init.add(opts)
                       │
                       ├─ resolve_range() ──────► {start, end_}
                       │
-                      ├─ ui.prompt() ──────────► body (async cb)
+                      ├─ ui.prompt() ──► ui.editor.open(cfg) ──► body (async cb)
                       │
                       ▼
                     finalize_add(body, bufnr, range)
@@ -61,6 +87,7 @@ plugin/manicule ──► init.add(opts)
                       ├─ id.new() ─────────────────────► record.id
                       ├─ store.put(root, record)
                       ├─ store.save(root)  (atomic tmp+rename)
+                      ├─ ui.render.attach_one(bufnr, record) ──► " ☞ body" vtext
                       │
                       └─ nvim_exec_autocmds("User",
                            { pattern = "ManiculeAdded", data = record })
@@ -166,7 +193,10 @@ All events are native `User` autocmds — subscribe with
 - A display-handler system beyond the extmark-carried sign. Virtual
   text, floats, and custom gutter glyphs are sketched in
   `handlers.lua` but intentionally unwired.
-- Multi-line comment prompts. v1 uses single-line `vim.ui.input`; a
-  scratch-buffer flow is a v2 item (TODO in `lua/manicule/ui.lua`).
+- (Done — see UI layer above.) The floating-window comment editor has
+  replaced the v0 single-line `vim.ui.input` prompt.
 - Matching saved records by line text. v1 re-anchors by saved
   row/col and lets `invalidate` flag orphans.
+- Multi-line comment prompts are now available via the floating
+  editor at `lua/manicule/ui/editor.lua` — the old note about
+  single-line-only has been resolved.

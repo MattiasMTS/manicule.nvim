@@ -117,6 +117,7 @@ local function attach_buffer(bufnr)
   end
   local marks = buffer_marks[bufnr] or {}
   local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local attached = {}
   for _, r in ipairs(records) do
     if not marks[r.id] and r.range and r.range.start then
       local sr = math.min(r.range.start[1] or 0, math.max(0, line_count - 1))
@@ -129,6 +130,7 @@ local function attach_buffer(bufnr)
       })
       if ok then
         marks[r.id] = mark_id
+        table.insert(attached, r)
         local resolved = anchor.resolve(bufnr, mark_id)
         if resolved and resolved.invalid then
           emit("ManiculeOrphaned", { id = r.id, record = r })
@@ -137,6 +139,9 @@ local function attach_buffer(bufnr)
     end
   end
   buffer_marks[bufnr] = marks
+  if #attached > 0 then
+    require("manicule.ui.render").attach_all(bufnr, attached)
+  end
 end
 
 ---Initialize manicule with user options.
@@ -223,6 +228,7 @@ local function finalize_add(body, bufnr, range)
   local marks = buffer_marks[bufnr] or {}
   marks[record.id] = mark_id
   buffer_marks[bufnr] = marks
+  require("manicule.ui.render").attach_one(bufnr, record)
   emit("ManiculeAdded", record)
 end
 
@@ -271,6 +277,12 @@ function M.edit(id)
     record.updated_at = os.time()
     require("manicule.store").put(root, record)
     require("manicule.store").save(root)
+    -- Refresh the inline preview for every buffer that's currently showing this record.
+    for bufnr, marks in pairs(buffer_marks) do
+      if marks[record.id] and vim.api.nvim_buf_is_valid(bufnr) then
+        require("manicule.ui.render").refresh_one(bufnr, record)
+      end
+    end
     emit("ManiculeEdited", record)
   end)
 end
@@ -289,6 +301,7 @@ function M.delete(id)
     if mid then
       require("manicule.anchor").delete(bufnr, mid)
       marks[id] = nil
+      require("manicule.ui.render").detach(bufnr, id)
     end
   end
   require("manicule.store").remove(root, id)
@@ -353,21 +366,7 @@ function M.list(filter)
 
   -- If called as a command (no filter, no caller return-use), push to quickfix.
   if not filter._quiet and (filter.to_qflist or vim.tbl_count(filter) == 0) then
-    local items = {}
-    for _, r in ipairs(results) do
-      local line = (r.range and r.range.start and r.range.start[1] or 0) + 1
-      local col = (r.range and r.range.start and r.range.start[2] or 0) + 1
-      table.insert(items, {
-        filename = r.path,
-        lnum = line,
-        col = col,
-        text = r.body or "",
-      })
-    end
-    vim.fn.setqflist({}, " ", { title = "manicule", items = items })
-    if #items > 0 then
-      vim.cmd("copen")
-    end
+    require("manicule.ui.quickfix").show(results, { open = true })
   end
   return results
 end

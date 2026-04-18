@@ -46,11 +46,41 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 :ManiculeSend clipboard
 ```
 
+`:ManiculeAdd` opens a floating markdown scratch buffer. Type your
+comment (it can span multiple lines), then press `<CR>` in normal mode
+to submit or `q` to cancel — both keys are configurable (see below).
+
 Or via `<Plug>` mappings (no defaults are installed):
 
 ```lua
 vim.keymap.set({ "n", "x" }, "<leader>ca", "<Plug>(manicule-add)")
 vim.keymap.set("n",          "<leader>cl", "<Plug>(manicule-list)")
+vim.keymap.set("n",          "<leader>ce", "<Plug>(manicule-edit)")
+vim.keymap.set("n",          "<leader>cd", "<Plug>(manicule-delete)")
+```
+
+## Configuration
+
+All keys are optional — the snippet below is the full default set.
+
+```lua
+require("manicule").setup({
+  store = {
+    -- Return the directory the store should live under, or nil.
+    path_resolver = function()
+      return vim.fs.root(0, { ".git", ".hg", "package.json" })
+    end,
+    filename = ".manicule.json",
+  },
+  ui = {
+    width = 72,            -- floating editor width (columns)
+    height = 6,            -- floating editor height (lines)
+    editor_mode = "insert",-- "insert" or "normal"
+    submit_keys = { "<CR>" },
+    cancel_keys = { "q" },
+    opacity = 0,           -- winblend (0 = opaque, 100 = transparent)
+  },
+})
 ```
 
 ## Registering a custom sink

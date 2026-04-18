@@ -1,23 +1,31 @@
--- manicule.nvim: thin wrappers over `vim.ui.input` / `vim.ui.select`
--- so the rest of the plugin stays picker-agnostic. Any UI that
--- implements the vim.ui contract (dressing.nvim, snacks.nvim, fzf-lua,
--- telescope-ui-select, …) works transparently.
+-- manicule.nvim: picker-agnostic UI glue.
+--
+-- `M.prompt` now delegates to the floating editor at
+-- `lua/manicule/ui/editor.lua` (ported from codediff.nvim). That gives
+-- multi-line markdown-flavoured editing with user-configurable submit /
+-- cancel keys instead of the single-line `vim.ui.input` we used in v0.
+--
+-- `M.select_sink` still uses `vim.ui.select` so dressing.nvim /
+-- snacks.nvim / fzf-lua / telescope-ui-select continue to work out of
+-- the box for sink selection.
 
 local M = {}
 
----Prompt for a single-line comment body.
----@param opts {prompt?: string, default?: string}|nil
+---Open the floating comment editor and invoke `cb` with the body
+---(or `nil` on cancel).
+---@param opts { prompt?: string, default?: string, anchor_pos?: integer[], anchor_winid?: integer }|nil
 ---@param cb fun(body: string|nil)
 function M.prompt(opts, cb)
   opts = opts or {}
-  vim.ui.input({
-    prompt = opts.prompt or "Comment: ",
+  local cfg = require("manicule.config").get().ui
+  require("manicule.ui.editor").open({
+    title = opts.prompt or "Comment",
     default = opts.default or "",
+    anchor_winid = opts.anchor_winid,
+    anchor_pos = opts.anchor_pos,
+    cfg = cfg,
   }, cb)
 end
-
--- TODO(manicule): v2 — multi-line prompt via scratch buffer. v1 keeps
--- things single-line because `vim.ui.input` is the lowest-common-denom.
 
 ---Prompt for a registered sink name.
 ---@param cb fun(name: string|nil)
