@@ -65,6 +65,19 @@ Set `ui.sticky = true` to keep every popup visible at all times; the
 default (`false`) shows popups only for records whose line is currently
 in the viewport, updating on scroll / resize / cursor movement.
 
+                                                          *manicule-highlights*
+
+manicule registers three highlight groups, all with `default = true` so
+user overrides survive `:colorscheme` changes:
+
+    ManiculeCommentBorder   Float border around comment popups.
+    ManiculeCommentMeta     Popup title (`c<id>`) and footer hint.
+    ManiculeLineNr          Line-number column tint on commented lines.
+                            Default-linked to |hl-DiagnosticSignInfo|.
+
+Override any of them with `:hi ManiculeLineNr ...` or
+`vim.api.nvim_set_hl(0, "ManiculeLineNr", { ... })`.
+
 ==============================================================================
 3. COMMANDS                                                 *manicule-commands*
 

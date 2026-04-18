@@ -60,6 +60,7 @@ local function setup_comment_highlights()
 
   vim.api.nvim_set_hl(0, "ManiculeCommentBorder", { fg = border_fg, bg = border_bg })
   vim.api.nvim_set_hl(0, "ManiculeCommentMeta", { fg = meta_fg, bg = border_bg })
+  vim.api.nvim_set_hl(0, "ManiculeLineNr", { link = "DiagnosticSignInfo", default = true })
 end
 
 -- ---------------------------------------------------------------------------
@@ -221,8 +222,9 @@ end
 -- ---------------------------------------------------------------------------
 
 ---Render (or refresh) the anchor extmark owned by `handle` for the
----current `record`. The extmark carries no visible decoration; it's a
----pure position anchor so `sync_handle_position` can detect line moves.
+---current `record`. The extmark anchors the comment and tints the
+---line number via `ManiculeLineNr` so `sync_handle_position` can
+---detect line moves and users see which lines carry comments.
 ---@param record table
 ---@param handle manicule.ui.render.Handle
 ---@return boolean
@@ -246,6 +248,8 @@ local function render_extmark(record, handle)
     invalidate = true,
     undo_restore = false,
     priority = 220,
+    -- number_hl_group only tints the start line; matches codediff
+    number_hl_group = "ManiculeLineNr",
   }
 
   if handle.extmark_id and handle.extmark_id ~= 0 then

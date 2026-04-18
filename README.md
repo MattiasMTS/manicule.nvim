@@ -17,12 +17,13 @@ drafts, chat webhooks, whatever you plug in.
 
 ## How it looks
 
-Each comment is shown as a small floating popup pinned to its anchor
-line, titled with the short id (`c<6 chars>`) and footered with the
-edit/delete hint. Multiple comments on the same line stack above one
-another. By default popups only appear when the anchor line is in the
-current viewport; set `ui.sticky = true` to keep every popup visible at
-all times.
+Each comment tints its anchor line's number column via `ManiculeLineNr`
+(default-linked to `DiagnosticSignInfo`, overridable) and is shown as a
+small floating popup pinned to the anchor line, titled with the short
+id (`c<6 chars>`) and footered with the edit/delete hint. Multiple
+comments on the same line stack above one another. By default popups
+only appear when the anchor line is in the current viewport; set
+`ui.sticky = true` to keep every popup visible at all times.
 
 ## Why the name
 

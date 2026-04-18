@@ -8,12 +8,13 @@ dispatches them to pluggable **sinks** (clipboard, PR drafts, chat
 webhooks, …). The core is intentionally lightweight: zero background
 work, every state transition is user-action or autocmd driven.
 
-The extmark is a pure position anchor — it carries no visible
-decoration. All UI (per-comment floating popups, the editor) lives in
-`lua/manicule/ui/`. Popups are rendered either **sticky** (always shown
-for every record in the buffer) or **viewport-driven** (only shown for
-records whose line is currently on screen). The behaviour is selected
-by the `ui.sticky` config knob and defaults to viewport-driven.
+The extmark anchors the comment and tints the line number via
+`ManiculeLineNr` (default-linked to `DiagnosticSignInfo`). All other UI
+(per-comment floating popups, the editor) lives in `lua/manicule/ui/`.
+Popups are rendered either **sticky** (always shown for every record in
+the buffer) or **viewport-driven** (only shown for records whose line is
+currently on screen). The behaviour is selected by the `ui.sticky` config
+knob and defaults to viewport-driven.
 
 ## 2. Module map
 
@@ -181,11 +182,13 @@ re-attached mark comes back `invalid` immediately (e.g. the file has
 been truncated below the stored row), a `User ManiculeOrphaned` autocmd
 is fired with the record.
 
-The extmark itself carries no visible decoration. All visuals live in
-`ui/render.lua`: each extmark is paired with a floating popup positioned
-against the anchor window, titled `c<short-id>` and footered with the
-edit/delete hint. Multiple popups on the same line stack vertically,
-ordered by record id.
+The extmark tints the line number via `ManiculeLineNr` so commented
+lines are visually distinct; everything else is drawn by `ui/render.lua`.
+Each extmark is paired with a floating popup positioned against the
+anchor window, titled `c<short-id>` and footered with the edit/delete
+hint. Multiple popups on the same line stack vertically, ordered by
+record id. `number_hl_group` only tints the start line — multi-line
+ranges do not tint intermediate line numbers, matching codediff.
 
 ## 8. Event catalog
 

@@ -8,9 +8,9 @@
 -- "orphaned" comments without losing them. `undo_restore = false` keeps
 -- invalidation stable across undo.
 --
--- The extmark is a pure position anchor — it carries no visible
--- decoration. All visuals (popups, borders, hints) live in
--- `lua/manicule/ui/render.lua`.
+-- The extmark anchors the comment and tints the line number via
+-- `ManiculeLineNr` (default-linked to `DiagnosticSignInfo`). All other
+-- visuals (popups, borders, hints) live in `lua/manicule/ui/render.lua`.
 --
 -- The namespace is shared across all manicule extmarks in a buffer so
 -- we can list/clear them in bulk.
@@ -32,6 +32,8 @@ function M.create(bufnr, range)
     end_col = end_col,
     invalidate = true,
     undo_restore = false,
+    -- number_hl_group only tints the start line; matches codediff
+    number_hl_group = "ManiculeLineNr",
   })
 end
 
