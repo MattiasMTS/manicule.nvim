@@ -3,13 +3,39 @@ if vim.g.loaded_manicule then
 end
 vim.g.loaded_manicule = 1
 
-local function id_completer()
+---Resolve a command's opts into the action to run.
+---
+---- No argument → open the `vim.ui.select` picker for the action.
+---- Numeric argument in `[1, #records]` → dispatch to the action with
+---  the id at that position in `list()` ordering.
+---- Anything else → ERROR notify.
+---@param action "edit"|"delete"|"resolve"
+---@param opts table
+local function dispatch_positional(action, opts)
   local records = require("manicule").list({ _quiet = true })
-  local ids = {}
-  for _, r in ipairs(records) do
-    table.insert(ids, r.id)
+  if opts.args == nil or opts.args == "" then
+    require("manicule.ui.picker").pick(action, records)
+    return
   end
-  return ids
+  local n = tonumber(opts.args)
+  if not n or n ~= math.floor(n) or n < 1 or n > #records then
+    vim.notify(("manicule: no comment at position %q"):format(opts.args), vim.log.levels.ERROR)
+    return
+  end
+  require("manicule")[action](records[n].id)
+end
+
+---Tab-completion returns stringified positions `"1"`..`"N"`. Command-
+---line completion tokens don't support display text — that's what the
+---picker is for.
+---@return string[]
+local function position_completer()
+  local records = require("manicule").list({ _quiet = true })
+  local out = {}
+  for i = 1, #records do
+    out[i] = tostring(i)
+  end
+  return out
 end
 
 vim.api.nvim_create_user_command("ManiculeAdd", function(opts)
@@ -30,16 +56,16 @@ end, {
 })
 
 vim.api.nvim_create_user_command("ManiculeResolve", function(opts)
-  require("manicule").resolve(opts.args)
-end, { nargs = 1, complete = id_completer })
+  dispatch_positional("resolve", opts)
+end, { nargs = "?", complete = position_completer })
 
 vim.api.nvim_create_user_command("ManiculeDelete", function(opts)
-  require("manicule").delete(opts.args)
-end, { nargs = 1, complete = id_completer })
+  dispatch_positional("delete", opts)
+end, { nargs = "?", complete = position_completer })
 
 vim.api.nvim_create_user_command("ManiculeEdit", function(opts)
-  require("manicule").edit(opts.args)
-end, { nargs = 1, complete = id_completer })
+  dispatch_positional("edit", opts)
+end, { nargs = "?", complete = position_completer })
 
 vim.keymap.set({ "n", "x" }, "<Plug>(manicule-add)", function()
   require("manicule").add()

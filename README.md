@@ -65,14 +65,36 @@ invoke a `:Manicule*` command or keymap for the first time, so include
 ## Usage
 
 ```vim
-:ManiculeAdd          " add a comment on the current line (or :'<,'>ManiculeAdd)
-:ManiculeList         " list comments for this project
+:ManiculeAdd           " add a comment on the current line (or :'<,'>ManiculeAdd)
+:ManiculeList          " list comments for this project (quickfix)
+:ManiculeEdit          " picker → edit (or :ManiculeEdit 3 to jump straight to position 3)
+:ManiculeDelete        " picker → delete (or :ManiculeDelete 3)
+:ManiculeResolve       " picker → resolve (or :ManiculeResolve 3)
 :ManiculeSend clipboard
 ```
 
 `:ManiculeAdd` opens a floating markdown scratch buffer. Type your
 comment (it can span multiple lines), then press `<CR>` in normal mode
 to submit or `q` to cancel — both keys are configurable (see below).
+
+### Picker commands
+
+`:ManiculeEdit`, `:ManiculeDelete`, and `:ManiculeResolve` accept a
+single positional number matching the same 1-indexed order as
+`:ManiculeList`. Tab-completion returns the valid positions as raw
+numbers (`1`, `2`, …, `N`) — command-line completion can't render
+descriptive text. With no argument the command opens a `vim.ui.select`
+picker showing every record in the same order, formatted so both the
+location and the body stay legible at a glance:
+
+```
+ 1 │ src/foo.lua:42        │ fix this validation to handle nil
+ 2 │ README.md:10-12       │ rephrase this paragraph so it reads…
+ 3 │ src/bar.lua:7         │ [✓] already addressed in review
+```
+
+The cursor-based `gca` / `gcd` keymaps are unchanged — they remain the
+fast at-cursor path. Picker commands are the "pick from a list" path.
 
 ### Quickfix
 

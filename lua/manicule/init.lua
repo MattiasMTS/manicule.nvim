@@ -476,7 +476,40 @@ function M.resolve(id)
   emit("ManiculeResolved", record)
 end
 
----List comments, optionally filtered.
+---Sort records by path → start line → id so every surface that lists
+---records (quickfix, picker, completion) sees the same order. Returning
+---a sorted list from `list()` itself — rather than relying on callers
+---to re-sort — is load-bearing for the picker: positional numbers from
+---tab-completion must resolve to the same records the user sees in
+---`:ManiculeList`.
+---@param records table[]
+---@return table[]
+local function sort_records(records)
+  local function start_line(r)
+    if r and r.range and r.range.start then
+      return (r.range.start[1] or 0) + 1
+    end
+    return 1
+  end
+  table.sort(records, function(a, b)
+    local ap = tostring(a.path or "")
+    local bp = tostring(b.path or "")
+    if ap ~= bp then
+      return ap < bp
+    end
+    local al = start_line(a)
+    local bl = start_line(b)
+    if al ~= bl then
+      return al < bl
+    end
+    return tostring(a.id or "") < tostring(b.id or "")
+  end)
+  return records
+end
+
+---List comments, optionally filtered. Results are always sorted by
+---`path → start line → id` so the ordering seen in `:ManiculeList`,
+---the picker, and the positional-number completer is identical.
 ---@param filter {path?: string, unresolved?: boolean, orphaned?: boolean, author?: string}|nil
 ---@return table[]
 function M.list(filter)
@@ -516,6 +549,8 @@ function M.list(filter)
       return true
     end)
     :totable()
+
+  sort_records(results)
 
   -- If called as a command (no filter, no caller return-use), push to quickfix.
   if not filter._quiet and (filter.to_qflist or vim.tbl_count(filter) == 0) then

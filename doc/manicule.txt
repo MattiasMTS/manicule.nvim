@@ -150,14 +150,34 @@ set `vim.g.manicule_no_default_keymaps = 1` to skip them.
                             all registered sinks.
 
                                                               *:ManiculeResolve*
-:ManiculeResolve {id}       Mark a comment as resolved. Completion lists
-                            known record ids.
+:ManiculeResolve [{n}]      Mark a comment as resolved. {n} is the 1-
+                            indexed position in `:ManiculeList` order;
+                            omit it to open a `vim.ui.select` picker.
+                            Tab-completion returns valid positions
+                            (`1`..`N`). Out-of-range or non-numeric
+                            arguments error.
 
                                                                *:ManiculeDelete*
-:ManiculeDelete {id}        Remove a comment and its anchor.
+:ManiculeDelete [{n}]       Remove a comment and its anchor. {n} is a
+                            1-indexed position in `:ManiculeList`
+                            order; omit it to open the picker.
 
                                                                  *:ManiculeEdit*
-:ManiculeEdit {id}          Prompt to replace a comment body.
+:ManiculeEdit [{n}]         Prompt to replace a comment body. {n} is a
+                            1-indexed position in `:ManiculeList`
+                            order; omit it to open the picker.
+
+                                                              *manicule-picker*
+
+`:ManiculeEdit`, `:ManiculeDelete`, and `:ManiculeResolve` open a
+`vim.ui.select` picker when invoked without an argument. Each row is
+formatted as `<n> │ <path>:<line> │ <body…>` (resolved records show a
+`[✓] ` prefix on the body). The picker and `:ManiculeList` share the
+same record order (path → start line → id), so positional arguments
+and picker selections are interchangeable.
+
+The cursor-based `gca` / `gcd` keymaps are the fast at-cursor path;
+the picker / positional commands are the "pick from a list" path.
 
 ==============================================================================
 4. PUBLIC API                                                    *manicule-api*

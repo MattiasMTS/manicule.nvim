@@ -88,6 +88,11 @@ trimmed to fit manicule's buffer-agnostic model.
   quickfix buffers only. Attached by a `FileType qf` autocmd (and
   re-attached on every `:copen` to honour runtime flag toggles).
   Opt-out via `vim.g.manicule_no_default_keymaps = 1`.
+- `ui/picker.lua` — `vim.ui.select` picker backing no-arg invocations
+  of `:ManiculeEdit` / `:ManiculeDelete` / `:ManiculeResolve`. Formats
+  each record as `<n> │ <path>:<line> │ <body…>`, consumes the same
+  sorted output from `init.list` that `ui/quickfix` does so positional
+  completion numbers and picker rows stay 1:1.
 
 `lua/manicule/ui.lua` stays as a thin facade: `prompt` hands off to
 `ui/editor`, `select_sink` still uses `vim.ui.select`.
