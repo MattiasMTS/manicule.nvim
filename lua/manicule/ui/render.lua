@@ -259,6 +259,16 @@ local function render_extmark(record, handle)
   start_row = math.max(0, math.min(start_row, math.max(0, line_count - 1)))
   end_row = math.max(start_row, math.min(end_row, math.max(0, line_count - 1)))
 
+  -- Linewise-visual records can arrive with col = v:maxcol (INT_MAX),
+  -- which `nvim_buf_set_extmark` rejects. Clamp both cols to the actual
+  -- line length so pre-fix records heal on next render.
+  local function clamp_col(row, col)
+    local line = vim.api.nvim_buf_get_lines(handle.bufnr, row, row + 1, false)[1] or ""
+    return math.max(0, math.min(col, #line))
+  end
+  start_col = clamp_col(start_row, start_col)
+  end_col = clamp_col(end_row, end_col)
+
   local opts = {
     end_row = end_row,
     end_col = end_col,
