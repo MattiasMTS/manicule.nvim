@@ -139,6 +139,10 @@ false. `BufLeave` / `WinLeave` call `render.hide_all_popups(bufnr)` so
 stale popups don't leak across windows. Every handler is wrapped in
 `vim.schedule` so a burst of autocmds coalesces into one render pass.
 
+Setup must run before the first `BufReadPost` you want rendered, so
+users lazy-loading via `cmd`/`keys` alone will miss the initial attach
+sweep; use `event = { "BufReadPost", "BufNewFile" }` as the trigger.
+
 ## 5. Data flow: send
 
 ```

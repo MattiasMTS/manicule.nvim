@@ -46,9 +46,21 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "MattiasMTS/manicule.nvim",
+  event = { "BufReadPost", "BufNewFile" },
+  cmd = { "ManiculeAdd", "ManiculeList", "ManiculeSend" },
+  keys = {
+    { "<leader>ma", "<Plug>(manicule-add)", mode = { "n", "x" }, desc = "Manicule: add comment" },
+    { "<leader>ml", "<Plug>(manicule-list)", desc = "Manicule: list comments" },
+  },
   opts = {},
 }
 ```
+
+The `event` trigger matters: manicule attaches to buffers via autocmds
+registered in `setup`. A `cmd`/`keys`-only lazy load means existing
+buffers opened at startup won't render their saved comments until you
+invoke a `:Manicule*` command or keymap for the first time, so include
+`BufReadPost`/`BufNewFile` to trigger the initial attach sweep.
 
 ## Usage
 
