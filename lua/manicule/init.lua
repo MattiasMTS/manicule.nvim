@@ -297,6 +297,42 @@ function M.setup(opts)
     end,
   })
 
+  -- Buffer-local keymaps for manicule quickfix lists. `FileType qf`
+  -- fires once per qf buffer; we check the list title to avoid
+  -- touching grep/diagnostic/other-plugin lists.
+  vim.api.nvim_create_autocmd("FileType", {
+    group = group,
+    pattern = "qf",
+    callback = function(ev)
+      local ok, info = pcall(vim.fn.getqflist, { title = 1 })
+      if not ok or type(info) ~= "table" then
+        return
+      end
+      if type(info.title) == "string" and info.title:match("^manicule") then
+        require("manicule.ui.quickfix_keymaps").attach(ev.buf)
+      end
+    end,
+  })
+
+  -- Live refresh: any mutation event regenerates the open manicule qf
+  -- list in place. `setqflist` mode `"r"` keeps the window open and
+  -- preserves the cursor line. A single pattern-matched autocmd
+  -- suffices; the refresh path no-ops when no manicule qf is visible.
+  vim.api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = { "ManiculeAdded", "ManiculeEdited", "ManiculeDeleted", "ManiculeResolved", "ManiculeOrphaned" },
+    callback = function()
+      -- Defer so a burst of events coalesces and we don't mutate the
+      -- qflist from inside the autocmd dispatch.
+      vim.schedule(function()
+        local quickfix = require("manicule.ui.quickfix")
+        if quickfix.is_manicule_qf_open() then
+          quickfix.refresh()
+        end
+      end)
+    end,
+  })
+
   -- Lazy-load sweep: when the plugin is gated behind `cmd = {...}` /
   -- `keys = {...}` in a lazy spec, `BufReadPost` fires before
   -- `M.setup()` runs, so the autocmd above never sees the buffers the
@@ -483,7 +519,9 @@ function M.list(filter)
 
   -- If called as a command (no filter, no caller return-use), push to quickfix.
   if not filter._quiet and (filter.to_qflist or vim.tbl_count(filter) == 0) then
-    require("manicule.ui.quickfix").show(results, { open = true })
+    -- Pass the filter through so the quickfix module can cache it for
+    -- `refresh()` and regenerate the same list on `User Manicule*`.
+    require("manicule.ui.quickfix").show(results, { open = true, filter = filter })
   end
   return results
 end

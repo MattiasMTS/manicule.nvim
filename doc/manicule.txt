@@ -114,6 +114,26 @@ opt out. All actions are also available as `<Plug>` maps:
     <Plug>(manicule-edit)     n
     <Plug>(manicule-delete)   n
 
+                                                            *manicule-quickfix*
+
+`:ManiculeList` populates the quickfix list (title prefixed with
+`manicule`). The quickfix buffer gets two extra buffer-local normal-
+mode bindings while the cursor sits on a manicule entry:
+
+    dd     Delete the comment under the cursor.
+    ce     Edit the comment under the cursor (opens the floating editor).
+    <CR>   Native quickfix jump to the anchored location (unchanged).
+
+The list refreshes in place while it stays open: `User
+ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`, `ManiculeResolved`,
+and `ManiculeOrphaned` events all trigger a `setqflist` `"r"`-mode
+replace that preserves the cursor row. A title-prefix check guards
+against stomping on non-manicule quickfix lists (grep, diagnostics,
+other plugins), so switching away mid-session is safe.
+
+The `dd`/`ce` bindings honour the same opt-out flag as `gca`/`gcd`:
+set `vim.g.manicule_no_default_keymaps = 1` to skip them.
+
 ==============================================================================
 3. COMMANDS                                                 *manicule-commands*
 

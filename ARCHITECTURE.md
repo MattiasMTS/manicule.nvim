@@ -80,7 +80,14 @@ trimmed to fit manicule's buffer-agnostic model.
 - `ui/quickfix.lua` — formats records into quickfix items
   (`[ ]`/`[x]` + line range + truncated first line of the body) and
   delegates to `setqflist` + `copen`. Replaces the raw quickfix call
-  that lived in `init.list`.
+  that lived in `init.list`. Tags each item with its record id via
+  `user_data`, caches the filter used so `refresh()` can regenerate
+  the list in place, and exposes `record_id_at_cursor()` +
+  `is_manicule_qf_open()` for the keymap and event wiring.
+- `ui/quickfix_keymaps.lua` — buffer-local `dd` / `ce` for manicule
+  quickfix buffers only. Attached by a `FileType qf` autocmd (and
+  re-attached on every `:copen` to honour runtime flag toggles).
+  Opt-out via `vim.g.manicule_no_default_keymaps = 1`.
 
 `lua/manicule/ui.lua` stays as a thin facade: `prompt` hands off to
 `ui/editor`, `select_sink` still uses `vim.ui.select`.
@@ -163,6 +170,22 @@ sweep; use `event = { "BufReadPost", "BufNewFile" }` as the trigger.
                    { pattern = "ManiculeSent",
                      data = { sink, count, ok, err } })
 ```
+
+## 5a. Data flow: quickfix live refresh
+
+The quickfix formatter does not drive any autocmds of its own. Instead
+`init.setup` wires one `User Manicule*` autocmd that fires on add /
+edit / delete / resolve / orphan, and a `FileType qf` autocmd that
+attaches the buffer-local `dd` / `ce` keymaps. The refresh callback
+checks whether a manicule-titled quickfix window is visible, and if so
+calls `ui.quickfix.refresh`, which re-runs the cached filter through
+`manicule.list(filter, _quiet=true)` and replaces the current list
+with `setqflist({}, "r", ...)`. The title-prefix check (`"manicule"`)
+runs again inside `refresh` so a user who swapped the qf to grep
+results between event and refresh never gets their list clobbered.
+The cursor row is captured before the replace and restored after
+(clamped to the new list length) so `dd` lands the cursor on the next
+entry naturally.
 
 ## 6. Persistence
 

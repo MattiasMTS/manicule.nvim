@@ -74,6 +74,30 @@ invoke a `:Manicule*` command or keymap for the first time, so include
 comment (it can span multiple lines), then press `<CR>` in normal mode
 to submit or `q` to cancel — both keys are configurable (see below).
 
+### Quickfix
+
+`:ManiculeList` pushes every comment for the current project into the
+quickfix list (title prefixed with `manicule`). While the cursor sits
+on an entry:
+
+| Key    | Action                                            |
+| ------ | ------------------------------------------------- |
+| `<CR>` | Jump to the anchored location (native qf behaviour) |
+| `dd`   | Delete the comment under the cursor               |
+| `ce`   | Edit the comment under the cursor                 |
+
+The list auto-refreshes in place while it stays open: adding, editing,
+deleting, or resolving a comment from any surface (keymap, command,
+API, floating editor) updates the qf list without closing it, and the
+cursor stays on the same row. The title-prefix check makes sure grep
+results, diagnostic lists, and other plugins' quickfix lists are never
+overwritten.
+
+The `dd`/`ce` bindings are buffer-local to manicule quickfix buffers
+only — native `dd`/`ce` behaviour elsewhere is unaffected. Opt out
+with the same `vim.g.manicule_no_default_keymaps = 1` flag used for
+`gca`/`gcd`.
+
 ### Keymaps
 
 Default normal-mode keymaps (matching the popup footer hint):
