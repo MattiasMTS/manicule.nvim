@@ -41,6 +41,8 @@ Full default configuration (every key is optional):
         submit_keys = { "<CR>" },
         cancel_keys = { "q" },
         opacity = 0,            -- winblend (0 = opaque, 100 = clear)
+        sticky = false,         -- true = always show comment popups;
+                                -- false = only when the line is in view
       },
     })
 <
@@ -51,6 +53,17 @@ Full default configuration (every key is optional):
 buffer. Type the body (multiple lines are allowed), then press `<CR>`
 in normal mode to submit or `q` to cancel. Both key lists are
 configurable via the `ui.submit_keys` / `ui.cancel_keys` arrays.
+
+                                                              *manicule-popups*
+
+Each comment is rendered as a per-record floating popup anchored to its
+line. The popup title is the short record id (`c<6 chars>`) and the
+footer is a hint for the edit/delete `<Plug>` maps. Multiple comments
+on the same line stack above each other in id order.
+
+Set `ui.sticky = true` to keep every popup visible at all times; the
+default (`false`) shows popups only for records whose line is currently
+in the viewport, updating on scroll / resize / cursor movement.
 
 ==============================================================================
 3. COMMANDS                                                 *manicule-commands*

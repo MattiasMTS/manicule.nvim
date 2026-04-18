@@ -18,6 +18,10 @@
 --   ManiculeResolved  record (with resolved=true)
 --   ManiculeSent      { sink, count, ok, err }
 --   ManiculeOrphaned  { id, record }
+--
+-- Rendering is owned by `lua/manicule/ui/render.lua`. `init.lua`
+-- resolves records for the affected buffer on every mutation and
+-- delegates to `render.reconcile(bufnr, records)`, which is idempotent.
 
 local M = {}
 
@@ -25,10 +29,7 @@ local M = {}
 ---@field store? table
 ---@field handlers? table
 ---@field sinks? table
-
--- Per-buffer: record id -> extmark id.
----@type table<integer, table<string, integer>>
-local buffer_marks = {}
+---@field ui? manicule.UIConfig
 
 local function emit(pattern, data)
   vim.api.nvim_exec_autocmds("User", { pattern = pattern, data = data })
@@ -96,52 +97,88 @@ local function resolve_range(opts)
   return { start = { cur[1] - 1, 0 }, end_ = { cur[1] - 1, 0 } }
 end
 
----Attach extmarks for every record matching `bufnr`. Fires
----`ManiculeOrphaned` when a re-attach comes back invalid.
+---Return records that belong to `bufnr` (path equality) under `root`.
 ---@param bufnr integer
-local function attach_buffer(bufnr)
-  if not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+---@param root string|nil
+---@return table[]
+local function records_for_buffer(bufnr, root)
+  if not root or not vim.api.nvim_buf_is_valid(bufnr) then
+    return {}
+  end
+  local store = require("manicule.store")
+  local relpath = relpath_for_buf(bufnr, root)
+  return store.for_path(root, relpath)
+end
+
+---Run reconcile for every buffer that already has an entry in `buffer_to_path`
+---or is loaded and visible. Returns the records passed in.
+---@param bufnr integer
+local function reconcile_buffer(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
     return
   end
   local store = require("manicule.store")
-  local anchor = require("manicule.anchor")
   local root = store.root()
   if not root then
     return
   end
   store.load(root)
-  local relpath = relpath_for_buf(bufnr, root)
-  local records = store.for_path(root, relpath)
-  if #records == 0 then
-    return
-  end
-  local marks = buffer_marks[bufnr] or {}
-  local line_count = vim.api.nvim_buf_line_count(bufnr)
-  local attached = {}
-  for _, r in ipairs(records) do
-    if not marks[r.id] and r.range and r.range.start then
-      local sr = math.min(r.range.start[1] or 0, math.max(0, line_count - 1))
-      local sc = r.range.start[2] or 0
-      local er = math.min((r.range.end_ and r.range.end_[1]) or sr, math.max(0, line_count - 1))
-      local ec = (r.range.end_ and r.range.end_[2]) or sc
-      local ok, mark_id = pcall(anchor.create, bufnr, {
-        start = { sr, sc },
-        end_ = { er, ec },
-      })
-      if ok then
-        marks[r.id] = mark_id
-        table.insert(attached, r)
-        local resolved = anchor.resolve(bufnr, mark_id)
-        if resolved and resolved.invalid then
-          emit("ManiculeOrphaned", { id = r.id, record = r })
-        end
+  local records = records_for_buffer(bufnr, root)
+  require("manicule.ui.render").reconcile(bufnr, records)
+
+  -- For each attached record whose extmark came back invalid, emit a
+  -- ManiculeOrphaned event. We resolve via the anchor module so the
+  -- shape matches what users have been consuming.
+  local anchor = require("manicule.anchor")
+  local render = require("manicule.ui.render")
+  local mark_ids = render.mark_ids_for_buffer(bufnr)
+  for _, record in ipairs(records) do
+    local mid = mark_ids[tostring(record.id)]
+    if mid then
+      local resolved = anchor.resolve(bufnr, mid)
+      if resolved and resolved.invalid then
+        emit("ManiculeOrphaned", { id = record.id, record = record })
       end
     end
   end
-  buffer_marks[bufnr] = marks
-  if #attached > 0 then
-    require("manicule.ui.render").attach_all(bufnr, attached)
+end
+
+---Run reconcile for every loaded listed buffer. Used after mutations
+---that may span multiple buffers (e.g. `delete` strips a record that
+---could be visible in several windows showing different files).
+local function reconcile_all_loaded()
+  local store = require("manicule.store")
+  local root = store.root()
+  if not root then
+    return
   end
+  local render = require("manicule.ui.render")
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local records = records_for_buffer(bufnr, root)
+      render.reconcile(bufnr, records)
+    end
+  end
+end
+
+---Run the non-sticky viewport refresh for `bufnr`. Cheap enough to fire
+---from scroll / resize / cursor-moved autocmds.
+---@param bufnr integer
+local function refresh_viewport(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  local cfg = require("manicule.config").get()
+  if (cfg.ui or {}).sticky then
+    return
+  end
+  local store = require("manicule.store")
+  local root = store.root()
+  if not root then
+    return
+  end
+  local records = records_for_buffer(bufnr, root)
+  require("manicule.ui.render").update_viewport_popups(bufnr, records)
 end
 
 ---Initialize manicule with user options.
@@ -159,14 +196,46 @@ function M.setup(opts)
     sinks.register(clipboard.spec)
   end
 
+  -- Initialize the render layer (highlights).
+  require("manicule.ui.render").setup()
+
   -- Idempotent augroup: clear = true means a second setup() wins cleanly.
   local group = vim.api.nvim_create_augroup("manicule", { clear = true })
   local store = require("manicule.store")
 
-  vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter" }, {
+  vim.api.nvim_create_autocmd({ "BufReadPost", "BufWinEnter" }, {
     group = group,
     callback = function(ev)
-      attach_buffer(ev.buf)
+      vim.schedule(function()
+        reconcile_buffer(ev.buf)
+        refresh_viewport(ev.buf)
+      end)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
+    group = group,
+    callback = function(ev)
+      require("manicule.ui.render").hide_all_popups(ev.buf)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized", "CursorMoved", "CursorMovedI" }, {
+    group = group,
+    callback = function(ev)
+      -- `vim.schedule` mirrors codediff's render path: avoid doing float
+      -- reconfigure work from inside the autocmd, lets batched events
+      -- coalesce into a single render.
+      vim.schedule(function()
+        refresh_viewport(ev.buf)
+      end)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = group,
+    callback = function()
+      require("manicule.ui.render").refresh_highlights()
     end,
   })
 
@@ -183,7 +252,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "BufUnload", "BufDelete" }, {
     group = group,
     callback = function(ev)
-      buffer_marks[ev.buf] = nil
+      require("manicule.ui.render").clear_buffer(ev.buf)
     end,
   })
 
@@ -203,14 +272,12 @@ local function finalize_add(body, bufnr, range)
   if not body or body == "" then
     return
   end
-  local anchor = require("manicule.anchor")
   local store = require("manicule.store")
   local id_mod = require("manicule.id")
   local ui = require("manicule.ui")
 
   local root = store.root()
   local relpath = relpath_for_buf(bufnr, root)
-  local mark_id = anchor.create(bufnr, range)
   local now = os.time()
   local record = {
     id = id_mod.new(),
@@ -225,10 +292,10 @@ local function finalize_add(body, bufnr, range)
   }
   store.put(root, record)
   store.save(root)
-  local marks = buffer_marks[bufnr] or {}
-  marks[record.id] = mark_id
-  buffer_marks[bufnr] = marks
-  require("manicule.ui.render").attach_one(bufnr, record)
+  -- Reconcile rebuilds extmarks + popups idempotently; no need for a
+  -- per-mutation attach/detach API.
+  reconcile_buffer(bufnr)
+  refresh_viewport(bufnr)
   emit("ManiculeAdded", record)
 end
 
@@ -277,10 +344,11 @@ function M.edit(id)
     record.updated_at = os.time()
     require("manicule.store").put(root, record)
     require("manicule.store").save(root)
-    -- Refresh the inline preview for every buffer that's currently showing this record.
-    for bufnr, marks in pairs(buffer_marks) do
-      if marks[record.id] and vim.api.nvim_buf_is_valid(bufnr) then
-        require("manicule.ui.render").refresh_one(bufnr, record)
+    -- Rebuild popups for every buffer that currently renders this record.
+    reconcile_all_loaded()
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(bufnr) then
+        refresh_viewport(bufnr)
       end
     end
     emit("ManiculeEdited", record)
@@ -295,17 +363,9 @@ function M.delete(id)
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
   end
-  -- Strip the extmark from any loaded buffer.
-  for bufnr, marks in pairs(buffer_marks) do
-    local mid = marks[id]
-    if mid then
-      require("manicule.anchor").delete(bufnr, mid)
-      marks[id] = nil
-      require("manicule.ui.render").detach(bufnr, id)
-    end
-  end
   require("manicule.store").remove(root, id)
   require("manicule.store").save(root)
+  reconcile_all_loaded()
   emit("ManiculeDeleted", { id = id, record = record })
 end
 
@@ -331,11 +391,13 @@ function M.list(filter)
   filter = filter or {}
   local store = require("manicule.store")
   local anchor = require("manicule.anchor")
+  local render = require("manicule.ui.render")
   local root = store.root()
   if not root then
     return {}
   end
   local bufnr = vim.api.nvim_get_current_buf()
+  local mark_ids = render.mark_ids_for_buffer(bufnr)
   local all = store.all(root)
   local results = vim
     .iter(all)
@@ -350,8 +412,7 @@ function M.list(filter)
         return false
       end
       if filter.orphaned then
-        local marks = buffer_marks[bufnr] or {}
-        local mid = marks[r.id]
+        local mid = mark_ids[tostring(r.id)]
         if not mid then
           return false
         end
@@ -398,9 +459,20 @@ function M.register_sink(spec)
   return require("manicule.sinks").register(spec)
 end
 
--- Exposed for tests; not part of the public API.
+-- Exposed for tests + <Plug> maps; not part of the stable public API.
+-- Returns `{ [bufnr] = { [comment_id] = extmark_id, ... }, ... }` by
+-- projecting from the render layer's handle table so there is exactly
+-- one source of truth for anchor extmarks.
 function M._buffer_marks()
-  return buffer_marks
+  local render = require("manicule.ui.render")
+  local out = {}
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    local marks = render.mark_ids_for_buffer(bufnr)
+    if next(marks) then
+      out[bufnr] = marks
+    end
+  end
+  return out
 end
 
 return M

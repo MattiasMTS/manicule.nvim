@@ -8,21 +8,17 @@
 -- "orphaned" comments without losing them. `undo_restore = false` keeps
 -- invalidation stable across undo.
 --
--- The extmark itself carries the display (sign_text + hl_group) — there
--- is no parallel render pipeline in v1. See `handlers.lua` for the v2
--- shape sketched behind stubs.
+-- The extmark is a pure position anchor — it carries no visible
+-- decoration. All visuals (popups, borders, hints) live in
+-- `lua/manicule/ui/render.lua`.
 --
--- The namespace is shared across all manicule anchors in a buffer so we
--- can list/clear them in bulk.
+-- The namespace is shared across all manicule extmarks in a buffer so
+-- we can list/clear them in bulk.
 
 local M = {}
 
 ---Neovim namespace used for all manicule extmarks.
 M.ns = vim.api.nvim_create_namespace("manicule")
-
--- Default sign highlight. Linked to Comment with `default = true` so a
--- user colorscheme override wins.
-vim.api.nvim_set_hl(0, "ManiculeSign", { link = "Comment", default = true })
 
 ---Create an anchor for a comment range.
 ---@param bufnr integer
@@ -36,9 +32,6 @@ function M.create(bufnr, range)
     end_col = end_col,
     invalidate = true,
     undo_restore = false,
-    sign_text = "☞",
-    sign_hl_group = "ManiculeSign",
-    hl_mode = "combine",
   })
 end
 

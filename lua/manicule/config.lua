@@ -9,6 +9,7 @@ local M = {}
 ---@field submit_keys string[] Keys that submit the editor
 ---@field cancel_keys string[] Keys that cancel the editor
 ---@field opacity integer winblend (0 = opaque, 100 = fully transparent)
+---@field sticky boolean Always render comment popups vs only when the line is in the viewport
 
 ---@type manicule.Config
 M.defaults = {
@@ -28,7 +29,7 @@ M.defaults = {
   sinks = {
     -- Named sink configurations populated by user/setup.
   },
-  -- Floating editor UI options. Mirrors the codediff.nvim surface.
+  -- Floating editor + popup UI options. Mirrors the codediff.nvim surface.
   ui = {
     width = 72,
     height = 6,
@@ -36,6 +37,7 @@ M.defaults = {
     submit_keys = { "<CR>" },
     cancel_keys = { "q" },
     opacity = 0,
+    sticky = false, -- true = always show popups for visible records; false = only when in viewport
   },
 }
 
@@ -75,6 +77,7 @@ function M.setup(opts)
       ["ui.submit_keys"] = { opts.ui.submit_keys, "table", true },
       ["ui.cancel_keys"] = { opts.ui.cancel_keys, "table", true },
       ["ui.opacity"] = { opts.ui.opacity, "number", true },
+      ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
     })
   end
   M.current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)

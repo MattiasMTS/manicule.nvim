@@ -6,9 +6,14 @@ manicule.nvim pins free-form comments to arbitrary buffer ranges via
 Neovim extmarks, persists them to a per-project JSON file, and
 dispatches them to pluggable **sinks** (clipboard, PR drafts, chat
 webhooks, …). The core is intentionally lightweight: zero background
-work, every state transition is user-action or autocmd driven, and the
-extmark itself carries the display layer (sign + highlight) so v1 has
-no parallel render pipeline.
+work, every state transition is user-action or autocmd driven.
+
+The extmark is a pure position anchor — it carries no visible
+decoration. All UI (per-comment floating popups, the editor) lives in
+`lua/manicule/ui/`. Popups are rendered either **sticky** (always shown
+for every record in the buffer) or **viewport-driven** (only shown for
+records whose line is currently on screen). The behaviour is selected
+by the `ui.sticky` config knob and defaults to viewport-driven.
 
 ## 2. Module map
 
@@ -48,18 +53,28 @@ lazy spec pay no startup cost.
 ### UI layer
 
 The `ui/` submodule hosts the floating-window comment editor, the
-inline render pipeline, and the quickfix formatter — all three were
-ported from `codediff.nvim` (PR #332) and trimmed to fit manicule's
-buffer-agnostic model.
+per-comment popup renderer, the quickfix formatter, and a small shared
+float primitives module — all ported from `codediff.nvim` (PR #332) and
+trimmed to fit manicule's buffer-agnostic model.
 
+- `ui/float.lua` — shared float primitives used by both the editor and
+  the popup renderer: `create_scratch_buf`, `open_or_reconfigure`,
+  `apply_title_footer`, `set_float_win_options`.
 - `ui/editor.lua` — scratch-buffer floating window with a title,
   footer hint, configurable submit/cancel keys, and winblend. Entry
   point is `editor.open({ title, default, anchor_pos, cfg }, cb)`.
   Only one editor is live at a time.
-- `ui/render.lua` — paints a `" ☞ body…"` virtual-text preview on each
-  commented line using the same namespace as `anchor.lua`, so the sign
-  column glyph and the preview belong to the same extmark family.
-  Public API: `attach_all`, `attach_one`, `refresh_one`, `detach`.
+- `ui/render.lua` — per-comment floating popups anchored to each
+  commented line. `reconcile(bufnr, records)` is idempotent: it
+  creates / updates / tears down an anchor extmark + popup per record,
+  stack-offsetting multiple comments on the same line. Sticky mode
+  (`ui.sticky = true`) keeps popups up for every record; viewport mode
+  (`ui.sticky = false`, the default) shows popups only for records
+  whose line is currently visible, via `update_viewport_popups`.
+  Public API: `setup`, `refresh_highlights`, `reconcile`,
+  `update_viewport_popups`, `hide_all_popups`,
+  `capture_position_patches`, `clear_buffer`, `clear_all`,
+  `winhighlight`, `mark_ids_for_buffer`.
 - `ui/quickfix.lua` — formats records into quickfix items
   (`[ ]`/`[x]` + line range + truncated first line of the body) and
   delegates to `setqflist` + `copen`. Replaces the raw quickfix call
@@ -83,11 +98,10 @@ plugin/manicule ──► init.add(opts)
                       ▼
                     finalize_add(body, bufnr, range)
                       │
-                      ├─ anchor.create(bufnr, range) ──► mark_id
                       ├─ id.new() ─────────────────────► record.id
                       ├─ store.put(root, record)
                       ├─ store.save(root)  (atomic tmp+rename)
-                      ├─ ui.render.attach_one(bufnr, record) ──► " ☞ body" vtext
+                      ├─ ui.render.reconcile(bufnr, records) ──► extmark + popup
                       │
                       └─ nvim_exec_autocmds("User",
                            { pattern = "ManiculeAdded", data = record })
@@ -96,25 +110,32 @@ plugin/manicule ──► init.add(opts)
 ## 4. Data flow: reload
 
 ```
-  BufReadPost / BufEnter
+  BufReadPost / BufWinEnter
          │
          ▼
-   init.attach_buffer(bufnr)
+   init.reconcile_buffer(bufnr)
          │
          ├─ store.root()        (vim.fs.root(".git"|".hg"|"package.json"))
          ├─ store.load(root)    (fills module-local cache[root])
          ├─ relpath_for_buf()   (vim.fs.relpath, fallback prefix strip)
          │
-         ├─ for each record matching relpath:
-         │     anchor.create(bufnr, range) ──► mark_id
-         │     anchor.resolve(bufnr, mark_id)
-         │         └─ if invalid:
-         │              nvim_exec_autocmds("User",
-         │                { pattern = "ManiculeOrphaned",
-         │                  data = { id, record } })
+         ├─ records = store.for_path(root, relpath)
+         ├─ ui.render.reconcile(bufnr, records)
+         │     └─ for each record: create/refresh anchor extmark and
+         │        (sticky) popup, prune handles that no longer appear
+         │        in `records`.
          │
-         └─ buffer_marks[bufnr][record.id] = mark_id
+         └─ for any extmark that came back invalid:
+              nvim_exec_autocmds("User",
+                { pattern = "ManiculeOrphaned",
+                  data = { id, record } })
 ```
+
+Viewport / scroll / resize events fan out to
+`render.update_viewport_popups(bufnr, records)` when `ui.sticky` is
+false. `BufLeave` / `WinLeave` call `render.hide_all_popups(bufnr)` so
+stale popups don't leak across windows. Every handler is wrapped in
+`vim.schedule` so a burst of autocmds coalesces into one render pass.
 
 ## 5. Data flow: send
 
@@ -155,11 +176,16 @@ Each record owns exactly one extmark in the shared namespace
 When the anchor line(s) are deleted, Neovim flags the extmark as
 `invalid` for us for free — we do not maintain a parallel liveness
 table. On buffer reload, records for the buffer's project-relative path
-are re-anchored to their stored `range`; if the re-attached mark comes
-back `invalid` immediately (e.g. the file has been truncated below the
-stored row), a `User ManiculeOrphaned` autocmd is fired with the
-record. Display (sign + highlight) is carried on the extmark directly
-via `sign_text = "☞"` and `sign_hl_group = "ManiculeSign"`.
+are re-anchored to their stored `range` by `ui/render.lua`; if the
+re-attached mark comes back `invalid` immediately (e.g. the file has
+been truncated below the stored row), a `User ManiculeOrphaned` autocmd
+is fired with the record.
+
+The extmark itself carries no visible decoration. All visuals live in
+`ui/render.lua`: each extmark is paired with a floating popup positioned
+against the anchor window, titled `c<short-id>` and footered with the
+edit/delete hint. Multiple popups on the same line stack vertically,
+ordered by record id.
 
 ## 8. Event catalog
 
@@ -190,9 +216,10 @@ All events are native `User` autocmds — subscribe with
 - Multi-user / real-time sync.
 - Threading, replies, or reactions.
 - SQLite or any structured-storage backend.
-- A display-handler system beyond the extmark-carried sign. Virtual
-  text, floats, and custom gutter glyphs are sketched in
-  `handlers.lua` but intentionally unwired.
+- A pluggable display-handler system. Rendering lives in
+  `ui/render.lua` and is opinionated around floating popups; the
+  `handlers.lua` stub is kept as a sketch of where a user-facing
+  handler API could land, but it is not wired.
 - (Done — see UI layer above.) The floating-window comment editor has
   replaced the v0 single-line `vim.ui.input` prompt.
 - Matching saved records by line text. v1 re-anchors by saved

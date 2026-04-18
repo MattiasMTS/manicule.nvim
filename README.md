@@ -15,9 +15,18 @@ when their anchor is destroyed. Comments are persisted per-project in a
 local JSON store and dispatched to pluggable **sinks** — clipboard, PR
 drafts, chat webhooks, whatever you plug in.
 
+## How it looks
+
+Each comment is shown as a small floating popup pinned to its anchor
+line, titled with the short id (`c<6 chars>`) and footered with the
+edit/delete hint. Multiple comments on the same line stack above one
+another. By default popups only appear when the anchor line is in the
+current viewport; set `ui.sticky = true` to keep every popup visible at
+all times.
+
 ## Why the name
 
-A *manicule* (☞) is the pointing-hand mark medieval readers drew in the
+A *manicule* is the pointing-hand mark medieval readers drew in the
 margins to flag a passage worth returning to.
 
 ## Motivation
@@ -79,6 +88,7 @@ require("manicule").setup({
     submit_keys = { "<CR>" },
     cancel_keys = { "q" },
     opacity = 0,           -- winblend (0 = opaque, 100 = transparent)
+    sticky = false,        -- true = always show popups; false = viewport only
   },
 })
 ```

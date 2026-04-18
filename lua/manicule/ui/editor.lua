@@ -5,10 +5,17 @@
 -- to the cursor in the current window. Only one editor is live at a
 -- time — opening a second one closes the first.
 --
+-- Float primitives (`create_scratch_buf`, `open_or_reconfigure`,
+-- `apply_title_footer`, `set_float_win_options`) are shared with
+-- `ui/render.lua` via `ui/float.lua`. The editor also reuses the render
+-- layer's `winhighlight` so popups and the editor look identical.
+--
 -- Submit/cancel keys, initial mode, size, and winblend all come from
 -- `manicule.config.get().ui` (see `config.lua`).
 
 local M = {}
+
+local float = require("manicule.ui.float")
 
 ---@class manicule.ui.editor.Active
 ---@field id string
@@ -69,64 +76,16 @@ local function force_normal_mode()
   end
 end
 
----@param opts? { filetype?: string }
----@return integer bufnr
-local function create_scratch_buf(opts)
-  opts = opts or {}
-  local bufnr = vim.api.nvim_create_buf(false, true)
-  vim.bo[bufnr].buftype = "nofile"
-  vim.bo[bufnr].bufhidden = "wipe"
-  vim.bo[bufnr].swapfile = false
-  if opts.filetype then
-    vim.bo[bufnr].filetype = opts.filetype
-  end
-  return bufnr
-end
-
+---Editor wants wrap/linebreak on, which differs from the popup renderer
+---defaults. We apply the shared options first, then flip the two knobs
+---the editor cares about.
 ---@param winid integer
 ---@param winhighlight string
-local function set_float_win_options(winid, winhighlight)
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return
-  end
-  vim.wo[winid].wrap = true
-  vim.wo[winid].linebreak = true
-  vim.wo[winid].cursorline = false
-  vim.wo[winid].number = false
-  vim.wo[winid].relativenumber = false
-  vim.wo[winid].winhighlight = winhighlight
-end
-
----@param border any
----@return boolean
-local function border_is_none(border)
-  if border == nil then
-    return false
-  end
-  if type(border) == "string" then
-    return border == "" or border:lower() == "none"
-  end
-  return false
-end
-
----@param win_config table
----@param border any
----@param title string?
----@param footer string?
-local function apply_title_footer(win_config, border, title, footer)
-  if border_is_none(border) then
-    return
-  end
-  if vim.fn.has("nvim-0.9") ~= 1 then
-    return
-  end
-  if title then
-    win_config.title = title
-    win_config.title_pos = "left"
-  end
-  if footer and vim.fn.has("nvim-0.10") == 1 then
-    win_config.footer = footer
-    win_config.footer_pos = "left"
+local function apply_editor_win_options(winid, winhighlight)
+  float.set_float_win_options(winid, winhighlight)
+  if winid and vim.api.nvim_win_is_valid(winid) then
+    vim.wo[winid].wrap = true
+    vim.wo[winid].linebreak = true
   end
 end
 
@@ -179,12 +138,6 @@ local function move_cursor_to_end(winid, text)
   pcall(vim.api.nvim_win_set_cursor, winid, { target_line, target_col })
 end
 
----Setup default highlight groups (idempotent).
-local function ensure_highlights()
-  vim.api.nvim_set_hl(0, "ManiculeFloatBorder", { link = "FloatBorder", default = true })
-  vim.api.nvim_set_hl(0, "ManiculeFloatTitle", { link = "Title", default = true })
-end
-
 --- Close the active editor if any.
 function M.close_active()
   if active_editor then
@@ -214,7 +167,6 @@ function M.open(opts, cb)
   assert(type(cb) == "function", "manicule.ui.editor.open: cb is required")
 
   M.close_active()
-  ensure_highlights()
 
   local cfg = opts.cfg
   local anchor_winid = opts.anchor_winid or vim.api.nvim_get_current_win()
@@ -229,7 +181,7 @@ function M.open(opts, cb)
   local footer = string.format("%s close | %s submit", key_label(cancel_hint), key_label(submit_hint))
 
   local previous_win = vim.api.nvim_get_current_win()
-  local bufnr = create_scratch_buf({ filetype = "markdown" })
+  local bufnr = float.create_scratch_buf({ filetype = "markdown" })
 
   local border = "rounded"
   local win_config = {
@@ -255,13 +207,14 @@ function M.open(opts, cb)
     win_config.col = 0
   end
 
-  apply_title_footer(win_config, border, title, footer)
+  float.apply_title_footer(win_config, border, title, "left", footer, "left")
 
-  local winhighlight =
-    "NormalFloat:NormalFloat,FloatBorder:ManiculeFloatBorder,FloatTitle:ManiculeFloatTitle,FloatFooter:ManiculeFloatTitle"
+  -- Reuse the render layer's shared winhighlight so the editor and
+  -- popups pick up the same border/meta colours.
+  local winhighlight = require("manicule.ui.render").winhighlight()
 
   local winid = vim.api.nvim_open_win(bufnr, true, win_config)
-  set_float_win_options(winid, winhighlight)
+  apply_editor_win_options(winid, winhighlight)
   vim.wo[winid].winblend = cfg.opacity or 0
 
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, split_lines(opts.default))
