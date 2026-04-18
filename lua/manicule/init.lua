@@ -202,6 +202,20 @@ local function refresh_viewport(bufnr)
   require("manicule.ui.render").update_viewport_popups(bufnr, records)
 end
 
+---Bring `bufnr` up to date with the store: reconcile extmarks/popups and
+---kick the non-sticky viewport refresh so line-number tints and popups
+---materialize immediately. Safe to call for buffers with no records or
+---no project root (both helpers early-return). Does NOT emit User
+---`Manicule*` events — those are reserved for mutations.
+---@param bufnr integer
+local function attach_buffer(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  reconcile_buffer(bufnr)
+  refresh_viewport(bufnr)
+end
+
 ---Initialize manicule with user options.
 ---@param opts manicule.Config|nil
 function M.setup(opts)
@@ -228,8 +242,7 @@ function M.setup(opts)
     group = group,
     callback = function(ev)
       vim.schedule(function()
-        reconcile_buffer(ev.buf)
-        refresh_viewport(ev.buf)
+        attach_buffer(ev.buf)
       end)
     end,
   })
@@ -283,6 +296,17 @@ function M.setup(opts)
       store.flush_all()
     end,
   })
+
+  -- Lazy-load sweep: when the plugin is gated behind `cmd = {...}` /
+  -- `keys = {...}` in a lazy spec, `BufReadPost` fires before
+  -- `M.setup()` runs, so the autocmd above never sees the buffers the
+  -- user already has open. Walk every currently-loaded buffer and run
+  -- the same attach path so pre-existing records paint immediately.
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      attach_buffer(bufnr)
+    end
+  end
 end
 
 ---Build the record and wrap up add().
