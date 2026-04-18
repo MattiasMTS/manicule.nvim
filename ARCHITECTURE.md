@@ -272,7 +272,10 @@ All events are native `User` autocmds — subscribe with
 ## 9. Extension points
 
 - **Sinks** (primary, stable): register via `require("manicule").register_sink(spec)`.
-  A spec is `{ name, send(comments, ctx, cb), format?, validate? }`.
+  A spec is `{ name, send(comments, ctx, cb), format?, validate?, clear_on_success? }`.
+  Opt in with `clear_on_success = true` to have the core auto-delete
+  every record in the batch after the sink's callback returns `ok = true`
+  (`ManiculeSent` fires first, then one `ManiculeDeleted` per record).
   See `lua/manicule/sinks/clipboard.lua` for a reference adapter.
 - **handlers.* (v2)**: `lua/manicule/handlers.lua` sketches
   `signs` / `virtual_text` / `float` entries shaped like

@@ -186,6 +186,7 @@ the unsuffixed filename so the common case doesn't fragment.
 ```lua
 require("manicule").register_sink({
   name = "gist",
+  clear_on_success = false,  -- set true to auto-delete records after cb(true)
   validate = function(ctx)
     if not ctx.token then return false, "missing GitHub token" end
     return true
@@ -201,6 +202,12 @@ require("manicule").register_sink({
 ```
 
 Then: `:ManiculeSend gist`.
+
+Set `clear_on_success = true` when the sink semantically *consumes* the
+records (e.g. handing a review off to an external reviewer) — the core
+will call `M.delete` on every record in the batch once the sink's
+callback reports `ok = true`, firing one `ManiculeDeleted` per record.
+Default is `false`, i.e. records persist after dispatch.
 
 ## Events
 

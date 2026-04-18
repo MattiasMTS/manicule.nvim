@@ -569,7 +569,16 @@ function M.send(sink_name, filter, ctx)
   filter = filter or {}
   filter._quiet = true
   local records = M.list(filter)
-  require("manicule.sinks").dispatch(sink_name, records, ctx or {}, function(ok, err)
+  -- Fetch the spec up front so we can check `clear_on_success` after
+  -- dispatch without a second registry lookup. Unknown sinks still flow
+  -- through `dispatch`'s existing `cb(false, "unknown sink")` path below
+  -- (sink will be nil here, `sink.clear_on_success` never evaluates).
+  local sinks = require("manicule.sinks")
+  local sink = sinks.get(sink_name)
+  sinks.dispatch(sink_name, records, ctx or {}, function(ok, err)
+    -- Fire `ManiculeSent` BEFORE any auto-clear so subscribers see the
+    -- send event ahead of the per-record `ManiculeDeleted` events — a
+    -- causal "send happened, now the records are going away" order.
     emit("ManiculeSent", {
       sink = sink_name,
       count = #records,
@@ -578,6 +587,18 @@ function M.send(sink_name, filter, ctx)
     })
     if not ok then
       vim.notify(("manicule: sink %q failed: %s"):format(sink_name, tostring(err)), vim.log.levels.ERROR)
+      return
+    end
+    if sink and sink.clear_on_success and #records > 0 then
+      -- Reuse `M.delete` so each record goes through the full lifecycle
+      -- — store.remove + save, render.reconcile per buffer, and one
+      -- `User ManiculeDeleted` per record — exactly as if the user had
+      -- deleted them by hand. `M.delete` is idempotent on unknown ids
+      -- (emits a WARN notify and returns early), so a sink that already
+      -- cleared records itself becomes a no-op here.
+      for _, record in ipairs(records) do
+        M.delete(record.id)
+      end
     end
   end)
 end

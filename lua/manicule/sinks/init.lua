@@ -9,13 +9,23 @@ local M = {}
 local sinks = {}
 
 ---Register a sink adapter.
----@param spec {name: string, send: fun(comments, ctx, cb), format?: fun(c): string, validate?: fun(ctx): boolean, string?}
+---@param spec {name: string, send: fun(comments, ctx, cb), format?: fun(c): string, validate?: fun(ctx): boolean, string?, clear_on_success?: boolean}
+---
+---Spec fields:
+---  name              string     unique sink identifier
+---  send              function   function(comments, ctx, cb) — cb(ok: boolean, err: string?)
+---  format            function?  per-record formatter
+---  validate          function?  gate the dispatch; return false, err to reject
+---  clear_on_success  boolean?   if true, core deletes every record in the batch
+---                               after the sink's send callback reports ok=true.
+---                               default: false (records persist).
 function M.register(spec)
   vim.validate({
     name = { spec.name, "string" },
     send = { spec.send, "function" },
     format = { spec.format, "function", true },
     validate = { spec.validate, "function", true },
+    clear_on_success = { spec.clear_on_success, "boolean", true },
   })
   sinks[spec.name] = spec
 end

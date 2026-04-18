@@ -219,12 +219,19 @@ on the `User` event — see |manicule-events|.
 A sink is any table matching: >lua
 
     {
-      name     = "my-sink",
-      send     = function(comments, ctx, cb) ... end,
-      format   = function(comment) return "..." end, -- optional
-      validate = function(ctx) return true end,      -- optional
+      name             = "my-sink",
+      send             = function(comments, ctx, cb) ... end,
+      format           = function(comment) return "..." end, -- optional
+      validate         = function(ctx) return true end,      -- optional
+      clear_on_success = false,                              -- optional
     }
 <
+
+`clear_on_success` (boolean, default false): when true, manicule.send
+calls `manicule.delete(record.id)` for every record in the dispatched
+batch after the sink's `cb` reports `ok = true`. `User ManiculeSent`
+fires first, then one `User ManiculeDeleted` per record. Off by default,
+so records persist after dispatch.
 
 Register with: >lua
 
