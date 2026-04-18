@@ -3,10 +3,11 @@
 ## 1. Overview
 
 manicule.nvim pins free-form comments to arbitrary buffer ranges via
-Neovim extmarks, persists them to a per-project JSON file, and
-dispatches them to pluggable **sinks** (clipboard, PR drafts, chat
-webhooks, …). The core is intentionally lightweight: zero background
-work, every state transition is user-action or autocmd driven.
+Neovim extmarks, persists them to a per-project file under Neovim's
+state directory, and dispatches them to pluggable **sinks** (clipboard,
+PR drafts, chat webhooks, …). The core is intentionally lightweight:
+zero background work, every state transition is user-action or autocmd
+driven.
 
 The extmark anchors the comment and tints the line number via
 `ManiculeLineNr` (default-linked to `DiagnosticSignInfo`). All other UI
@@ -33,7 +34,7 @@ knob and defaults to viewport-driven.
           ▼                       ▼                       ▼
    ┌────────────┐          ┌────────────┐          ┌─────────────┐
    │ anchor.lua │          │  store.lua │          │   ui.lua    │
-   │ (extmarks) │          │ (JSON I/O) │          │ (facade)    │
+   │ (extmarks) │          │ (mpack I/O)│          │ (facade)    │
    └────────────┘          └────────────┘          └──────┬──────┘
                                  │                        │
                                  ▼                        ▼
@@ -116,7 +117,7 @@ plugin/manicule ──► init.add(opts)
          ▼
    init.reconcile_buffer(bufnr)
          │
-         ├─ store.root()        (vim.fs.root(".git"|".hg"|"package.json"))
+         ├─ store.root()        (vim.fs.root(store.root_markers) || cwd fallback)
          ├─ store.load(root)    (fills module-local cache[root])
          ├─ relpath_for_buf()   (vim.fs.relpath, fallback prefix strip)
          │
@@ -161,14 +162,55 @@ stale popups don't leak across windows. Every handler is wrapped in
 
 ## 6. Persistence
 
-The store lives at `<project-root>/.manicule.json`, where the root is
-resolved with `vim.fs.root(0, {".git",".hg","package.json"})`. Writes go
-through a tmp-then-rename dance — `vim.uv.fs_write` to
+The store lives under `stdpath("state") .. "/manicule/"` (overridable
+via `store.dir`), one file per project root. The root is resolved with
+`vim.fs.root(0, store.root_markers)` — defaults to `{".git", ".hg",
+"package.json"}`. The filename is the root path with `[\\/:]+` collapsed
+to `%%` (same trick persistence.nvim uses), so
+`/Users/me/src/foo`  → `%Users%me%src%foo.mpack`. Keying by the git root
+rather than `getcwd()` means comments survive `cd`'ing into subdirs.
+
+The envelope is `vim.mpack.encode({ records = {...} })` by default;
+`store.format = "json"` switches to `vim.json.encode` for users who want
+a human-readable file. mpack is the default because nothing human reads
+these files anymore (they live under `stdpath('state')`, not the repo),
+and mpack is smaller, faster, and handles Lua `nil`/array cases without
+JSON's coercion quirks.
+
+Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
 `<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash
-never truncates the existing store. JSON was chosen over SQLite because
-the payload is small (one record per commented range, one file per
-project), the format is trivial for users to inspect and hand-edit, and
-Neovim ships `vim.json` without any external dependency.
+never truncates the existing store. If the on-disk file is corrupt the
+loader `pcall`s the decode, logs a `WARN` notification, and starts from
+an empty record list rather than crashing.
+
+**Unrooted buffers.** If `vim.fs.root` returns nil (e.g. a scratch
+`/tmp/foo.txt`) `store.root()` returns nil and every write no-ops. Users
+who *do* want to persist notes in unrooted contexts can set
+`store.persist_unrooted = true`, which falls back to `vim.fn.getcwd()`
+as the key. The default is off to avoid scattering files under
+`stdpath('state')/manicule/` for every random file opened outside a
+project.
+
+**Branch scoping (opt-in).** `store.branch = true` appends the current
+git branch to the filename (`<escaped-root>%%<escaped-branch>.mpack`) so
+notes are scoped per-branch. `main` and `master` collapse back to the
+unsuffixed filename — the common case doesn't fragment and branch
+creation doesn't suddenly hide existing notes. Branch lookup runs
+`git -C <root> branch --show-current`, guarded by `uv.fs_stat(root ..
+"/.git")`. The default is `false` because annotations are content
+anchors, not editing state; users who want them to follow branches can
+opt in.
+
+### Migration from legacy `.manicule.json`
+
+On first load per root, manicule checks for `<root>/.manicule.json` —
+the pre-state-dir location. If present and the new-location file is
+missing, the legacy JSON is decoded (wrapped into the new envelope if
+needed), written out in the configured format, and then `fs_unlink`'d.
+If both exist the new-location file wins and the legacy file is left
+alone (the user may be on a branch mid-migration). One migration event
+per root fires a `User ManiculeStoreMigrated` autocmd with
+`data = { root, legacy, new }`; see |manicule-events|.
 
 ## 7. Anchoring strategy
 
@@ -203,6 +245,7 @@ All events are native `User` autocmds — subscribe with
 | `ManiculeResolved` | `M.resolve` marks a record resolved        | record (with `resolved = true`)     |
 | `ManiculeSent`     | `M.send` sink dispatch settles             | `{ sink, count, ok, err }`          |
 | `ManiculeOrphaned` | reload detects an extmark is invalid       | `{ id, record }`                    |
+| `ManiculeStoreMigrated` | legacy `.manicule.json` migrated to the state dir | `{ root, legacy, new }`   |
 
 ## 9. Extension points
 

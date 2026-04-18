@@ -11,15 +11,34 @@ local M = {}
 ---@field opacity integer winblend (0 = opaque, 100 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
 
+---@class manicule.StoreConfig
+---@field dir string Directory where per-root store files live.
+---@field format "mpack"|"json" On-disk envelope format.
+---@field branch boolean Scope the filename by the current git branch (main/master skipped).
+---@field persist_unrooted boolean Persist buffers with no project root using cwd as the key.
+---@field root_markers string[] Markers passed to `vim.fs.root`.
+---@field filename string|nil Legacy no-op; kept for backwards compatibility.
+
 ---@type manicule.Config
 M.defaults = {
   store = {
-    -- Where to anchor the per-project store. Return a directory path or nil.
-    path_resolver = function()
-      return vim.fs.root(0, { ".git", ".hg", "package.json" })
-    end,
-    -- Filename written inside the resolved project root.
-    filename = ".manicule.json",
+    -- Per-user state dir — out of the project tree, dedicated subdir.
+    dir = vim.fn.stdpath("state") .. "/manicule/",
+    -- "mpack" | "json". mpack is smaller/faster and tolerates Lua
+    -- nil/array quirks; nothing human-inspects these files anyway.
+    format = "mpack",
+    -- Annotations should stay visible across branches by default; manicule
+    -- stores notes the user wants anchored, not editing state.
+    branch = false,
+    -- Persist buffers without a project root (keyed by cwd). Off by default
+    -- to avoid scattering files under stdpath("state")/manicule/ for every
+    -- random /tmp/foo.txt the user opens.
+    persist_unrooted = false,
+    -- Markers passed to `vim.fs.root` when resolving the project key.
+    root_markers = { ".git", ".hg", "package.json" },
+    -- Legacy field — no longer used. Kept so existing configs don't error;
+    -- setup warns if it is set so users know to remove it.
+    filename = nil,
   },
   handlers = {
     signs = { enabled = true },
@@ -65,9 +84,23 @@ function M.setup(opts)
   })
   if opts.store then
     vim.validate({
-      ["store.path_resolver"] = { opts.store.path_resolver, "function", true },
+      ["store.dir"] = { opts.store.dir, "string", true },
+      ["store.format"] = { opts.store.format, "string", true },
+      ["store.branch"] = { opts.store.branch, "boolean", true },
+      ["store.persist_unrooted"] = { opts.store.persist_unrooted, "boolean", true },
+      ["store.root_markers"] = { opts.store.root_markers, "table", true },
       ["store.filename"] = { opts.store.filename, "string", true },
     })
+    if opts.store.format ~= nil and opts.store.format ~= "mpack" and opts.store.format ~= "json" then
+      error(('manicule: store.format must be "mpack" or "json", got %q'):format(tostring(opts.store.format)))
+    end
+    if opts.store.filename ~= nil then
+      vim.notify(
+        "manicule: store.filename is no longer used; the store now lives under "
+          .. "stdpath('state')/manicule/. Remove it from your setup() call.",
+        vim.log.levels.WARN
+      )
+    end
   end
   if opts.ui then
     vim.validate({
@@ -92,6 +125,15 @@ function M.setup(opts)
       M.current.ui.cancel_keys = opts.ui.cancel_keys
     end
   end
+  if opts.store and opts.store.root_markers ~= nil then
+    M.current.store.root_markers = opts.store.root_markers
+  end
+
+  -- Ensure the state dir exists once at setup so later saves don't race
+  -- the mkdir and `:echo stdpath('state').'/manicule/'` resolves to a real
+  -- directory even before the user adds a comment.
+  vim.fn.mkdir(M.current.store.dir, "p")
+
   return M.current
 end
 

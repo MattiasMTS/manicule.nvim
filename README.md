@@ -2,7 +2,8 @@
 
 Buffer-agnostic comments for Neovim, pipeable to anywhere.
 
-> **Status:** Alpha — single-user, extmark-anchored, JSON-persisted. API will change.
+> **Status:** Alpha — single-user, extmark-anchored, persisted under
+> `stdpath('state')/manicule/` as mpack (opt-in JSON). API will change.
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for a walkthrough of the
 module layout, data flow, and event catalog.
@@ -11,9 +12,10 @@ module layout, data flow, and event catalog.
 
 manicule.nvim lets you attach annotations to arbitrary ranges in any
 buffer, anchored by extmarks so they survive edits and surface cleanly
-when their anchor is destroyed. Comments are persisted per-project in a
-local JSON store and dispatched to pluggable **sinks** — clipboard, PR
-drafts, chat webhooks, whatever you plug in.
+when their anchor is destroyed. Comments are persisted per-project
+under Neovim's state directory (`stdpath('state')/manicule/`) and
+dispatched to pluggable **sinks** — clipboard, PR drafts, chat webhooks,
+whatever you plug in.
 
 ## How it looks
 
@@ -89,11 +91,11 @@ All keys are optional — the snippet below is the full default set.
 ```lua
 require("manicule").setup({
   store = {
-    -- Return the directory the store should live under, or nil.
-    path_resolver = function()
-      return vim.fs.root(0, { ".git", ".hg", "package.json" })
-    end,
-    filename = ".manicule.json",
+    dir = vim.fn.stdpath("state") .. "/manicule/", -- per-user state dir
+    format = "mpack",                              -- "mpack" | "json"
+    branch = false,                                -- branch-scope the filename
+    persist_unrooted = false,                      -- key unrooted bufs by cwd
+    root_markers = { ".git", ".hg", "package.json" },
   },
   ui = {
     width = 72,            -- floating editor width (columns)
@@ -106,6 +108,29 @@ require("manicule").setup({
   },
 })
 ```
+
+### Where are my notes stored?
+
+Run `:echo stdpath('state').'/manicule/'` — that is the default
+`store.dir`. One file per project root, named after the root with path
+separators escaped as `%%`, e.g. `%Users%me%src%foo.mpack`. Switch to
+`store.format = "json"` if you want the files to be human-readable.
+
+With `store.branch = true` the filename is scoped per-branch
+(`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to
+the unsuffixed filename so the common case doesn't fragment.
+
+### Migration from `.manicule.json`
+
+Pre-state-dir releases wrote comments to `<project-root>/.manicule.json`.
+On the first load per root, manicule detects that file and silently
+migrates it to the new location, then deletes the legacy file. A
+`User ManiculeStoreMigrated` autocmd fires once per migration with
+`data = { root, legacy, new }`, so integrations can react (e.g. drop a
+stale path out of `.gitignore`). If both files exist, the new-location
+file wins and the legacy file is left alone — check the `INFO`
+notification and delete `.manicule.json` manually once you've verified
+nothing is missing.
 
 ## Registering a custom sink
 
@@ -143,9 +168,10 @@ vim.api.nvim_create_autocmd("User", {
 ```
 
 Patterns: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
-`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`. Payload shapes
-are documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md#event-catalog)
-and `:help manicule-events`.
+`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`,
+`ManiculeStoreMigrated`. Payload shapes are documented in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md#event-catalog) and
+`:help manicule-events`.
 
 ## See also
 

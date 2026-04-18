@@ -322,6 +322,17 @@ local function finalize_add(body, bufnr, range)
   local ui = require("manicule.ui")
 
   local root = store.root()
+  if not root then
+    -- No project root resolved and the user hasn't opted in to
+    -- `store.persist_unrooted`. Tell them instead of silently dropping
+    -- the comment on the floor.
+    vim.notify(
+      "manicule: current buffer isn't in a project (no .git/.hg/package.json) and "
+        .. "`store.persist_unrooted` is false — comment not saved.",
+      vim.log.levels.WARN
+    )
+    return
+  end
   local relpath = relpath_for_buf(bufnr, root)
   local now = os.time()
   local record = {

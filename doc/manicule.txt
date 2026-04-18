@@ -15,11 +15,12 @@ CONTENTS                                                    *manicule-contents*
 
 manicule.nvim provides per-project, extmark-anchored comments that are
 decoupled from any particular buffer workflow (diffview, review tooling,
-chat). Comments persist to a JSON store at the project root and can be
-dispatched to pluggable sinks (clipboard, PR drafts, webhooks, …).
+chat). Comments persist under `stdpath('state')/manicule/` as one file
+per project root (mpack by default, JSON opt-in) and can be dispatched
+to pluggable sinks (clipboard, PR drafts, webhooks, …).
 
-Status: alpha — single-user, extmark-anchored, JSON-persisted. API will
-change.
+Status: alpha — single-user, extmark-anchored, persisted under
+`stdpath('state')/manicule/`. API will change.
 
 ==============================================================================
 2. SETUP                                                       *manicule-setup*
@@ -29,10 +30,22 @@ Full default configuration (every key is optional):
 >lua
     require("manicule").setup({
       store = {
-        path_resolver = function()
-          return vim.fs.root(0, { ".git", ".hg", "package.json" })
-        end,
-        filename = ".manicule.json",
+        -- Directory the per-root store lives under. Defaults to
+        -- `stdpath('state').'/manicule/'` — out of the project tree.
+        dir = vim.fn.stdpath("state") .. "/manicule/",
+        -- On-disk envelope format. "mpack" (default) is binary and
+        -- compact; "json" is human-readable.
+        format = "mpack",
+        -- When true, append the current git branch to the filename so
+        -- notes are scoped per-branch. `main`/`master` collapse to the
+        -- unsuffixed filename.
+        branch = false,
+        -- When true, buffers without a project root (no .git/.hg/
+        -- package.json ancestor) are keyed by cwd instead of being
+        -- ignored. Off by default.
+        persist_unrooted = false,
+        -- Markers passed to `vim.fs.root` to resolve the project root.
+        root_markers = { ".git", ".hg", "package.json" },
       },
       ui = {
         width = 72,             -- floating editor width
@@ -46,6 +59,16 @@ Full default configuration (every key is optional):
       },
     })
 <
+
+                                                             *manicule-storage*
+
+Store files live at >
+    <store.dir>/<escaped-project-root>[%%<escaped-branch>].<format>
+<
+where `[\\/:]+` in each path segment is replaced with `%%`. Run
+`:echo stdpath('state').'/manicule/'` to find the default directory.
+Legacy `<project-root>/.manicule.json` files are migrated to the new
+location on first load (see |ManiculeStoreMigrated|) and then deleted.
 
                                                                *manicule-editor*
 
@@ -174,12 +197,15 @@ Lifecycle events are fired as native |User| autocmds. Subscribe with
 
 Patterns and payload shapes:
 
-    ManiculeAdded     data = record
-    ManiculeEdited    data = record (after update)
-    ManiculeDeleted   data = { id, record }
-    ManiculeResolved  data = record (resolved=true)
-    ManiculeSent      data = { sink, count, ok, err }
-    ManiculeOrphaned  data = { id, record }  (anchor invalidated on reload)
+    ManiculeAdded          data = record
+    ManiculeEdited         data = record (after update)
+    ManiculeDeleted        data = { id, record }
+    ManiculeResolved       data = record (resolved=true)
+    ManiculeSent           data = { sink, count, ok, err }
+    ManiculeOrphaned       data = { id, record }  (anchor invalidated on reload)
+    ManiculeStoreMigrated  data = { root, legacy, new }  (fired once per root
+                           when `<root>/.manicule.json` is migrated to the
+                           state-dir layout)                                                                    *ManiculeStoreMigrated*
 
 ==============================================================================
 vim:ft=help:tw=78:ts=8:et:sw=2:
