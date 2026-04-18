@@ -2,7 +2,10 @@
 
 Buffer-agnostic comments for Neovim, pipeable to anywhere.
 
-> **Status:** early / pre-alpha — API will change.
+> **Status:** Alpha — single-user, extmark-anchored, JSON-persisted. API will change.
+
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for a walkthrough of the
+module layout, data flow, and event catalog.
 
 ## What it is
 
@@ -70,6 +73,25 @@ require("manicule").register_sink({
 ```
 
 Then: `:ManiculeSend gist`.
+
+## Events
+
+Lifecycle events are fired as native `User` autocmds — there is no
+`on()` helper. Subscribe directly:
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+  pattern = "ManiculeAdded",
+  callback = function(ev)
+    vim.print(ev.data) -- the newly-created record
+  end,
+})
+```
+
+Patterns: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
+`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`. Payload shapes
+are documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md#event-catalog)
+and `:help manicule-events`.
 
 ## See also
 

@@ -18,7 +18,8 @@ decoupled from any particular buffer workflow (diffview, review tooling,
 chat). Comments persist to a JSON store at the project root and can be
 dispatched to pluggable sinks (clipboard, PR drafts, webhooks, …).
 
-Status: early / pre-alpha. API will change.
+Status: alpha — single-user, extmark-anchored, JSON-persisted. API will
+change.
 
 ==============================================================================
 2. SETUP                                                       *manicule-setup*
@@ -39,11 +40,22 @@ Status: early / pre-alpha. API will change.
                             cursor line when no range is given).
 
                                                                  *:ManiculeList*
-:ManiculeList               List all comments for the current project.
+:ManiculeList               List all comments for the current project
+                            (populates the quickfix list).
 
                                                                  *:ManiculeSend*
 :ManiculeSend {sink}        Dispatch comments to {sink}. Completion lists
                             all registered sinks.
+
+                                                              *:ManiculeResolve*
+:ManiculeResolve {id}       Mark a comment as resolved. Completion lists
+                            known record ids.
+
+                                                               *:ManiculeDelete*
+:ManiculeDelete {id}        Remove a comment and its anchor.
+
+                                                                 *:ManiculeEdit*
+:ManiculeEdit {id}          Prompt to replace a comment body.
 
 ==============================================================================
 4. PUBLIC API                                                    *manicule-api*
@@ -59,8 +71,10 @@ Status: early / pre-alpha. API will change.
     m.list({ path, unresolved, orphaned, author })
     m.send(sink_name, filter, ctx)
     m.register_sink(spec)
-    m.on("added"|"edited"|"deleted"|"resolved"|"sent", fn)
 <
+
+There is NO `m.on(event, fn)` helper. Subscribe via |nvim_create_autocmd|
+on the `User` event — see |manicule-events|.
 
 ==============================================================================
 5. SINKS                                                       *manicule-sinks*
@@ -85,13 +99,26 @@ The bundled `clipboard` sink serves as a reference adapter.
 ==============================================================================
 6. EVENTS                                                     *manicule-events*
 
-Subscribe to lifecycle events via `m.on(event, fn)`. Event names:
+Lifecycle events are fired as native |User| autocmds. Subscribe with
+|nvim_create_autocmd|:
 
-    "added"     comment created
-    "edited"    comment body/range updated
-    "deleted"   comment removed
-    "resolved"  comment marked resolved
-    "sent"      comments dispatched to a sink
+>lua
+    vim.api.nvim_create_autocmd("User", {
+      pattern = "ManiculeAdded",
+      callback = function(ev)
+        vim.print(ev.data) -- the newly-created record
+      end,
+    })
+<
+
+Patterns and payload shapes:
+
+    ManiculeAdded     data = record
+    ManiculeEdited    data = record (after update)
+    ManiculeDeleted   data = { id, record }
+    ManiculeResolved  data = record (resolved=true)
+    ManiculeSent      data = { sink, count, ok, err }
+    ManiculeOrphaned  data = { id, record }  (anchor invalidated on reload)
 
 ==============================================================================
 vim:ft=help:tw=78:ts=8:et:sw=2:

@@ -5,34 +5,52 @@
 
 local M = {}
 
----Prompt the user for a free-form comment body.
+---Prompt for a single-line comment body.
 ---@param opts {prompt?: string, default?: string}|nil
----@param on_confirm fun(body: string|nil)
-function M.prompt_body(opts, on_confirm)
-  -- TODO(manicule): call vim.ui.input with a sensible default prompt
-  -- ("Comment: "). Support multiline via a scratch buffer when the
-  -- body should span more than one line.
-  local _, _ = opts, on_confirm
-  error("TODO(manicule): ui.prompt_body not implemented")
+---@param cb fun(body: string|nil)
+function M.prompt(opts, cb)
+  opts = opts or {}
+  vim.ui.input({
+    prompt = opts.prompt or "Comment: ",
+    default = opts.default or "",
+  }, cb)
 end
 
----Let the user pick a comment from a list.
----@param comments table[]
----@param on_choice fun(comment: table|nil)
-function M.pick_comment(comments, on_choice)
-  -- TODO(manicule): call vim.ui.select with a compact formatter
-  -- (path:line: body[:40]) so pickers can render nicely.
-  local _, _ = comments, on_choice
-  error("TODO(manicule): ui.pick_comment not implemented")
+-- TODO(manicule): v2 — multi-line prompt via scratch buffer. v1 keeps
+-- things single-line because `vim.ui.input` is the lowest-common-denom.
+
+---Prompt for a registered sink name.
+---@param cb fun(name: string|nil)
+function M.select_sink(cb)
+  local sinks = require("manicule.sinks").list()
+  vim.ui.select(sinks, { prompt = "Sink:" }, cb)
 end
 
----Let the user pick a registered sink by name.
----@param sink_names string[]
----@param on_choice fun(name: string|nil)
-function M.pick_sink(sink_names, on_choice)
-  -- TODO(manicule): call vim.ui.select over the provided names.
-  local _, _ = sink_names, on_choice
-  error("TODO(manicule): ui.pick_sink not implemented")
+local cached_email
+
+---Best-effort author identity. Falls back to $USER or "?".
+---@return string
+function M.git_email()
+  if cached_email then
+    return cached_email
+  end
+  local ok, result = pcall(function()
+    return vim.system({ "git", "config", "user.email" }, { text = true }):wait()
+  end)
+  if ok and result and result.code == 0 and result.stdout then
+    local trimmed = (result.stdout:gsub("%s+$", ""))
+    if trimmed ~= "" then
+      cached_email = trimmed
+      return cached_email
+    end
+  end
+  cached_email = vim.env.USER or "?"
+  return cached_email
+end
+
+---Internal: exposed so tests can reset between cases.
+function M._reset_email_cache()
+  cached_email = nil
 end
 
 return M
