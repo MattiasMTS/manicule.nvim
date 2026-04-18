@@ -120,18 +120,6 @@ With `store.branch = true` the filename is scoped per-branch
 (`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to
 the unsuffixed filename so the common case doesn't fragment.
 
-### Migration from `.manicule.json`
-
-Pre-state-dir releases wrote comments to `<project-root>/.manicule.json`.
-On the first load per root, manicule detects that file and silently
-migrates it to the new location, then deletes the legacy file. A
-`User ManiculeStoreMigrated` autocmd fires once per migration with
-`data = { root, legacy, new }`, so integrations can react (e.g. drop a
-stale path out of `.gitignore`). If both files exist, the new-location
-file wins and the legacy file is left alone — check the `INFO`
-notification and delete `.manicule.json` manually once you've verified
-nothing is missing.
-
 ## Registering a custom sink
 
 ```lua
@@ -168,8 +156,8 @@ vim.api.nvim_create_autocmd("User", {
 ```
 
 Patterns: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
-`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`,
-`ManiculeStoreMigrated`. Payload shapes are documented in
+`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`. Payload shapes
+are documented in
 [`ARCHITECTURE.md`](./ARCHITECTURE.md#event-catalog) and
 `:help manicule-events`.
 

@@ -27,7 +27,8 @@
 --
 -- The envelope format is `vim.mpack` by default (`config.store.format =
 -- "mpack"`); `"json"` is available for users who want a human-readable
--- file. The payload shape is `{ records = { record, ... } }`.
+-- file. The on-disk payload is a bare array of record tables — no
+-- wrapper envelope. `decode()` accepts exactly that shape.
 --
 -- Atomic write strategy
 -- ---------------------
@@ -38,15 +39,6 @@
 -- -------
 -- State is kept per-root in a module-local `cache` table. Writes flip a
 -- dirty flag; `save()` is a no-op when the flag is clean.
---
--- Migration from legacy `.manicule.json`
--- --------------------------------------
--- On first `load(root)` per root, if `<root>/.manicule.json` exists and
--- the new-location file does not, the legacy file is decoded, rewritten
--- in the configured format at the new location, and unlinked. When both
--- exist the new-location file wins and the legacy file is left in place
--- (user may be mid-branch-migration). The `User ManiculeStoreMigrated`
--- autocmd fires once per migration event.
 
 local M = {}
 
@@ -59,9 +51,6 @@ local config = require("manicule.config")
 
 ---@type table<string, manicule.StoreEntry>
 local cache = {}
-
----@type table<string, boolean>
-local migrated = {}
 
 ---Escape a path string so it is usable as a flat filename. Each run of
 ---path separators (`/`, `\`, `:`) is replaced by the literal two-char
@@ -113,16 +102,6 @@ function M.path(root)
     end
   end
   return cfg.dir .. name .. "." .. cfg.format
-end
-
----Absolute path to the legacy `<root>/.manicule.json` store for `root`.
----@param root string|nil
----@return string|nil
-local function legacy_path(root)
-  if not root or root == "" then
-    return nil
-  end
-  return vim.fs.joinpath(root, ".manicule.json")
 end
 
 ---Resolve the current project root using `store.root_markers`. Falls back
@@ -183,132 +162,50 @@ local function write_atomic(path, data)
   return true
 end
 
----Encode records per the configured format.
+---Encode records per the configured format. Always writes a bare array
+---of records — no wrapper envelope.
 ---@param records table[]
 ---@return string|nil data, string? err
 local function encode(records)
   local cfg = config.current.store
-  local payload = { records = records }
   if cfg.format == "json" then
-    local ok, encoded = pcall(vim.json.encode, payload)
+    local ok, encoded = pcall(vim.json.encode, records)
     if not ok then
       return nil, tostring(encoded)
     end
     return encoded
   end
   -- Default / "mpack".
-  local ok, encoded = pcall(vim.mpack.encode, payload)
+  local ok, encoded = pcall(vim.mpack.encode, records)
   if not ok then
     return nil, tostring(encoded)
   end
   return encoded
 end
 
----Decode `data` using the configured format. Returns records table (may
----be empty) and a boolean indicating whether decode succeeded.
+---Decode `data` using the configured format. Expects a bare array of
+---records — any other shape is treated as corrupt.
 ---@param data string
 ---@param path string used purely for diagnostics
----@return table[] records, boolean ok
+---@return table[] records
 local function decode(data, path)
   local cfg = config.current.store
   local decoder = cfg.format == "json" and vim.json.decode or vim.mpack.decode
   local ok, decoded = pcall(decoder, data)
   if not ok or type(decoded) ~= "table" then
     vim.notify(("manicule: failed to decode store %s; starting fresh"):format(path), vim.log.levels.WARN)
-    return {}, false
+    return {}
   end
-  -- Accept both the new envelope `{ records = {...} }` and a bare list of
-  -- records for forward-compat with any hand-edited file.
-  if decoded.records and type(decoded.records) == "table" then
-    return decoded.records, true
+  -- An empty table is a valid empty record list regardless of whether
+  -- the decoder tags it as list/dict.
+  if next(decoded) == nil then
+    return {}
   end
-  if vim.islist and vim.islist(decoded) then
-    return decoded, true
+  if vim.islist and not vim.islist(decoded) then
+    vim.notify(("manicule: unrecognised store shape at %s; starting fresh"):format(path), vim.log.levels.WARN)
+    return {}
   end
-  if #decoded > 0 or next(decoded) == nil then
-    return decoded, true
-  end
-  vim.notify(("manicule: unrecognised store envelope at %s; starting fresh"):format(path), vim.log.levels.WARN)
-  return {}, false
-end
-
----Fire `User ManiculeStoreMigrated` once.
----@param root string
----@param legacy string
----@param new string
-local function fire_migrated(root, legacy, new)
-  vim.api.nvim_exec_autocmds("User", {
-    pattern = "ManiculeStoreMigrated",
-    data = { root = root, legacy = legacy, new = new },
-  })
-end
-
----One-shot migration from `<root>/.manicule.json`. Runs at most once per
----root per session (cached in `migrated[root]`).
----@param root string
----@param new_path string
-local function maybe_migrate(root, new_path)
-  if migrated[root] then
-    return
-  end
-  migrated[root] = true
-
-  local legacy = legacy_path(root)
-  if not legacy then
-    return
-  end
-  if not uv.fs_stat(legacy) then
-    return
-  end
-
-  -- Both exist: prefer the new location, leave the legacy file alone so
-  -- the user can decide what to delete (they may be on a branch).
-  if uv.fs_stat(new_path) then
-    vim.notify(
-      ("manicule: legacy store %s found but %s already exists; leaving legacy file in place"):format(legacy, new_path),
-      vim.log.levels.INFO
-    )
-    return
-  end
-
-  local data = read_file(legacy)
-  if not data or #data == 0 then
-    return
-  end
-  local ok, decoded = pcall(vim.json.decode, data)
-  if not ok or type(decoded) ~= "table" then
-    vim.notify(("manicule: failed to decode legacy store %s; leaving it alone"):format(legacy), vim.log.levels.WARN)
-    return
-  end
-
-  -- The legacy file held a bare array of records. Wrap it in the new
-  -- envelope when writing out.
-  local records = decoded
-  if decoded.records and type(decoded.records) == "table" then
-    records = decoded.records
-  end
-
-  local encoded, err = encode(records)
-  if not encoded then
-    vim.notify(
-      ("manicule: failed to encode migrated store for %s: %s"):format(root, tostring(err)),
-      vim.log.levels.ERROR
-    )
-    return
-  end
-
-  vim.fn.mkdir(config.current.store.dir, "p")
-  local write_ok, write_err = write_atomic(new_path, encoded)
-  if not write_ok then
-    vim.notify(
-      ("manicule: failed to write migrated store %s: %s"):format(new_path, tostring(write_err)),
-      vim.log.levels.ERROR
-    )
-    return
-  end
-
-  uv.fs_unlink(legacy)
-  fire_migrated(root, legacy, new_path)
+  return decoded
 end
 
 ---Load all records for `root` into the cache. No-op if already loaded.
@@ -326,12 +223,9 @@ function M.load(root)
   local records = {}
   if path then
     -- Ensure the state dir exists before reading/writing. `mkdir -p` is
-    -- idempotent and cheap.
+    -- idempotent and cheap. (setup() also mkdirs once, but this guards
+    -- against `setup()` never being called.)
     vim.fn.mkdir(config.current.store.dir, "p")
-
-    -- One-shot: migrate `<root>/.manicule.json` into the new location
-    -- if it is present and the new file is not yet written.
-    maybe_migrate(root, path)
 
     local data = read_file(path)
     if data and #data > 0 then
@@ -466,11 +360,9 @@ function M._cache()
   return cache
 end
 
----Internal: exposed for tests. Resets both caches so a fresh load runs
----migration logic again.
+---Internal: exposed for tests. Resets the cache so a fresh load runs.
 function M._reset()
   cache = {}
-  migrated = {}
 end
 
 return M

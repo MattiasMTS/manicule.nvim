@@ -17,7 +17,6 @@ local M = {}
 ---@field branch boolean Scope the filename by the current git branch (main/master skipped).
 ---@field persist_unrooted boolean Persist buffers with no project root using cwd as the key.
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
----@field filename string|nil Legacy no-op; kept for backwards compatibility.
 
 ---@type manicule.Config
 M.defaults = {
@@ -36,9 +35,6 @@ M.defaults = {
     persist_unrooted = false,
     -- Markers passed to `vim.fs.root` when resolving the project key.
     root_markers = { ".git", ".hg", "package.json" },
-    -- Legacy field — no longer used. Kept so existing configs don't error;
-    -- setup warns if it is set so users know to remove it.
-    filename = nil,
   },
   handlers = {
     signs = { enabled = true },
@@ -89,17 +85,9 @@ function M.setup(opts)
       ["store.branch"] = { opts.store.branch, "boolean", true },
       ["store.persist_unrooted"] = { opts.store.persist_unrooted, "boolean", true },
       ["store.root_markers"] = { opts.store.root_markers, "table", true },
-      ["store.filename"] = { opts.store.filename, "string", true },
     })
     if opts.store.format ~= nil and opts.store.format ~= "mpack" and opts.store.format ~= "json" then
       error(('manicule: store.format must be "mpack" or "json", got %q'):format(tostring(opts.store.format)))
-    end
-    if opts.store.filename ~= nil then
-      vim.notify(
-        "manicule: store.filename is no longer used; the store now lives under "
-          .. "stdpath('state')/manicule/. Remove it from your setup() call.",
-        vim.log.levels.WARN
-      )
     end
   end
   if opts.ui then

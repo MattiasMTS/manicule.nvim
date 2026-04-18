@@ -67,8 +67,6 @@ Store files live at >
 <
 where `[\\/:]+` in each path segment is replaced with `%%`. Run
 `:echo stdpath('state').'/manicule/'` to find the default directory.
-Legacy `<project-root>/.manicule.json` files are migrated to the new
-location on first load (see |ManiculeStoreMigrated|) and then deleted.
 
                                                                *manicule-editor*
 
@@ -203,9 +201,6 @@ Patterns and payload shapes:
     ManiculeResolved       data = record (resolved=true)
     ManiculeSent           data = { sink, count, ok, err }
     ManiculeOrphaned       data = { id, record }  (anchor invalidated on reload)
-    ManiculeStoreMigrated  data = { root, legacy, new }  (fired once per root
-                           when `<root>/.manicule.json` is migrated to the
-                           state-dir layout)                                                                    *ManiculeStoreMigrated*
 
 ==============================================================================
 vim:ft=help:tw=78:ts=8:et:sw=2:

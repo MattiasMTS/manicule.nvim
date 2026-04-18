@@ -170,12 +170,13 @@ to `%%` (same trick persistence.nvim uses), so
 `/Users/me/src/foo`  → `%Users%me%src%foo.mpack`. Keying by the git root
 rather than `getcwd()` means comments survive `cd`'ing into subdirs.
 
-The envelope is `vim.mpack.encode({ records = {...} })` by default;
-`store.format = "json"` switches to `vim.json.encode` for users who want
-a human-readable file. mpack is the default because nothing human reads
-these files anymore (they live under `stdpath('state')`, not the repo),
-and mpack is smaller, faster, and handles Lua `nil`/array cases without
-JSON's coercion quirks.
+The on-disk payload is a bare array of record tables — no wrapper
+envelope — encoded with `vim.mpack.encode` by default; `store.format =
+"json"` switches to `vim.json.encode` for users who want a human-readable
+file. mpack is the default because nothing human reads these files
+anymore (they live under `stdpath('state')`, not the repo), and mpack
+is smaller, faster, and handles Lua `nil`/array cases without JSON's
+coercion quirks.
 
 Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
 `<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash
@@ -200,17 +201,6 @@ creation doesn't suddenly hide existing notes. Branch lookup runs
 "/.git")`. The default is `false` because annotations are content
 anchors, not editing state; users who want them to follow branches can
 opt in.
-
-### Migration from legacy `.manicule.json`
-
-On first load per root, manicule checks for `<root>/.manicule.json` —
-the pre-state-dir location. If present and the new-location file is
-missing, the legacy JSON is decoded (wrapped into the new envelope if
-needed), written out in the configured format, and then `fs_unlink`'d.
-If both exist the new-location file wins and the legacy file is left
-alone (the user may be on a branch mid-migration). One migration event
-per root fires a `User ManiculeStoreMigrated` autocmd with
-`data = { root, legacy, new }`; see |manicule-events|.
 
 ## 7. Anchoring strategy
 
@@ -245,7 +235,6 @@ All events are native `User` autocmds — subscribe with
 | `ManiculeResolved` | `M.resolve` marks a record resolved        | record (with `resolved = true`)     |
 | `ManiculeSent`     | `M.send` sink dispatch settles             | `{ sink, count, ok, err }`          |
 | `ManiculeOrphaned` | reload detects an extmark is invalid       | `{ id, record }`                    |
-| `ManiculeStoreMigrated` | legacy `.manicule.json` migrated to the state dir | `{ root, legacy, new }`   |
 
 ## 9. Extension points
 
