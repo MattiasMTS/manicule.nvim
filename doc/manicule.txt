@@ -114,6 +114,7 @@ opt out. All actions are also available as `<Plug>` maps:
     <Plug>(manicule-list)     n
     <Plug>(manicule-edit)     n
     <Plug>(manicule-delete)   n
+    <Plug>(manicule-toggle)   n
 
                                                             *manicule-quickfix*
 
@@ -167,6 +168,19 @@ set `vim.g.manicule_no_default_keymaps = 1` to skip them.
 :ManiculeEdit [{n}]         Prompt to replace a comment body. {n} is a
                             1-indexed position in `:ManiculeList`
                             order; omit it to open the picker.
+
+                                                               *:ManiculeToggle*
+                                                              *manicule-toggle*
+:ManiculeToggle             Hide/restore all manicule visuals (popups +
+                            line-number tints) without touching the
+                            store. Records and anchor extmarks are
+                            preserved, so orphan detection keeps
+                            tracking edits while visuals are
+                            suppressed. State is in-memory only and
+                            resets on nvim restart. Fires a `User
+                            ManiculeVisibility` autocmd on each flip
+                            with `data.hidden = <bool>`. Also exposed
+                            as `<Plug>(manicule-toggle)`.
 
                                                               *manicule-picker*
 
@@ -242,6 +256,7 @@ Patterns and payload shapes:
     ManiculeResolved       data = record (resolved=true)
     ManiculeSent           data = { sink, count, ok, err }
     ManiculeOrphaned       data = { id, record }  (anchor invalidated on reload)
+    ManiculeVisibility     data = { hidden }      (fired on :ManiculeToggle)
 
 ==============================================================================
 vim:ft=help:tw=78:ts=8:et:sw=2:

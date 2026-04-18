@@ -259,14 +259,15 @@ ranges do not tint intermediate line numbers, matching codediff.
 All events are native `User` autocmds — subscribe with
 `nvim_create_autocmd`, inspect `ev.data`.
 
-| Pattern            | Fired when                                 | `ev.data` shape                     |
-| ------------------ | ------------------------------------------ | ----------------------------------- |
-| `ManiculeAdded`    | `M.add` finishes persisting a new record   | full record                         |
-| `ManiculeEdited`   | `M.edit` updates a body                    | full updated record                 |
-| `ManiculeDeleted`  | `M.delete` removes a record                | `{ id, record }`                    |
-| `ManiculeResolved` | `M.resolve` marks a record resolved        | record (with `resolved = true`)     |
-| `ManiculeSent`     | `M.send` sink dispatch settles             | `{ sink, count, ok, err }`          |
-| `ManiculeOrphaned` | reload detects an extmark is invalid       | `{ id, record }`                    |
+| Pattern              | Fired when                                 | `ev.data` shape                     |
+| -------------------- | ------------------------------------------ | ----------------------------------- |
+| `ManiculeAdded`      | `M.add` finishes persisting a new record   | full record                         |
+| `ManiculeEdited`     | `M.edit` updates a body                    | full updated record                 |
+| `ManiculeDeleted`    | `M.delete` removes a record                | `{ id, record }`                    |
+| `ManiculeResolved`   | `M.resolve` marks a record resolved        | record (with `resolved = true`)     |
+| `ManiculeSent`       | `M.send` sink dispatch settles             | `{ sink, count, ok, err }`          |
+| `ManiculeOrphaned`   | reload detects an extmark is invalid       | `{ id, record }`                    |
+| `ManiculeVisibility` | `:ManiculeToggle` flips the visibility flag | `{ hidden = <bool> }`              |
 
 ## 9. Extension points
 

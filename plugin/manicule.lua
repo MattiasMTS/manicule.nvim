@@ -67,6 +67,10 @@ vim.api.nvim_create_user_command("ManiculeEdit", function(opts)
   dispatch_positional("edit", opts)
 end, { nargs = "?", complete = position_completer })
 
+vim.api.nvim_create_user_command("ManiculeToggle", function()
+  require("manicule.ui.render").toggle()
+end, {})
+
 vim.keymap.set({ "n", "x" }, "<Plug>(manicule-add)", function()
   require("manicule").add()
 end, { silent = true })
@@ -98,6 +102,13 @@ vim.keymap.set("n", "<Plug>(manicule-delete)", function()
     return
   end
   require("manicule").delete(id)
+end, { silent = true })
+
+-- Flip visuals on/off without touching the store. No default binding —
+-- the command is enough for most users; expose the <Plug> for anyone
+-- who wants a keymap.
+vim.keymap.set("n", "<Plug>(manicule-toggle)", function()
+  require("manicule.ui.render").toggle()
 end, { silent = true })
 
 -- Default keymaps. The popup footer advertises `gca` / `gcd` so users

@@ -72,6 +72,7 @@ invoke a `:Manicule*` command or keymap for the first time, so include
 :ManiculeEdit          " picker → edit (or :ManiculeEdit 3 to jump straight to position 3)
 :ManiculeDelete        " picker → delete (or :ManiculeDelete 3)
 :ManiculeResolve       " picker → resolve (or :ManiculeResolve 3)
+:ManiculeToggle        " hide/restore all visuals without touching the store
 :ManiculeSend clipboard
 ```
 
@@ -216,8 +217,8 @@ vim.api.nvim_create_autocmd("User", {
 ```
 
 Patterns: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
-`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`. Payload shapes
-are documented in
+`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`,
+`ManiculeVisibility`. Payload shapes are documented in
 [`ARCHITECTURE.md`](./ARCHITECTURE.md#event-catalog) and
 `:help manicule-events`.
 

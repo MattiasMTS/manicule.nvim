@@ -34,6 +34,13 @@ local config = require("manicule.config")
 ---@type table<integer, table<string, manicule.ui.render.Handle>>
 local handles = {}
 
+-- Transient visibility flag. When true, every render path is gated off
+-- (reconcile / viewport update no-op). In-memory only, not persisted —
+-- resets on nvim restart. Users who want visuals back after a restart
+-- simply don't toggle; users who want a quiet session run `:ManiculeToggle`
+-- and carry on. See `M.hide` / `M.show` / `M.toggle`.
+local hidden = false
+
 -- ---------------------------------------------------------------------------
 -- Highlights
 -- ---------------------------------------------------------------------------
@@ -247,6 +254,48 @@ local function hide_popup(handle)
     pcall(vim.api.nvim_win_close, handle.popup_winid, true)
   end
   handle.popup_winid = nil
+end
+
+---Tear down every visual owned by `handle` while leaving the anchor
+---extmark itself alive (but stripped of its `number_hl_group`). The
+---anchor must persist so `invalidate = true` keeps tracking line
+---deletions for orphan detection; only the popup + decoration extmarks
+---(extra number-column tints, start-line number_hl_group) are removed.
+---@param handle manicule.ui.render.Handle
+local function strip_handle_visuals(handle)
+  hide_popup(handle)
+  clear_number_extmarks(handle)
+
+  if not handle.extmark_id or handle.extmark_id == 0 then
+    return
+  end
+  if not vim.api.nvim_buf_is_valid(handle.bufnr) then
+    return
+  end
+
+  -- Re-set the anchor extmark in place, preserving the id + range +
+  -- `invalidate` contract but dropping `number_hl_group` so the start
+  -- line's number column loses its tint too. `nvim_buf_get_extmark_by_id`
+  -- gives us the current row/col so a mid-edit hide matches the live
+  -- position, not the original record range.
+  local ok, pos =
+    pcall(vim.api.nvim_buf_get_extmark_by_id, handle.bufnr, anchor.ns, handle.extmark_id, { details = true })
+  if not ok or not pos or #pos == 0 then
+    return
+  end
+  local row, col, details = pos[1], pos[2], pos[3] or {}
+  if details.invalid then
+    return
+  end
+
+  pcall(vim.api.nvim_buf_set_extmark, handle.bufnr, anchor.ns, row, col, {
+    id = handle.extmark_id,
+    end_row = details.end_row or row,
+    end_col = details.end_col or col,
+    invalidate = true,
+    undo_restore = false,
+    priority = 220,
+  })
 end
 
 -- ---------------------------------------------------------------------------
@@ -563,9 +612,17 @@ end
 --- Reconcile rendered state for a buffer. Shows/updates/hides popups
 --- based on `records`. Handles whose ids no longer appear in `records`
 --- are torn down. Idempotent — safe to call from any autocmd.
+---
+--- When visuals are suppressed via `M.hide()`, this function no-ops so
+--- mutations that arrive while hidden (e.g. a `ManiculeAdded` that
+--- kicks off reconcile) don't paint. The next `M.show()` rebuilds
+--- everything from the store snapshot.
 ---@param bufnr integer
 ---@param records table[]
 function M.reconcile(bufnr, records)
+  if hidden then
+    return
+  end
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
@@ -591,9 +648,15 @@ end
 --- Non-sticky viewport update: show popups only for records whose line
 --- is currently visible in some window showing `bufnr`. Records outside
 --- the viewport have their popup hidden (the handle + extmark survive).
+---
+--- Gated on `M.is_hidden()` — returns immediately so scroll / resize
+--- autocmds that fire while visuals are suppressed don't re-paint.
 ---@param bufnr integer
 ---@param records table[]
 function M.update_viewport_popups(bufnr, records)
+  if hidden then
+    return
+  end
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
@@ -771,8 +834,82 @@ function M.clear_all()
   handles = {}
 end
 
+--- Return the current visibility flag. `true` means all visuals are
+--- suppressed; popups are gone and decoration extmarks have been
+--- cleared. Anchor extmarks remain (orphan detection keeps working).
+---@return boolean
+function M.is_hidden()
+  return hidden
+end
+
+--- Suppress every manicule visual (popup + line-number tint) across
+--- every tracked buffer. The store is untouched — records persist,
+--- anchor extmarks stay alive (with `invalidate = true` still
+--- tracking edits), only the paint is gone. Idempotent.
+function M.hide()
+  if hidden then
+    return
+  end
+  hidden = true
+  for bufnr, tab in pairs(handles) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      for _, handle in pairs(tab) do
+        strip_handle_visuals(handle)
+      end
+    end
+  end
+end
+
+--- Restore visuals across every loaded buffer by re-running the same
+--- reconcile + viewport-refresh path used at setup. Safe to call even
+--- when already visible (idempotent no-op). Lazy-requires `manicule.store`
+--- so the render module doesn't grow a hard dep on persistence.
+function M.show()
+  if not hidden then
+    return
+  end
+  hidden = false
+  local ok_store, store = pcall(require, "manicule.store")
+  if not ok_store then
+    return
+  end
+  local root = store.root()
+  if not root then
+    return
+  end
+  store.load(root)
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local abs = vim.fs.normalize(vim.api.nvim_buf_get_name(bufnr))
+      local relpath = abs
+      if vim.fs.relpath then
+        relpath = vim.fs.relpath(root, abs) or abs
+      end
+      local records = store.for_path(root, relpath)
+      M.reconcile(bufnr, records)
+      M.update_viewport_popups(bufnr, records)
+    end
+  end
+end
+
+--- Flip the visibility flag and apply. Fires a `User ManiculeVisibility`
+--- autocmd with `data = { hidden = <bool> }` so external observers can
+--- react (status line, etc).
+function M.toggle()
+  if hidden then
+    M.show()
+  else
+    M.hide()
+  end
+  vim.api.nvim_exec_autocmds("User", {
+    pattern = "ManiculeVisibility",
+    data = { hidden = hidden },
+  })
+end
+
 --- Internal: reset state. Used by tests.
 function M._reset_for_tests()
+  hidden = false
   M.clear_all()
 end
 
