@@ -78,6 +78,21 @@ user overrides survive `:colorscheme` changes:
 Override any of them with `:hi ManiculeLineNr ...` or
 `vim.api.nvim_set_hl(0, "ManiculeLineNr", { ... })`.
 
+                                                             *manicule-keymaps*
+
+Default normal-mode keymaps (matching the popup footer hint):
+
+    gca    Edit the comment at/covering the cursor.
+    gcd    Delete the comment at/covering the cursor.
+
+Set `vim.g.manicule_no_default_keymaps = 1` before the plugin loads to
+opt out. All actions are also available as `<Plug>` maps:
+
+    <Plug>(manicule-add)      n, x
+    <Plug>(manicule-list)     n
+    <Plug>(manicule-edit)     n
+    <Plug>(manicule-delete)   n
+
 ==============================================================================
 3. COMMANDS                                                 *manicule-commands*
 

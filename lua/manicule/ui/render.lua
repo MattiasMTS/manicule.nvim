@@ -26,6 +26,7 @@ local config = require("manicule.config")
 ---@class manicule.ui.render.Handle
 ---@field bufnr integer Buffer the extmark is placed in
 ---@field extmark_id integer
+---@field number_extmark_ids? integer[] Decoration-only extmarks per row for multi-line number tint
 ---@field popup_winid? integer
 ---@field popup_bufnr? integer
 
@@ -177,6 +178,20 @@ end
 -- Handle lifecycle
 -- ---------------------------------------------------------------------------
 
+---Tear down the decoration-only per-line number-highlight extmarks.
+---@param handle manicule.ui.render.Handle
+local function clear_number_extmarks(handle)
+  if not handle.number_extmark_ids then
+    return
+  end
+  if vim.api.nvim_buf_is_valid(handle.bufnr) then
+    for _, id in ipairs(handle.number_extmark_ids) do
+      pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, id)
+    end
+  end
+  handle.number_extmark_ids = nil
+end
+
 ---@param handle manicule.ui.render.Handle
 local function close_handle(handle)
   if handle.popup_winid and vim.api.nvim_win_is_valid(handle.popup_winid) then
@@ -188,6 +203,8 @@ local function close_handle(handle)
     pcall(vim.api.nvim_buf_delete, handle.popup_bufnr, { force = true })
   end
   handle.popup_bufnr = nil
+
+  clear_number_extmarks(handle)
 
   if handle.extmark_id and handle.extmark_id ~= 0 and vim.api.nvim_buf_is_valid(handle.bufnr) then
     pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.extmark_id)
@@ -262,6 +279,29 @@ local function render_extmark(record, handle)
   end
 
   handle.extmark_id = extmark_id
+
+  -- For multi-line ranges, paint the number column on every subsequent
+  -- row via decoration-only extmarks. `number_hl_group` on the primary
+  -- anchor only covers the start row — without these, a visual-range
+  -- comment only tints one line number.
+  clear_number_extmarks(handle)
+  if end_row > start_row then
+    local ids = {}
+    for row = start_row + 1, end_row do
+      local dok, did = pcall(vim.api.nvim_buf_set_extmark, handle.bufnr, anchor.ns, row, 0, {
+        number_hl_group = "ManiculeLineNr",
+        priority = 220,
+        -- Pure decoration — no `invalidate`, no `undo_restore`, no
+        -- end range. Orphan detection still uses the primary anchor.
+      })
+      if dok then
+        table.insert(ids, did)
+      end
+    end
+    if #ids > 0 then
+      handle.number_extmark_ids = ids
+    end
+  end
   return true
 end
 
@@ -626,6 +666,37 @@ function M.capture_position_patches(bufnr, records)
   end
 
   return { updates = updates, stale_ids = stale_ids }
+end
+
+--- Resolve the comment id whose extmark covers the current cursor line
+--- in `bufnr`. Used by `<Plug>(manicule-edit)` / `<Plug>(manicule-delete)`
+--- and the default `gca` / `gcd` keymaps. Returns nil when no comment
+--- sits on the cursor line.
+---@param bufnr integer
+---@return string?
+function M.record_at_cursor(bufnr)
+  bufnr = bufnr or 0
+  if bufnr == 0 then
+    bufnr = vim.api.nvim_get_current_buf()
+  end
+  local tab = handles[bufnr]
+  if not tab or vim.tbl_isempty(tab) then
+    return nil
+  end
+  local cur_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+  for id, handle in pairs(tab) do
+    if handle.extmark_id and handle.extmark_id ~= 0 then
+      local resolved = anchor.resolve(bufnr, handle.extmark_id)
+      if resolved and not resolved.invalid then
+        local sr = resolved.range.start[1]
+        local er = resolved.range.end_[1]
+        if cur_line >= sr and cur_line <= er then
+          return id
+        end
+      end
+    end
+  end
+  return nil
 end
 
 --- Return `{ [comment_id] = extmark_id }` for a buffer. Useful for

@@ -82,16 +82,23 @@ local function resolve_range(opts)
   -- are set. If the cursor is currently in visual mode we use the live
   -- positions instead (the marks update only after leaving visual mode).
   local mode = vim.fn.mode()
-  if mode == "v" or mode == "V" or mode == "\022" then
+  local was_visual = mode == "v" or mode == "V" or mode == "\022"
+  if was_visual then
     vim.cmd.normal({ args = { "\27" }, bang = true }) -- leave visual so '< '> finalize
   end
-  local vstart = vim.fn.getpos("'<")
-  local vend = vim.fn.getpos("'>")
-  if vstart[2] > 0 and vend[2] > 0 and (vstart[2] ~= vend[2] or vstart[3] ~= vend[3]) then
-    return {
-      start = { vstart[2] - 1, math.max(0, vstart[3] - 1) },
-      end_ = { vend[2] - 1, math.max(0, vend[3] - 1) },
-    }
+  -- Only consult '<  '> when we just left visual mode. Consulting them
+  -- unconditionally from normal-mode entry points picks up a stale
+  -- selection from an earlier visual action — which made `<leader>ma`
+  -- in normal mode anchor to the wrong lines.
+  if was_visual then
+    local vstart = vim.fn.getpos("'<")
+    local vend = vim.fn.getpos("'>")
+    if vstart[2] > 0 and vend[2] > 0 then
+      return {
+        start = { vstart[2] - 1, math.max(0, vstart[3] - 1) },
+        end_ = { vend[2] - 1, math.max(0, vend[3] - 1) },
+      }
+    end
   end
   local cur = vim.api.nvim_win_get_cursor(0)
   return { start = { cur[1] - 1, 0 }, end_ = { cur[1] - 1, 0 } }

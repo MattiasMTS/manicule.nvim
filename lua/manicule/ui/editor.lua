@@ -109,14 +109,33 @@ local function apply_editor_keymaps(bufnr, submit_keys, cancel_keys, submit_comm
       nowait = true,
     })
   end
+  -- Bind both normal and insert mode so submit works regardless of
+  -- editor_mode. Without an insert-mode binding, <CR> in an insert-mode
+  -- editor just inserts a newline — the user's "add flow does nothing"
+  -- report from v0.
+  local function insert_submit()
+    pcall(vim.cmd, "stopinsert")
+    submit_comment()
+  end
+  local function insert_cancel()
+    pcall(vim.cmd, "stopinsert")
+    close_editor()
+  end
   for _, key in ipairs(submit_keys) do
     if type(key) == "string" and key ~= "" then
       map_key("n", key, submit_comment, "submit")
+      map_key("i", key, insert_submit, "submit")
     end
   end
   for _, key in ipairs(cancel_keys) do
     if type(key) == "string" and key ~= "" then
       map_key("n", key, close_editor, "cancel")
+      -- Only bind the cancel key in insert mode when it looks like a
+      -- control sequence (e.g. "<Esc>", "<C-c>"). A plain letter such as
+      -- the default "q" must remain typeable.
+      if key:match("^<.+>$") then
+        map_key("i", key, insert_cancel, "cancel")
+      end
     end
   end
 end

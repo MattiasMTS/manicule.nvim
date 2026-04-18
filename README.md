@@ -60,7 +60,20 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 comment (it can span multiple lines), then press `<CR>` in normal mode
 to submit or `q` to cancel — both keys are configurable (see below).
 
-Or via `<Plug>` mappings (no defaults are installed):
+### Keymaps
+
+Default normal-mode keymaps (matching the popup footer hint):
+
+| Key   | Action                                 |
+| ----- | -------------------------------------- |
+| `gca` | Edit the comment at/covering the cursor   |
+| `gcd` | Delete the comment at/covering the cursor |
+
+Opt out by setting `vim.g.manicule_no_default_keymaps = 1` before the
+plugin loads.
+
+All keymaps are available as `<Plug>` mappings — no `<leader>`
+bindings are installed for add/list so you can pick your own:
 
 ```lua
 vim.keymap.set({ "n", "x" }, "<leader>ca", "<Plug>(manicule-add)")
