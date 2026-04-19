@@ -1,20 +1,29 @@
--- manicule.nvim: per-project persistence.
+-- manicule.nvim: persistence (project + session scopes).
 --
 -- Records live in `stdpath("state")/manicule/` (configurable via
--- `config.store.dir`), one file per project root. Path separators in the
--- root are escaped with `[\\/:]+` → `%%` (persistence.nvim convention) so
--- every root flattens to a single filename. If `config.store.branch` is
--- true, the current git branch is appended as `%%<branch>` before the
--- extension — except for `main` and `master`, which collapse to the
--- unsuffixed filename so the common case doesn't fragment. The file is
--- named `<escaped-root>[%%<branch>].<format>`. The on-disk payload is a
--- bare array of records encoded with `vim.mpack.encode` (or
--- `vim.json.encode` when `config.store.format == "json"`); records carry
--- `scope`, `uri`, `project_root`, `range`, `body`, `author`, timestamps,
--- `resolved`, and free-form `meta`. `save()` writes to `<path>.tmp` then
--- renames so a mid-write crash never truncates the prior file. State is
--- kept per-root in a module-local `cache`; writes flip a dirty flag and
--- `save()` is a no-op when the flag is clean.
+-- `config.store.dir`). Two scopes share the on-disk layout:
+--
+--   * Project scope: one file per project root. Path separators in the
+--     root are escaped with `[\\/:]+` → `%%` (persistence.nvim
+--     convention) so every root flattens to a single filename. If
+--     `config.store.branch` is true, the current git branch is appended
+--     as `%%<branch>` before the extension — except for `main` and
+--     `master`, which collapse to the unsuffixed filename. The file is
+--     named `<escaped-root>[%%<branch>].<format>`.
+--
+--   * Session scope: one file, `session.<format>`, shared across every
+--     unrooted / special-buftype buffer (terminal, help, scratch, etc).
+--     Records in this store key purely off `uri`; they carry
+--     `project_root = nil`.
+--
+-- The on-disk payload is a bare array of records encoded with
+-- `vim.mpack.encode` (or `vim.json.encode` when `config.store.format ==
+-- "json"`); records carry `scope`, `uri`, `project_root`, `range`,
+-- `body`, `author`, timestamps, `resolved`, and free-form `meta`.
+-- `save()` writes to `<path>.tmp` then renames so a mid-write crash
+-- never truncates the prior file. State is kept per-root in a
+-- module-local `cache` (plus a single-slot session cache); writes flip
+-- a dirty flag and `save()` is a no-op when the flag is clean.
 
 local M = {}
 
@@ -27,6 +36,11 @@ local config = require("manicule.config")
 
 ---@type table<string, manicule.StoreEntry>
 local cache = {}
+
+---Single-slot session cache. Populated on first `session_load()`;
+---`session_save()` is a no-op when `dirty` is false.
+---@type { records: table[], dirty: boolean, loaded: boolean }
+local session_cache = { records = {}, dirty = false, loaded = false }
 
 ---Escape a path string so it is usable as a flat filename. Each run of
 ---path separators (`/`, `\`, `:`) is replaced by the literal two-char
@@ -80,20 +94,15 @@ function M.path(root)
   return cfg.dir .. name .. "." .. cfg.format
 end
 
----Resolve the current project root using `store.root_markers`. Falls back
----to `vim.fn.getcwd()` when `persist_unrooted` is enabled so unrooted
----buffers still persist; otherwise returns nil.
+---Resolve the current project root using `store.root_markers`. Returns
+---nil when no marker is found — unrooted buffers land in the session
+---store (see `session_put` / `all_for_uri`) rather than keying off
+---`getcwd`, so multiple unrelated unrooted files share a single
+---session file instead of fragmenting per-directory.
 ---@return string|nil
 function M.root()
   local cfg = config.current.store
-  local root = vim.fs.root(0, cfg.root_markers)
-  if root then
-    return root
-  end
-  if cfg.persist_unrooted then
-    return vim.fn.getcwd()
-  end
-  return nil
+  return vim.fs.root(0, cfg.root_markers)
 end
 
 ---Read a file synchronously via libuv. Returns nil on any error.
@@ -339,12 +348,205 @@ function M.for_uri(root, uri)
   return out
 end
 
----Flush every dirty root in the cache. Used on VimLeavePre as a safety net.
+-- ---------------------------------------------------------------------------
+-- Session-scope store
+-- ---------------------------------------------------------------------------
+
+---Absolute path to the single session-scope file.
+---@return string
+function M.session_path()
+  local cfg = config.current.store
+  return cfg.dir .. "session." .. cfg.format
+end
+
+---Load the session records into `session_cache`. No-op after the first
+---call; use `_reset()` to invalidate from tests.
+---@return table[]
+function M.session_load()
+  if session_cache.loaded then
+    return session_cache.records
+  end
+  vim.fn.mkdir(config.current.store.dir, "p")
+  local path = M.session_path()
+  local records = {}
+  local data = read_file(path)
+  if data and #data > 0 then
+    records = decode(data, path)
+  end
+  session_cache.records = records
+  session_cache.dirty = false
+  session_cache.loaded = true
+  return records
+end
+
+---Flush the session cache if dirty.
+---@return boolean ok, string? err
+function M.session_save()
+  if not session_cache.dirty then
+    return true
+  end
+  vim.fn.mkdir(config.current.store.dir, "p")
+  local encoded, err = encode(session_cache.records)
+  if not encoded then
+    return false, "failed to encode session records: " .. tostring(err)
+  end
+  local write_ok, write_err = write_atomic(M.session_path(), encoded)
+  if not write_ok then
+    return false, write_err
+  end
+  session_cache.dirty = false
+  return true
+end
+
+---Return all session-scope records (loads on first access).
+---@return table[]
+function M.session_all()
+  if not session_cache.loaded then
+    M.session_load()
+  end
+  return session_cache.records
+end
+
+---Return session records whose `uri` matches.
+---@param uri string
+---@return table[]
+function M.session_for_uri(uri)
+  local out = {}
+  if not uri or uri == "" then
+    return out
+  end
+  for _, r in ipairs(M.session_all()) do
+    if r.uri == uri then
+      table.insert(out, r)
+    end
+  end
+  return out
+end
+
+---Insert or update a session record.
+---@param record table
+function M.session_put(record)
+  local records = M.session_all()
+  for i, r in ipairs(records) do
+    if r.id == record.id then
+      records[i] = record
+      session_cache.dirty = true
+      return
+    end
+  end
+  table.insert(records, record)
+  session_cache.dirty = true
+end
+
+---Remove a session record by id. Returns the removed record or nil.
+---@param id string
+---@return table|nil
+function M.session_remove(id)
+  local records = M.session_all()
+  for i, r in ipairs(records) do
+    if r.id == id then
+      table.remove(records, i)
+      session_cache.dirty = true
+      return r
+    end
+  end
+  return nil
+end
+
+---Flag the session cache as dirty so the next save flushes it.
+function M.session_mark_dirty()
+  if session_cache.loaded then
+    session_cache.dirty = true
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Polymorphic dispatcher
+-- ---------------------------------------------------------------------------
+
+---Return all records that match `uri` across both stores. Project
+---records are only included if the record's `project_root` matches the
+---currently-resolved project root (so project A doesn't see project B's
+---records just because the URIs collide). Session records match purely
+---by URI.
+---@param uri string
+---@return table[]
+function M.all_for_uri(uri)
+  local out = {}
+  if not uri or uri == "" then
+    return out
+  end
+  local current_root = M.root()
+  if current_root then
+    for _, r in ipairs(M.for_uri(current_root, uri)) do
+      table.insert(out, r)
+    end
+  end
+  for _, r in ipairs(M.session_for_uri(uri)) do
+    table.insert(out, r)
+  end
+  return out
+end
+
+---Dispatch a `put` by `record.scope`. Project records need a
+---`project_root`; session records don't.
+---@param record table
+function M.put_record(record)
+  if record.scope == "session" then
+    M.session_put(record)
+    return
+  end
+  -- Default / project: require an explicit root on the record.
+  M.put(record.project_root, record)
+end
+
+---Dispatch a `remove` by scope. For project-scope, `scope_or_root` may
+---be the root path directly (matching the existing API) or the literal
+---string "project" — in which case the record's `project_root` is
+---looked up via `get` across known caches.
+---@param scope_or_root "project"|"session"|string
+---@param id string
+---@param project_root string? required when scope=="project"
+---@return table|nil
+function M.remove_record(scope_or_root, id, project_root)
+  if scope_or_root == "session" then
+    return M.session_remove(id)
+  end
+  if scope_or_root == "project" then
+    return M.remove(project_root, id)
+  end
+  -- Treat it as a raw root path (pre-dispatcher API).
+  return M.remove(scope_or_root, id)
+end
+
+---Return every record across every known store — project caches AND
+---session. Used by `list` when scope-agnostic enumeration is needed.
+---@return table[]
+function M.all_records()
+  local out = {}
+  for _, entry in pairs(cache) do
+    for _, r in ipairs(entry.records) do
+      table.insert(out, r)
+    end
+  end
+  if session_cache.loaded then
+    for _, r in ipairs(session_cache.records) do
+      table.insert(out, r)
+    end
+  end
+  return out
+end
+
+---Flush every dirty root in the cache AND the session cache. Used on
+---VimLeavePre as a safety net.
 function M.flush_all()
   for root, entry in pairs(cache) do
     if entry.dirty then
       M.save(root)
     end
+  end
+  if session_cache.dirty then
+    M.session_save()
   end
 end
 
@@ -357,6 +559,7 @@ end
 ---Internal: exposed for tests. Resets the cache so a fresh load runs.
 function M._reset()
   cache = {}
+  session_cache = { records = {}, dirty = false, loaded = false }
 end
 
 return M

@@ -145,6 +145,35 @@ vim.keymap.set("n",          "<leader>ce", "<Plug>(manicule-edit)")
 vim.keymap.set("n",          "<leader>cd", "<Plug>(manicule-delete)")
 ```
 
+### Scopes
+
+manicule owns two persistence scopes:
+
+- **Project scope** (`scope = "project"`): records live in a per-root
+  file named after the project root. Used whenever a buffer resolves
+  to a project (via `vim.fs.root` on `store.root_markers`). Project
+  records carry a `project_root` field.
+- **Session scope** (`scope = "session"`): records live in a single
+  `session.<format>` file under `stdpath('state')/manicule/`, keyed
+  purely by URI. Used for unrooted file buffers, `:terminal`, help
+  buffers, scratch / nofile / acwrite buffers — anything without a
+  project root or without a plain-file backing. `project_root` is nil.
+
+The caller never branches on scope — `:ManiculeAdd`, `:ManiculeList`,
+and the render layer all dispatch through the store automatically.
+Comments you add on an unrooted file follow you into the session
+store; comments on a terminal buffer persist across nvim restarts as
+long as the `term://` URI is stable. `persist_unrooted` defaults to
+**true** so "works anywhere" is the honest default; set it to
+`false` to refuse adds on unrooted file buffers with a notify.
+
+If you `:saveas` a scratch-session comment into a project directory,
+the record's scope stays `session` with the new file URI. Delete and
+re-add it if you want project-scope ownership.
+
+Quickfix, prompt, and cmdwin buffers reject adds unconditionally with
+a notify — there's no sensible per-line anchoring in those buftypes.
+
 ### Diff mode
 
 manicule works inside `nvim -d` and `git difftool -t nvimdiff` views.
@@ -174,7 +203,7 @@ require("manicule").setup({
     dir = vim.fn.stdpath("state") .. "/manicule/", -- per-user state dir
     format = "mpack",                              -- "mpack" | "json"
     branch = false,                                -- branch-scope the filename
-    persist_unrooted = false,                      -- placeholder (phase 3: session store)
+    persist_unrooted = true,                       -- route unrooted adds to the session store
     canonicalize_symlinks = true,                  -- resolve symlinks before encoding URIs
     root_markers = { ".git", ".hg", "package.json" },
   },

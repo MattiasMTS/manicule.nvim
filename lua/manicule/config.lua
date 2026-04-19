@@ -15,7 +15,7 @@ local M = {}
 ---@field dir string Directory where per-root store files live.
 ---@field format "mpack"|"json" On-disk format.
 ---@field branch boolean Scope the filename by the current git branch (main/master skipped).
----@field persist_unrooted boolean Placeholder — phase 3 routes unrooted buffers to the session store.
+---@field persist_unrooted boolean When true (default), unrooted file buffers route into the session store.
 ---@field canonicalize_symlinks boolean Resolve symlinks via `fs_realpath` before encoding URIs.
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
 
@@ -30,10 +30,11 @@ M.defaults = {
     -- Annotations should stay visible across branches by default; manicule
     -- stores notes the user wants anchored, not editing state.
     branch = false,
-    -- Placeholder for phase 3: when true + no project root is resolved,
-    -- records will route to a session-scoped store. Phase 1 still
-    -- rejects unrooted adds with a notify — see `init.finalize_add`.
-    persist_unrooted = false,
+    -- When true (default), unrooted file buffers and special buftypes
+    -- (terminal, help, scratch, …) route into the session-scoped
+    -- store. Set to false to reject adds outside a project with a
+    -- notify.
+    persist_unrooted = true,
     -- Resolve symlinks through `fs_realpath` before encoding URIs so a
     -- file accessed via a symlink still matches records saved against
     -- the real path. Disable if you want URIs to reflect the access

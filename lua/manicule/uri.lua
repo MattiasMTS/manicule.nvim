@@ -5,8 +5,8 @@
 -- buffers the URI is canonicalised through `fs_realpath` before encoding
 -- so that opening a file via a symlink still matches records saved
 -- against the real path (and vice versa). Non-file URIs (`term://`,
--- `man://`, …) pass through untouched so scope="session" adapters in
--- phase 3 can key off them without further work.
+-- `man://`, …) pass through untouched so the session-scope store can
+-- key off them directly.
 --
 -- Canonicalisation can be disabled via `store.canonicalize_symlinks =
 -- false` when a user prefers URIs to reflect the access path.
@@ -52,8 +52,8 @@ function M.for_bufnr(bufnr)
   end
   local scheme = scheme_of(name)
   if scheme and scheme ~= "file" then
-    -- Pass-through for term://, man://, etc. Phase 3 will route these
-    -- into the session-scoped store.
+    -- Pass-through for term://, man://, etc. — session-scope records
+    -- key off these directly.
     return name
   end
   local abs = vim.fs.normalize(vim.fn.fnamemodify(name, ":p"))

@@ -16,11 +16,13 @@ the plugin usable end-to-end.
   `/private/...`). Comments anchor to the working-tree URI and `M.add`
   rejects the reference side with a notify. Plain `nvim -d a.lua b.lua`
   with two real paths leaves each buffer as its own identity.
-- **Phase 3 (pending).** A session-scoped store for unrooted buffers
-  and special buftypes (`term://`, scratch, `man://`, …). The
-  `scope = "session"` variant shares this machinery; Phase 1 already
-  rejects unrooted adds with a notify so Phase 3 slots in as a pure
-  addition.
+- **Phase 3 (complete).** A session-scoped store (`session.<format>`
+  under `stdpath('state')/manicule/`) for unrooted buffers and special
+  buftypes (`term://`, scratch, `nofile`, `acwrite`, `help`, …).
+  `persist_unrooted` defaults to `true`. Adds on quickfix, prompt, and
+  cmdwin buffers still reject with a notify. Project and session
+  records merge transparently in `store.all_for_uri` / `M.list`; the
+  caller never branches on scope.
 
 ## 1. Overview
 
@@ -275,7 +277,17 @@ paths through `vim.uv.fs_realpath` before encoding so opening a file
 via a symlink still matches records saved against the real path; set
 `store.canonicalize_symlinks = false` to disable. Non-file URIs
 (`term://`, `man://`, …) pass through untouched so the session-scoped
-store phase 3 introduces can key off the same field.
+store can key off the same field directly.
+
+### File layout
+
+```
+~/.local/state/nvim/manicule/
+  ├─ <escaped-root>[%%<branch>].<format>   ← project-scope stores
+  │   (one per project root)
+  └─ session.<format>                      ← session-scope store
+      (single file, shared across all unrooted / special buffers)
+```
 
 ### On-disk layout
 
@@ -294,13 +306,14 @@ never truncates the existing store. If the on-disk file is corrupt the
 loader `pcall`s the decode, logs a `WARN` notification, and starts from
 an empty record list rather than crashing.
 
-**Unrooted buffers.** If `vim.fs.root` returns nil (e.g. a scratch
-`/tmp/foo.txt`) `store.root()` returns nil and every write no-ops. Users
-who *do* want to persist notes in unrooted contexts can set
-`store.persist_unrooted = true`, which falls back to `vim.fn.getcwd()`
-as the key. The default is off to avoid scattering files under
-`stdpath('state')/manicule/` for every random file opened outside a
-project.
+**Unrooted buffers + special buftypes.** When `vim.fs.root` returns
+nil (e.g. `/tmp/foo.txt` with no git ancestor) or the buffer has a
+special buftype (`terminal`, `help`, `nofile`, `acwrite`, `nowrite`),
+records route to the session store instead. `persist_unrooted`
+defaults to `true`; setting it to `false` makes unrooted *file*
+buffers reject adds with a notify — special buftypes still route to
+session regardless. Quickfix, prompt, and cmdwin buffers reject
+unconditionally.
 
 **Branch scoping (opt-in).** `store.branch = true` appends the current
 git branch to the filename (`<escaped-root>%%<escaped-branch>.mpack`) so

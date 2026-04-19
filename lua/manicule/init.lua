@@ -92,16 +92,17 @@ local function resolve_range(opts)
   return { start = { cur[1] - 1, 0 }, end_ = { cur[1] - 1, 0 } }
 end
 
----Return records that belong to `bufnr` (URI equality) under `root`.
----Resolves the buffer's identity via `manicule.adapter` so the
----reference side of a diff pair returns no records (render skips the
----temp side per the phase-2 "working-tree only" policy) while plain
----project buffers resolve via URI equality as before.
+---Return records that belong to `bufnr` (URI equality). Merges project
+---records from the currently-resolved root AND session records keyed on
+---the same URI, so a session-scope comment on a scratch / terminal /
+---unrooted buffer renders alongside project records. Resolves identity
+---via `manicule.adapter` so the reference side of a diff pair returns
+---no records (render skips the temp side per the phase-2 "working-tree
+---only" policy) while plain buffers resolve via URI equality.
 ---@param bufnr integer
----@param root string|nil
 ---@return table[]
-local function records_for_buffer(bufnr, root)
-  if not root or not vim.api.nvim_buf_is_valid(bufnr) then
+local function records_for_buffer(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
     return {}
   end
   local store = require("manicule.store")
@@ -115,7 +116,7 @@ local function records_for_buffer(bufnr, root)
   if identity.diff_side == "reference" then
     return {}
   end
-  return store.for_uri(root, identity.uri)
+  return store.all_for_uri(identity.uri)
 end
 
 ---Run reconcile for every buffer that already has an entry in `buffer_to_path`
@@ -127,11 +128,14 @@ local function reconcile_buffer(bufnr)
   end
   local store = require("manicule.store")
   local root = store.root()
-  if not root then
-    return
+  if root then
+    store.load(root)
   end
-  store.load(root)
-  local records = records_for_buffer(bufnr, root)
+  -- Always load the session store too — a buffer may own records in
+  -- either scope (or both, if the user opened the same URI in two
+  -- contexts), so we cannot short-circuit on "no root".
+  store.session_load()
+  local records = records_for_buffer(bufnr)
   require("manicule.ui.render").reconcile(bufnr, records)
 
   -- For each attached record whose extmark came back invalid, emit a
@@ -155,15 +159,10 @@ end
 ---that may span multiple buffers (e.g. `delete` strips a record that
 ---could be visible in several windows showing different files).
 local function reconcile_all_loaded()
-  local store = require("manicule.store")
-  local root = store.root()
-  if not root then
-    return
-  end
   local render = require("manicule.ui.render")
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
-      local records = records_for_buffer(bufnr, root)
+      local records = records_for_buffer(bufnr)
       render.reconcile(bufnr, records)
     end
   end
@@ -180,12 +179,7 @@ local function refresh_viewport(bufnr)
   if (cfg.ui or {}).sticky then
     return
   end
-  local store = require("manicule.store")
-  local root = store.root()
-  if not root then
-    return
-  end
-  local records = records_for_buffer(bufnr, root)
+  local records = records_for_buffer(bufnr)
   require("manicule.ui.render").update_viewport_popups(bufnr, records)
 end
 
@@ -250,27 +244,46 @@ local function on_bufname_changed(bufnr)
   pre_rename_uris[bufnr] = nil
   local store = require("manicule.store")
   local uri_mod = require("manicule.uri")
-  local root = store.root()
-  if not root then
-    return
-  end
   local new_uri = uri_mod.for_bufnr(bufnr)
   if not new_uri or not old_uri or old_uri == new_uri then
     return
   end
-  local all = store.all(root)
+  -- Walk both the current project's records and the session store.
+  -- A `:saveas` on a session-scope scratch buffer keeps the record's
+  -- `scope = "session"` but rewrites the URI — users can
+  -- `:ManiculeDelete` and re-add in project scope if they want the
+  -- record to move along with the file. This quirk is documented.
   local ids = {}
-  for _, record in ipairs(all) do
+  local touched_project = false
+  local root = store.root()
+  if root then
+    for _, record in ipairs(store.all(root)) do
+      if record.uri == old_uri then
+        record.uri = new_uri
+        table.insert(ids, record.id)
+        touched_project = true
+      end
+    end
+    if touched_project then
+      store.mark_dirty(root)
+      store.save(root)
+    end
+  end
+  local touched_session = false
+  for _, record in ipairs(store.session_all()) do
     if record.uri == old_uri then
       record.uri = new_uri
       table.insert(ids, record.id)
+      touched_session = true
     end
+  end
+  if touched_session then
+    store.session_mark_dirty()
+    store.session_save()
   end
   if #ids == 0 then
     return
   end
-  store.mark_dirty(root)
-  store.save(root)
   -- Re-reconcile the buffer so the render layer (which keyed handles
   -- off the old URI via reconcile_buffer) rebuilds against the new
   -- URI. Without this, BufWinEnter's reconcile during the saveas
@@ -350,6 +363,10 @@ function M.setup(opts)
       if root then
         store.save(root)
       end
+      -- A write to a file that owns session-scope records (e.g. an
+      -- unrooted scratch that the user `:w <path>`ed) should flush the
+      -- session store too. Cheap no-op when nothing is dirty.
+      store.session_save()
     end,
   })
 
@@ -480,19 +497,12 @@ local function finalize_add(body, bufnr, range)
     resolved = false,
     meta = {},
   }
-  -- Phase 2 only writes project-scope records; the session store
-  -- lands in phase 3. Guard so a stray session identity (e.g. an
-  -- unrooted buffer with persist_unrooted flipped on) is surfaced
-  -- rather than silently dropped.
-  if identity.scope ~= "project" or not identity.project_root then
-    vim.notify(
-      "manicule: session-scope records are handled in phase 3 — this buffer has no project root",
-      vim.log.levels.WARN
-    )
-    return
+  store.put_record(record)
+  if record.scope == "session" then
+    store.session_save()
+  else
+    store.save(identity.project_root)
   end
-  store.put(identity.project_root, record)
-  store.save(identity.project_root)
   -- Reconcile rebuilds extmarks + popups idempotently; no need for a
   -- per-mutation attach/detach API.
   reconcile_buffer(bufnr)
@@ -517,23 +527,50 @@ function M.add(opts)
   end)
 end
 
----Find the (root, record) pair for an id.
+---Find a record by id across both project + session scopes.
+---Returns the record and a closure that persists any mutation back
+---through the right store path.
 ---@param id string
----@return string|nil root, table|nil record
+---@return table? record, (fun())? save, (fun())? remove
 local function find(id)
   local store = require("manicule.store")
   local root = store.root()
-  if not root then
-    return nil, nil
+  if root then
+    local record = store.get(root, id)
+    if record then
+      local function save()
+        store.put(root, record)
+        store.save(root)
+      end
+      local function remove()
+        store.remove(root, id)
+        store.save(root)
+      end
+      return record, save, remove
+    end
   end
-  return root, store.get(root, id)
+  -- Fall through to the session store.
+  for _, r in ipairs(store.session_all()) do
+    if r.id == id then
+      local function save()
+        store.session_put(r)
+        store.session_save()
+      end
+      local function remove()
+        store.session_remove(id)
+        store.session_save()
+      end
+      return r, save, remove
+    end
+  end
+  return nil, nil, nil
 end
 
 ---Edit an existing comment by id.
 ---@param id string
 function M.edit(id)
-  local root, record = find(id)
-  if not root or not record then
+  local record, save = find(id)
+  if not record or not save then
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
   end
@@ -543,8 +580,7 @@ function M.edit(id)
     end
     record.body = body
     record.updated_at = os.time()
-    require("manicule.store").put(root, record)
-    require("manicule.store").save(root)
+    save()
     -- Rebuild popups for every buffer that currently renders this record.
     reconcile_all_loaded()
     for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
@@ -559,13 +595,12 @@ end
 ---Delete a comment by id.
 ---@param id string
 function M.delete(id)
-  local root, record = find(id)
-  if not root or not record then
+  local record, _, remove = find(id)
+  if not record or not remove then
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
   end
-  require("manicule.store").remove(root, id)
-  require("manicule.store").save(root)
+  remove()
   reconcile_all_loaded()
   emit("ManiculeDeleted", { id = id, record = record })
 end
@@ -573,15 +608,14 @@ end
 ---Mark a comment as resolved.
 ---@param id string
 function M.resolve(id)
-  local root, record = find(id)
-  if not root or not record then
+  local record, save = find(id)
+  if not record or not save then
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
   end
   record.resolved = true
   record.updated_at = os.time()
-  require("manicule.store").put(root, record)
-  require("manicule.store").save(root)
+  save()
   emit("ManiculeResolved", record)
 end
 
@@ -627,13 +661,21 @@ function M.list(filter)
   local anchor = require("manicule.anchor")
   local render = require("manicule.ui.render")
   local uri_mod = require("manicule.uri")
-  local root = store.root()
-  if not root then
-    return {}
-  end
   local bufnr = vim.api.nvim_get_current_buf()
   local mark_ids = render.mark_ids_for_buffer(bufnr)
-  local all = store.all(root)
+  -- Walk both stores. The picker/quickfix is per-run-short-lived; the
+  -- filter winnows and consumers can scope further. Keeps the scope
+  -- transparent — no caller branches on `record.scope`.
+  local all = {}
+  local root = store.root()
+  if root then
+    for _, r in ipairs(store.all(root)) do
+      table.insert(all, r)
+    end
+  end
+  for _, r in ipairs(store.session_all()) do
+    table.insert(all, r)
+  end
   local results = vim
     .iter(all)
     :filter(function(r)
@@ -644,7 +686,7 @@ function M.list(filter)
         -- Case-sensitive suffix match. Prefer resolving URIs back to a
         -- filesystem path so callers can query with the natural
         -- project-relative suffix (`src/foo.lua`); fall back to the raw
-        -- URI for non-file schemes so phase 3 adapters still match.
+        -- URI for non-file schemes so session-scope records still match.
         local candidate = uri_mod.to_path(r.uri) or tostring(r.uri or "")
         local suffix = filter.path_suffix
         if #candidate < #suffix or candidate:sub(-#suffix) ~= suffix then

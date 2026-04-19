@@ -151,6 +151,74 @@ describe("manicule.adapter temp detection", function()
     pcall(vim.fn.delete, temp_dir, "rf")
   end)
 
+  it("identify returns session scope on an unrooted file buffer", function()
+    -- Plain /tmp file with no project marker. persist_unrooted defaults
+    -- to true in phase 3 so the identity is writable session.
+    local tmpfile = "/tmp/manicule-unrooted-test-" .. tostring(os.time()) .. ".txt"
+    vim.fn.writefile({ "hi" }, tmpfile)
+    vim.cmd.edit(tmpfile)
+    local bufnr = vim.api.nvim_get_current_buf()
+    local id = adapter.identify(bufnr)
+    assert.is_truthy(id)
+    assert.are.equal("session", id.scope)
+    assert.is_true(id.is_writable)
+    assert.is_nil(id.project_root)
+    pcall(vim.fn.delete, tmpfile)
+  end)
+
+  it("identify returns session scope on a terminal buffer", function()
+    -- Spawn a short-lived terminal (on macOS /bin/true exits fast).
+    vim.cmd("enew")
+    vim.fn.termopen({ "/bin/sh", "-c", "sleep 1" })
+    local bufnr = vim.api.nvim_get_current_buf()
+    local id = adapter.identify(bufnr)
+    assert.is_truthy(id)
+    assert.are.equal("session", id.scope)
+    assert.is_true(id.is_writable)
+    assert.is_nil(id.diff_side)
+    -- URI is a term:// URL (or similar non-file scheme).
+    assert.is_false(uri_mod.is_file(id.uri))
+  end)
+
+  it("identify returns session scope on a help buffer", function()
+    pcall(vim.cmd, "help")
+    local bufnr = vim.api.nvim_get_current_buf()
+    if vim.bo[bufnr].buftype ~= "help" then
+      pending("help not available in headless mode")
+      return
+    end
+    local id = adapter.identify(bufnr)
+    assert.is_truthy(id)
+    assert.are.equal("session", id.scope)
+    assert.is_true(id.is_writable)
+  end)
+
+  it("identify rejects a quickfix buffer", function()
+    vim.fn.setqflist({}, " ", { title = "manicule-adapter-test", items = {} })
+    vim.cmd.copen()
+    local bufnr = vim.api.nvim_get_current_buf()
+    -- Only exercise when the copen actually produced a quickfix buf.
+    if vim.bo[bufnr].buftype ~= "quickfix" then
+      pending("copen did not produce a quickfix buftype")
+      return
+    end
+    local id = adapter.identify(bufnr)
+    assert.is_truthy(id)
+    assert.is_false(id.is_writable)
+    assert.is_truthy(id.reject_reason)
+  end)
+
+  it("identify rejects a prompt buffer", function()
+    vim.cmd("enew")
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_name(bufnr, "manicule://prompt-test")
+    vim.bo[bufnr].buftype = "prompt"
+    local id = adapter.identify(bufnr)
+    assert.is_truthy(id)
+    assert.is_false(id.is_writable)
+    assert.is_truthy(id.reject_reason)
+  end)
+
   it("identify in plain nvim -d treats each buffer as its own identity", function()
     -- Both sides are real paths → no pair → each buffer returns a
     -- writable project identity.

@@ -40,10 +40,12 @@ Full default configuration (every key is optional):
         -- notes are scoped per-branch. `main`/`master` collapse to the
         -- unsuffixed filename.
         branch = false,
-        -- Placeholder for phase 3 (session-scoped store). Phase 1
-        -- rejects unrooted adds with a notify; this key is kept so
-        -- phase 3 is a pure addition.
-        persist_unrooted = false,
+        -- When true (default), unrooted file buffers and special
+        -- buftypes (terminal, help, scratch, …) route into the
+        -- session-scoped store. Set to false to reject unrooted file
+        -- adds with a notify; special buftypes still route to
+        -- session regardless.
+        persist_unrooted = true,
         -- Resolve symlinks through `fs_realpath` before encoding
         -- URIs so a file accessed via a symlink still matches records
         -- saved against the real path. Disable if you want URIs to
@@ -83,10 +85,34 @@ Plain `nvim -d a.lua b.lua` with two real paths (no temp) leaves each
 buffer as its own identity: each side owns its own comments and each
 accepts add.
 
+                                                              *manicule-scopes*
+
+Records persist in one of two scopes. The caller never branches on
+scope — `:ManiculeAdd`, `:ManiculeList`, and the render layer all
+dispatch through the store automatically.
+
+PROJECT SCOPE
+  Used when `vim.fs.root(0, store.root_markers)` resolves to a
+  directory. Records live in `<store.dir>/<escaped-root>.<format>`
+  (one file per project). Carry a `project_root` field.
+
+SESSION SCOPE
+  Used for unrooted file buffers (when `store.persist_unrooted ==
+  true`) and special buftypes (`terminal`, `help`, `nofile`,
+  `acwrite`, `nowrite`). Records live in a single
+  `<store.dir>/session.<format>` keyed purely by URI.
+
+Quickfix, prompt, and cmdwin buffers reject adds unconditionally.
+
+If you `:saveas` a session-scope record into a project directory the
+scope stays `session` with the new URI — delete and re-add to move
+it into project scope.
+
                                                              *manicule-storage*
 
 Store files live at >
-    <store.dir>/<escaped-project-root>[%%<escaped-branch>].<format>
+    <store.dir>/<escaped-project-root>[%%<escaped-branch>].<format>   (project)
+    <store.dir>/session.<format>                                      (session)
 <
 where `[\\/:]+` in each path segment is replaced with `%%`. Run
 `:echo stdpath('state').'/manicule/'` to find the default directory.

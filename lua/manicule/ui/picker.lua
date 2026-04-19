@@ -126,7 +126,7 @@ end
 ---Resolve a record's URI to a display-ready path. Prefers the
 ---project-relative form when `project_root` is set and the URI maps
 ---to a real filesystem path; falls back to the absolute path or the
----raw URI string for non-file schemes (forward-compat for phase 3).
+---raw URI string for non-file schemes (session-scope `term://` etc.).
 ---@param record table
 ---@return string
 local function display_path(record)

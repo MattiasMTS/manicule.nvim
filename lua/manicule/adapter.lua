@@ -194,8 +194,8 @@ local function in_cmdwin()
 end
 
 ---Resolve the identity for a buffer. Returns nil only when the buffer
----cannot be identified at all (no bufname, unknown scheme we don't yet
----handle).
+---cannot be identified at all (no bufname AND no special buftype that
+---we can describe).
 ---@param bufnr integer
 ---@return manicule.Identity?, string? err
 function M.identify(bufnr)
@@ -207,7 +207,23 @@ function M.identify(bufnr)
   local store = require("manicule.store")
   local config = require("manicule.config")
 
+  local buftype = vim.bo[bufnr].buftype
   local uri = uri_mod.for_bufnr(bufnr)
+
+  -- Reject-only buftypes: we don't need a URI to tell the user these
+  -- buffers are off-limits. Quickfix and prompt buffers typically
+  -- carry no bufname, so the URI fallthrough below would drop them.
+  if buftype == "quickfix" then
+    return {
+      uri = uri or "",
+      scope = "session",
+      project_root = nil,
+      is_writable = false,
+      diff_side = nil,
+      reject_reason = "quickfix buffers don't accept comments",
+    }
+  end
+
   if not uri then
     return nil, "buffer has no bufname"
   end
@@ -224,8 +240,6 @@ function M.identify(bufnr)
       reject_reason = "command-line window doesn't accept comments",
     }
   end
-
-  local buftype = vim.bo[bufnr].buftype
 
   -- Diff-pair handling: only meaningful for regular file buffers. A
   -- terminal with &diff on (which shouldn't exist) has no working/ref
