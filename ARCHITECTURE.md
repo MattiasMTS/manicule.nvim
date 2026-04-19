@@ -10,8 +10,12 @@ the plugin usable end-to-end.
   instead of `(project_root, project-relative-path)`. `scope` is always
   `"project"`; `BufFilePost` rewrites URIs when files are renamed via
   `:saveas` / `:file` and fires a `User ManiculeRenamed` autocmd.
-- **Phase 2 (pending).** A diff-mode adapter that recognises diffview /
-  Git diff pairs and mirrors comments across the pre/post sides.
+- **Phase 2 (complete).** A diff-mode adapter (`lua/manicule/adapter.lua`)
+  recognises `nvim -d` / `git difftool -t nvimdiff` pairs by matching
+  buffer paths against a temp-prefix list (`/tmp`, `/var/folders/...`,
+  `/private/...`). Comments anchor to the working-tree URI and `M.add`
+  rejects the reference side with a notify. Plain `nvim -d a.lua b.lua`
+  with two real paths leaves each buffer as its own identity.
 - **Phase 3 (pending).** A session-scoped store for unrooted buffers
   and special buftypes (`term://`, scratch, `man://`, …). The
   `scope = "session"` variant shares this machinery; Phase 1 already
@@ -54,17 +58,41 @@ knob and defaults to viewport-driven.
    │ anchor.lua │          │  store.lua │          │   ui.lua    │
    │ (extmarks) │          │ (mpack I/O)│          │ (facade)    │
    └────────────┘          └────────────┘          └──────┬──────┘
-                                 │                        │
-                                 ▼                        ▼
-                          ┌──────────────┐       ┌────────────────┐
-                          │  sinks/init  │       │ ui/ submodules │
-                          │  (registry)  │       │  editor.lua    │
-                          │      │       │       │  render.lua    │
-                          │      ▼       │       │  quickfix.lua  │
-                          │ clipboard.lua│       └────────────────┘
+                                 ▲                        │
+                                 │                        ▼
+                          ┌──────┴───────┐       ┌────────────────┐
+                          │ adapter.lua  │       │ ui/ submodules │
+                          │  (identity)  │       │  editor.lua    │
+                          └──────────────┘       │  render.lua    │
+                                 ▲               │  quickfix.lua  │
+                                 │               └────────────────┘
+                          ┌──────┴───────┐
+                          │  sinks/init  │
+                          │  (registry)  │
+                          │      │       │
+                          │      ▼       │
+                          │ clipboard.lua│
                           └──────────────┘
 
                   handlers.lua  ← STUB (v2 render handlers)
+```
+
+Identity flow (phase 2):
+
+```
+  bufnr ──► adapter.identify()
+              │
+              ├─ uri_mod.for_bufnr(bufnr)
+              ├─ in_cmdwin()?        → reject (session, not writable)
+              ├─ buftype == ""?      → resolve_diff_pair(bufnr)
+              │     │
+              │     ├─ reference side: return working URI,
+              │     │                  is_writable=false, diff_side="reference"
+              │     └─ working side / no pair: continue
+              │
+              ├─ store.root() matches? → scope="project", writable
+              └─ fall through           → scope="session"
+                                          (writable iff buftype policy allows)
 ```
 
 `init.lua` lazy-requires everything it needs; users with a `cmd = {...}`

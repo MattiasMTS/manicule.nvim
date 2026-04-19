@@ -145,6 +145,25 @@ vim.keymap.set("n",          "<leader>ce", "<Plug>(manicule-edit)")
 vim.keymap.set("n",          "<leader>cd", "<Plug>(manicule-delete)")
 ```
 
+### Diff mode
+
+manicule works inside `nvim -d` and `git difftool -t nvimdiff` views.
+When two diff-mode windows live in the same tab, the reference side is
+detected by its path: a buffer under `/tmp/`, `/var/folders/…/T/`, or
+the `/private/...` aliases (the typical location for git's temporary
+blob extractions) is treated as the *reference* view of the other
+buffer, which is assumed to be the working-tree file. Plain `nvim -d
+a.lua b.lua` with two real paths and no temp file leaves the
+heuristic ambiguous — each side is treated as its own identity and
+each allows adds against its own URI.
+
+Comments always anchor to the working-tree URI. Attempting
+`:ManiculeAdd` from the reference side produces a WARN notify directing
+you to the working-tree buffer; edit/delete still work on either side
+because they route by record id rather than identity. The reference
+buffer shows no visuals by default (the working-tree file owns the
+popups); switch to the working-tree window to interact with comments.
+
 ## Configuration
 
 All keys are optional — the snippet below is the full default set.

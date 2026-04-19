@@ -65,6 +65,24 @@ Full default configuration (every key is optional):
     })
 <
 
+                                                           *manicule-diff-mode*
+
+manicule works inside `nvim -d` and `git difftool -t nvimdiff` views.
+The plugin walks the current tabpage's diff windows and classifies each
+buffer by path prefix: `/tmp`, `/var/folders`, `/private/tmp`, and
+`/private/var/folders` all mark the *reference* side (typical for git's
+temporary blob extractions). The non-temp side is treated as the
+working tree, and comments anchor to its URI.
+
+`:ManiculeAdd` from the reference side is rejected with a WARN notify
+directing the user back to the working-tree buffer. Edits and deletes
+route by record id and work from either side. The reference buffer
+renders no visuals — switch to the working-tree window to see popups.
+
+Plain `nvim -d a.lua b.lua` with two real paths (no temp) leaves each
+buffer as its own identity: each side owns its own comments and each
+accepts add.
+
                                                              *manicule-storage*
 
 Store files live at >

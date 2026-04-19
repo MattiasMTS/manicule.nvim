@@ -93,6 +93,10 @@ local function resolve_range(opts)
 end
 
 ---Return records that belong to `bufnr` (URI equality) under `root`.
+---Resolves the buffer's identity via `manicule.adapter` so the
+---reference side of a diff pair returns no records (render skips the
+---temp side per the phase-2 "working-tree only" policy) while plain
+---project buffers resolve via URI equality as before.
 ---@param bufnr integer
 ---@param root string|nil
 ---@return table[]
@@ -101,11 +105,17 @@ local function records_for_buffer(bufnr, root)
     return {}
   end
   local store = require("manicule.store")
-  local uri = require("manicule.uri").for_bufnr(bufnr)
-  if not uri then
+  local adapter = require("manicule.adapter")
+  local identity = adapter.identify(bufnr)
+  if not identity or not identity.uri then
     return {}
   end
-  return store.for_uri(root, uri)
+  -- Phase 2 policy: do not render on the reference side of a diff pair.
+  -- The reject notify on `M.add` tells the user to switch buffers.
+  if identity.diff_side == "reference" then
+    return {}
+  end
+  return store.for_uri(root, identity.uri)
 end
 
 ---Run reconcile for every buffer that already has an entry in `buffer_to_path`
@@ -444,36 +454,24 @@ local function finalize_add(body, bufnr, range)
   local store = require("manicule.store")
   local id_mod = require("manicule.id")
   local ui = require("manicule.ui")
-  local uri_mod = require("manicule.uri")
+  local adapter = require("manicule.adapter")
 
-  local uri = uri_mod.for_bufnr(bufnr)
-  if not uri then
-    -- Buffer has no name (scratch, anonymous). Phase 3 will route these
-    -- into the session-scoped store; for now, refuse rather than
-    -- persist a URI-less record.
-    vim.notify("manicule: buffer has no name — comment not saved.", vim.log.levels.WARN)
+  local identity, err = adapter.identify(bufnr)
+  if not identity then
+    vim.notify(("manicule: %s"):format(err or "buffer has no identity"), vim.log.levels.WARN)
     return
   end
-
-  local root = store.root()
-  if not root then
-    -- No project root resolved and the user hasn't opted in to
-    -- `store.persist_unrooted`. Tell them instead of silently dropping
-    -- the comment on the floor.
-    -- TODO(manicule): phase 3 — route unrooted to session store
-    vim.notify(
-      "manicule: buffer is not in a project (scope='session' will handle this in phase 3)",
-      vim.log.levels.WARN
-    )
+  if not identity.is_writable then
+    vim.notify(("manicule: %s"):format(identity.reject_reason or "buffer is not writable"), vim.log.levels.WARN)
     return
   end
 
   local now = os.time()
   local record = {
     id = id_mod.new(),
-    uri = uri,
-    scope = "project",
-    project_root = root,
+    uri = identity.uri,
+    scope = identity.scope,
+    project_root = identity.project_root,
     range = range,
     body = body,
     author = ui.git_email(),
@@ -482,8 +480,19 @@ local function finalize_add(body, bufnr, range)
     resolved = false,
     meta = {},
   }
-  store.put(root, record)
-  store.save(root)
+  -- Phase 2 only writes project-scope records; the session store
+  -- lands in phase 3. Guard so a stray session identity (e.g. an
+  -- unrooted buffer with persist_unrooted flipped on) is surfaced
+  -- rather than silently dropped.
+  if identity.scope ~= "project" or not identity.project_root then
+    vim.notify(
+      "manicule: session-scope records are handled in phase 3 — this buffer has no project root",
+      vim.log.levels.WARN
+    )
+    return
+  end
+  store.put(identity.project_root, record)
+  store.save(identity.project_root)
   -- Reconcile rebuilds extmarks + popups idempotently; no need for a
   -- per-mutation attach/detach API.
   reconcile_buffer(bufnr)
