@@ -37,43 +37,113 @@ local M = {}
 ---@field diff_side "working"|"reference"|nil
 ---@field reject_reason string?
 
----Prefixes that identify a "reference" side — a temp file produced by
----git difftool, a stash-blob extraction, etc. macOS symlinks `/tmp` and
----`/var/folders/...` under `/private`, so both variants are listed.
-local TEMP_PREFIXES = {
-  "/tmp/",
-  "/private/tmp/",
-  "/var/folders/",
-  "/private/var/folders/",
-}
-
----@param path string
----@return boolean
+---Temp-path detection lives in `manicule.uri` so the store's load-time
+---cleanup, the reverse-map in this module, and the diff-pair heuristic
+---all share a single list. On macOS `/tmp` and `/var/folders/...`
+---symlink under `/private`, and the nvim-runtime prefix
+---(`stdpath('run')`) lives under `/var/folders/...` as well — temp
+---detection collapses all of these.
 local function is_temp_path(path)
-  if not path or path == "" then
-    return false
+  return require("manicule.uri").is_temp_path(path)
+end
+
+---Normalize a buffer's name to an absolute filesystem path (no URI
+---decoding). Returns nil when the buffer has no name. Thin delegate to
+---`manicule.uri.abs_for_bufnr` so adapter + reverse-map + store cleanup
+---all see identical normalisation.
+---@param bufnr integer
+---@return string?
+local function bufname_abs(bufnr)
+  return require("manicule.uri").abs_for_bufnr(bufnr)
+end
+
+---Attempt to reverse-map a buffer path that looks like an
+---nvim-runtime staged copy back to a real, on-disk file inside the
+---current project / cwd / HOME.
+---
+---The typical source is a plugin (e.g. the user's `:DiffTool`) that
+---writes a staged copy via `vim.fn.tempname()` under
+---`<stdpath('run')>/<N>/<project-relative-path>`, which normalises
+---to `.../nvim.<user>/<run-id>/<N>/<project-relative-path>` on disk.
+---On next launch the same file resolves to a different URI under a new
+---`<run-id>`, so persisting the staged URI leaves the record
+---permanently unanchored. Locating the `/nvim.<user>/<run-id>/<N>/`
+---segment in the path, peeling it, and resolving the remainder against
+---the real project reverses that mapping.
+---
+---Returns the canonicalised URI of the single on-disk candidate, or
+---nil + a human-readable reason when the map is ambiguous, missing, or
+---the path had no useful suffix. Caller is expected to have already
+---confirmed the shape via `uri.is_nvim_runtime_staged_path`.
+---@param abs string absolute, `vim.fs.normalize`d path
+---@return string? uri, string? err
+local function reverse_map_temp_path(abs)
+  local config = require("manicule.config")
+  local uv = vim.uv or vim.loop
+
+  -- Locate the `/nvim.<user>/<run-id>/<N>/<suffix>` segment anywhere
+  -- in the path. `string.match` returns the captured suffix directly.
+  -- Allowed user, run-id, and N are all `[^/]+` — we don't care about
+  -- their content, only that three full segments sit between us and
+  -- the project-relative tail.
+  local suffix = abs:match("/nvim%.[^/]+/[^/]+/[^/]+/(.+)$")
+  if not suffix or suffix == "" or not suffix:find("/", 1, true) then
+    return nil, "staged path has no project-relative suffix"
   end
-  for _, prefix in ipairs(TEMP_PREFIXES) do
-    if path:sub(1, #prefix) == prefix then
+
+  local candidates = {}
+  local seen = {}
+  local function push(base)
+    if not base or base == "" then
+      return
+    end
+    local candidate = vim.fs.normalize(base .. "/" .. suffix)
+    if seen[candidate] then
+      return
+    end
+    seen[candidate] = true
+    local stat = uv.fs_stat(candidate)
+    if stat and stat.type == "file" then
+      table.insert(candidates, candidate)
+    end
+  end
+
+  local cfg = (config.current or {}).store or {}
+  push(vim.fs.root(0, cfg.root_markers or { ".git", ".hg", "package.json" }))
+  push(vim.fn.getcwd())
+  -- HOME fallback: only engage when the suffix looks like a dotfile /
+  -- user-config path (e.g. `.config/foo/bar`). Without this guard any
+  -- staged file with a common suffix (`README.md`, `Makefile`, …) would
+  -- accidentally resolve under `$HOME` and mislabel a project file as
+  -- personal.
+  if suffix:match("^%.") then
+    push(vim.env.HOME)
+  end
+
+  if #candidates == 0 then
+    return nil, ("buffer is a nvim-runtime-staged path (%s); could not map to a real file"):format(abs)
+  end
+  if #candidates > 1 then
+    return nil, "ambiguous reverse-map; open the real file directly"
+  end
+
+  local resolved = candidates[1]
+  local real = uv.fs_realpath(resolved)
+  return vim.uri_from_fname(real or resolved)
+end
+
+---Is `bufnr` displayed in a window with `&diff` set? Reverse-mapping
+---is off-limits for diff views because the diff-pair logic owns those
+---temp paths and needs the staged URI to find the sibling buffer.
+---@param bufnr integer
+---@return boolean
+local function bufnr_in_diff_window(bufnr)
+  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr and vim.wo[winid].diff then
       return true
     end
   end
   return false
-end
-
----Normalize a buffer's name to an absolute filesystem path (no URI
----decoding). Returns nil when the buffer has no name.
----@param bufnr integer
----@return string?
-local function bufname_abs(bufnr)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    return nil
-  end
-  local name = vim.api.nvim_buf_get_name(bufnr)
-  if not name or name == "" then
-    return nil
-  end
-  return vim.fs.normalize(vim.fn.fnamemodify(name, ":p"))
 end
 
 ---Detect whether `bufnr` is the reference side of a git-difftool pair.
@@ -208,20 +278,51 @@ function M.identify(bufnr)
   local config = require("manicule.config")
 
   local buftype = vim.bo[bufnr].buftype
-  local uri = uri_mod.for_bufnr(bufnr)
 
   -- Reject-only buftypes: we don't need a URI to tell the user these
   -- buffers are off-limits. Quickfix and prompt buffers typically
   -- carry no bufname, so the URI fallthrough below would drop them.
   if buftype == "quickfix" then
     return {
-      uri = uri or "",
+      uri = uri_mod.for_bufnr(bufnr) or "",
       scope = "session",
       project_root = nil,
       is_writable = false,
       diff_side = nil,
       reject_reason = "quickfix buffers don't accept comments",
     }
+  end
+
+  -- Reverse-map staged buffers BEFORE any other path resolution. The
+  -- source of these is typically a user command that writes a staged
+  -- copy (e.g. `:DiffTool`'s `vim.fn.tempname()` pairs) under
+  -- `stdpath('run')` / `/var/folders/...`. Diff-mode buffers skip this
+  -- branch — the diff-pair detection below owns the staged-URI case
+  -- for them and needs the raw path to pair sibling buffers.
+  local abs = bufname_abs(bufnr)
+  if not abs then
+    return nil, "buffer has no bufname"
+  end
+  local uri
+  local reverse_mapped_path ---@type string? absolute path we mapped to (nil when not reverse-mapped)
+  -- Only reverse-map paths that look like an nvim-runtime staged copy
+  -- (`.../nvim.<user>/<run-id>/<N>/...`): these are known to be
+  -- per-session-ephemeral (the `<run-id>` rotates every launch) so a
+  -- persisted URI can never re-anchor. A plain `/tmp/foo.txt` the user
+  -- opened as a scratch is *not* ephemeral from manicule's perspective
+  -- — the URI is stable across launches — so it still flows through
+  -- the normal session-scope path. Diff-mode buffers also skip this
+  -- branch; the diff-pair detection below owns them and needs the raw
+  -- staged path to pair sibling buffers.
+  if buftype == "" and uri_mod.is_nvim_runtime_staged_path(abs) and not bufnr_in_diff_window(bufnr) then
+    local mapped, map_err = reverse_map_temp_path(abs)
+    if not mapped then
+      return nil, map_err
+    end
+    uri = mapped
+    reverse_mapped_path = uri_mod.to_path(mapped)
+  else
+    uri = uri_mod.for_bufnr(bufnr)
   end
 
   if not uri then
@@ -283,7 +384,18 @@ function M.identify(bufnr)
   end
 
   if uri_mod.is_file(uri) and buftype == "" then
-    local root = store.root()
+    -- When we reverse-mapped a staged buffer, resolve the project root
+    -- from the *mapped* path rather than the current buffer: the
+    -- staged path lives under `/var/folders/...`, whose parents never
+    -- contain a `.git` marker, so `store.root()` (which runs against
+    -- the current buffer) would always return nil and route the
+    -- record into session scope instead of the real project store.
+    local root
+    if reverse_mapped_path then
+      root = vim.fs.root(reverse_mapped_path, config.current.store.root_markers)
+    else
+      root = store.root()
+    end
     if root then
       return {
         uri = uri,

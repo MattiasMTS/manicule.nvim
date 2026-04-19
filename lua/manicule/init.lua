@@ -497,6 +497,24 @@ local function finalize_add(body, bufnr, range)
     resolved = false,
     meta = {},
   }
+  -- Invariant canary: re-run `identify` and refuse to persist if it
+  -- doesn't reproduce the URI we built the record around. Guards
+  -- against regressions where the adapter's build-time and reload-time
+  -- URI diverge (staged buffers, future reverse-map bugs) — without
+  -- this check, a record with a non-reproducible URI would persist and
+  -- never re-anchor.
+  local verify, verr = adapter.identify(bufnr)
+  if not verify or verify.uri ~= record.uri then
+    vim.notify(
+      ("manicule: URI invariant violated (expected %s, got %s: %s)"):format(
+        record.uri,
+        verify and verify.uri or "nil",
+        verr or "no err"
+      ),
+      vim.log.levels.ERROR
+    )
+    return
+  end
   store.put_record(record)
   if record.scope == "session" then
     store.session_save()

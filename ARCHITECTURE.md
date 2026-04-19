@@ -315,6 +315,48 @@ buffers reject adds with a notify — special buftypes still route to
 session regardless. Quickfix, prompt, and cmdwin buffers reject
 unconditionally.
 
+**Runtime-staged buffers.** Plugins (a `:DiffTool` command, a stash-
+blob viewer, a codediff review buffer, …) sometimes write content to
+`<stdpath('run')>/<N>/<project-relative-path>` via `vim.fn.tempname()`
+so the buffer has a unique file-backed identity. That directory's
+`<run-id>` rotates every nvim launch, so the URI is useless the moment
+the user restarts — the record can never re-anchor. `adapter.identify`
+detects the path shape (anything containing
+`/nvim.<user>/<run-id>/<N>/<suffix>`) before project resolution and
+*reverse-maps* it:
+
+1. Peel the `/nvim.<user>/<run-id>/<N>/` triplet from the path.
+2. Resolve the remaining `<suffix>` against, in order:
+   - `vim.fs.root(0, store.root_markers)` — the current project root.
+   - `vim.fn.getcwd()`.
+   - `$HOME`, only when the suffix starts with `.` (dotfile/config).
+3. Zero candidates that exist on disk → reject with
+   `buffer is a nvim-runtime-staged path (<abs>); could not map to a
+   real file`. Multiple candidates → reject with `ambiguous reverse-map;
+   open the real file directly`. Exactly one → use
+   `vim.uri_from_fname(fs_realpath(candidate))` as the identity URI.
+
+Diff-mode buffers skip reverse-mapping — the diff-pair logic owns them
+and needs the staged path to pair sibling buffers. The root for
+reverse-mapped records is resolved from the mapped path, not the
+staged buffer, so they land in the correct project store.
+
+**Load-time cleanup.** `store.load(root)` and `store.session_load()`
+drop any record whose `file://` URI decodes to a path matching the
+`/nvim.<user>/<run-id>/<N>/<suffix>` shape — i.e. a URI a prior session
+persisted under a now-dead `<run-id>`. The drop fires a WARN notify
+(`manicule: dropped N invalid record(s) with temp-path URIs from
+<path>`) and flips the cache-dirty flag so the next save rewrites the
+file without the bad entries. Stable temp paths like `/tmp/foo.txt`
+are *not* dropped.
+
+**`M.add` invariant canary.** After building a record, `M.add` re-runs
+`adapter.identify(bufnr)` and refuses to persist when the returned URI
+doesn't match the record's URI. Any divergence triggers an ERROR
+notify (`manicule: URI invariant violated (expected <a>, got <b>:
+<err>)`) and leaves the store untouched. Catches future regressions
+where build-time and reload-time URIs drift apart.
+
 **Branch scoping (opt-in).** `store.branch = true` appends the current
 git branch to the filename (`<escaped-root>%%<escaped-branch>.mpack`) so
 notes are scoped per-branch. `main` and `master` collapse back to the

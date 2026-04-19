@@ -15,6 +15,105 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 
+---Normalised absolute path to Neovim's per-session runtime dir
+---(`stdpath('run')`). Buffers produced by plugins that stage content
+---there — e.g. the user's `:DiffTool` command that writes left/right
+---sides via `vim.fn.tempname()` — resolve to paths under
+---`<TMPDIR>/nvim.<user>/<run-id>/<N>/...`, which change every launch.
+---Persisting such a URI means the record can never re-anchor on
+---reload, so we treat it as ephemeral.
+local RUN_DIR_PREFIX = vim.fs.normalize(vim.fn.stdpath("run")) .. "/"
+
+---Path prefixes we consider ephemeral. Order matters: `RUN_DIR_PREFIX`
+---is listed first so reverse-map logic can peel the nvim-runtime
+---`nvim.<user>/<run-id>/<N>/` segment before falling back to the plain
+---`/var/folders/` case.
+local TMP_PREFIXES = {
+  RUN_DIR_PREFIX,
+  "/tmp/",
+  "/private/tmp/",
+  "/var/folders/",
+  "/private/var/folders/",
+}
+
+---Exposed so the adapter (reverse-map) and store (load-time cleanup)
+---share the same list without re-declaring the ordering.
+---@return string[]
+function M.tmp_prefixes()
+  return TMP_PREFIXES
+end
+
+---The normalised absolute path to `stdpath('run')` (trailing slash).
+---@return string
+function M.run_dir_prefix()
+  return RUN_DIR_PREFIX
+end
+
+---Does `abs` (a normalised absolute path) live in a location we
+---consider ephemeral and therefore unsuitable for persisting a URI?
+---@param abs string
+---@return boolean
+function M.is_temp_path(abs)
+  if type(abs) ~= "string" or abs == "" then
+    return false
+  end
+  for _, p in ipairs(TMP_PREFIXES) do
+    if abs:sub(1, #p) == p then
+      return true
+    end
+  end
+  return false
+end
+
+---Does `abs` (a normalised absolute path) look like a path that was
+---staged under Neovim's per-session runtime dir — *any* session, past
+---or present?
+---
+---Used by the store's load-time cleanup to drop records that were
+---persisted against `<stdpath('run')>/<N>/<project-relative-path>` in a
+---prior launch, where the runtime dir's `<run-id>` rotates every
+---startup and re-anchoring would require a round-trip through the
+---reverse-map. Because those broken records were written under a
+---*prior* `<run-id>`, we can't pin to today's `stdpath('run')` literal
+---— we match by shape instead: any path anywhere under a temp prefix
+---that contains an `nvim.<user>/<run-id>/<N>/<suffix>` segment.
+---@param abs string
+---@return boolean
+function M.is_nvim_runtime_staged_path(abs)
+  if type(abs) ~= "string" or abs == "" then
+    return false
+  end
+  local has_tmp_prefix = false
+  for _, p in ipairs(TMP_PREFIXES) do
+    if abs:sub(1, #p) == p then
+      has_tmp_prefix = true
+      break
+    end
+  end
+  if not has_tmp_prefix then
+    return false
+  end
+  -- Look for a `/nvim.<user>/<run-id>/<N>/<suffix>` segment anywhere in
+  -- the path. Four segments minimum after the `nvim.<user>` one.
+  return abs:match("/nvim%.[^/]+/[^/]+/[^/]+/.+") ~= nil
+end
+
+---Return the normalised absolute path of `bufnr`'s bufname, or nil
+---when the buffer has no name. Shared with the adapter so temp-path
+---detection and URI construction see identical inputs.
+---@param bufnr integer
+---@return string?
+function M.abs_for_bufnr(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  if not name or name == "" then
+    return nil
+  end
+  return vim.fs.normalize(vim.fn.fnamemodify(name, ":p"))
+end
+
 ---Return true if symlink canonicalisation is enabled (default true).
 ---@return boolean
 local function canonicalize_symlinks()

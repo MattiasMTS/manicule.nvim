@@ -108,6 +108,13 @@ If you `:saveas` a session-scope record into a project directory the
 scope stays `session` with the new URI — delete and re-add to move
 it into project scope.
 
+Runtime-staged buffers (paths under |stdpath()| `'run'` shaped
+`nvim.<user>/<run-id>/<N>/<suffix>`) are reverse-mapped to a real
+project file before persisting; failures notify "could not map to a
+real file" or "ambiguous reverse-map". On load, prior-session staged
+URIs are dropped with "dropped N invalid record(s) with temp-path
+URIs".
+
                                                              *manicule-storage*
 
 Store files live at >

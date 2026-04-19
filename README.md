@@ -174,6 +174,31 @@ re-add it if you want project-scope ownership.
 Quickfix, prompt, and cmdwin buffers reject adds unconditionally with
 a notify — there's no sensible per-line anchoring in those buftypes.
 
+### Troubleshooting
+
+#### My comments aren't persisting from a diff tool / staged buffer
+
+Some plugins (custom `:DiffTool` commands, stash-blob viewers, a few
+review integrations) stage buffer contents under Neovim's per-session
+runtime dir (`:echo stdpath('run')`). That directory's `<run-id>`
+rotates every launch, so a URI pointing at it can never re-anchor on
+reload. manicule detects the staged-path shape and tries to
+*reverse-map* it to the real file under your project root, cwd, or
+`$HOME` (for dotfile suffixes).
+
+If the mapping fails you'll see one of:
+
+- `manicule: buffer is a nvim-runtime-staged path (<abs>); could not
+  map to a real file` — no candidate existed anywhere we looked.
+- `manicule: ambiguous reverse-map; open the real file directly` — the
+  same path suffix resolves to multiple files (e.g. under both the
+  project root and `$HOME`).
+
+Open the real file directly and retry. On startup manicule also drops
+any pre-existing records whose URIs match the staged shape and logs
+`manicule: dropped N invalid record(s) with temp-path URIs from
+<path>` once per affected store file.
+
 ### Diff mode
 
 manicule works inside `nvim -d` and `git difftool -t nvimdiff` views.
