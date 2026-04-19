@@ -194,47 +194,6 @@ local function decode(data, path)
   return decoded
 end
 
----Partition `records` into (keep, dropped) by URI validity. A record
----is dropped when its URI is `file://` and the decoded path matches
----the nvim-runtime shape — i.e. a previous session persisted a URI
----against a per-launch runtime dir whose `<run-id>` has since rotated,
----so the record can never re-anchor. We detect this by path shape
----(`.../nvim.<user>/<run-id>/.../...`) rather than by today's exact
----`stdpath('run')` value, because the existing broken store files
----carry URIs from *past* runs (different `<run-id>`, possibly with or
----without the macOS `/private` alias). Plain `/tmp/foo.txt` records
----are *not* dropped: those paths are stable across launches and the
----user may have intentionally commented on a scratch file there.
----Non-file URIs (`term://`, `help://`, …) always pass through.
----Callers log when anything is dropped and flag the cache dirty so the
----next save rewrites the file without the bad records.
----@param records table[]
----@return table[] keep, integer dropped_count
-local function drop_temp_path_records(records)
-  local uri_mod = require("manicule.uri")
-  local kept = {}
-  local dropped = 0
-  for _, record in ipairs(records) do
-    local uri = record and record.uri
-    local drop = false
-    if type(uri) == "string" and uri_mod.is_file(uri) then
-      local path = uri_mod.to_path(uri)
-      if path then
-        local normalized = vim.fs.normalize(path)
-        if uri_mod.is_nvim_runtime_staged_path(normalized) then
-          drop = true
-        end
-      end
-    end
-    if drop then
-      dropped = dropped + 1
-    else
-      table.insert(kept, record)
-    end
-  end
-  return kept, dropped
-end
-
 ---Load all records for `root` into the cache. No-op if already loaded.
 ---@param root string|nil
 ---@return table[]
@@ -248,7 +207,6 @@ function M.load(root)
 
   local path = M.path(root)
   local records = {}
-  local cleaned_dropped = 0
   if path then
     -- Ensure the state dir exists before reading/writing. `mkdir -p` is
     -- idempotent and cheap. (setup() also mkdirs once, but this guards
@@ -258,18 +216,9 @@ function M.load(root)
     local data = read_file(path)
     if data and #data > 0 then
       records = decode(data, path)
-      records, cleaned_dropped = drop_temp_path_records(records)
-      if cleaned_dropped > 0 then
-        vim.notify(
-          ("manicule: dropped %d invalid record(s) with temp-path URIs from %s"):format(cleaned_dropped, path),
-          vim.log.levels.WARN
-        )
-      end
     end
   end
-  -- Flag dirty when we dropped records so the next `save()` rewrites
-  -- the file without them; the healed file is the migration.
-  cache[root] = { records = records, dirty = cleaned_dropped > 0 }
+  cache[root] = { records = records, dirty = false }
   return records
 end
 
@@ -420,20 +369,12 @@ function M.session_load()
   vim.fn.mkdir(config.current.store.dir, "p")
   local path = M.session_path()
   local records = {}
-  local cleaned_dropped = 0
   local data = read_file(path)
   if data and #data > 0 then
     records = decode(data, path)
-    records, cleaned_dropped = drop_temp_path_records(records)
-    if cleaned_dropped > 0 then
-      vim.notify(
-        ("manicule: dropped %d invalid record(s) with temp-path URIs from %s"):format(cleaned_dropped, path),
-        vim.log.levels.WARN
-      )
-    end
   end
   session_cache.records = records
-  session_cache.dirty = cleaned_dropped > 0
+  session_cache.dirty = false
   session_cache.loaded = true
   return records
 end

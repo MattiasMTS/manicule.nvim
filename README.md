@@ -194,10 +194,7 @@ If the mapping fails you'll see one of:
   same path suffix resolves to multiple files (e.g. under both the
   project root and `$HOME`).
 
-Open the real file directly and retry. On startup manicule also drops
-any pre-existing records whose URIs match the staged shape and logs
-`manicule: dropped N invalid record(s) with temp-path URIs from
-<path>` once per affected store file.
+Open the real file directly and retry.
 
 ### Diff mode
 

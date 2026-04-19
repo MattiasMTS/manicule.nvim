@@ -341,15 +341,6 @@ and needs the staged path to pair sibling buffers. The root for
 reverse-mapped records is resolved from the mapped path, not the
 staged buffer, so they land in the correct project store.
 
-**Load-time cleanup.** `store.load(root)` and `store.session_load()`
-drop any record whose `file://` URI decodes to a path matching the
-`/nvim.<user>/<run-id>/<N>/<suffix>` shape — i.e. a URI a prior session
-persisted under a now-dead `<run-id>`. The drop fires a WARN notify
-(`manicule: dropped N invalid record(s) with temp-path URIs from
-<path>`) and flips the cache-dirty flag so the next save rewrites the
-file without the bad entries. Stable temp paths like `/tmp/foo.txt`
-are *not* dropped.
-
 **`M.add` invariant canary.** After building a record, `M.add` re-runs
 `adapter.identify(bufnr)` and refuses to persist when the returned URI
 doesn't match the record's URI. Any divergence triggers an ERROR

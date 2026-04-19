@@ -1,6 +1,5 @@
 -- Exercises the reverse-map for nvim-runtime-staged buffer paths and
--- the store's load-time cleanup of records whose URIs resolve to a
--- past runtime dir.
+-- the `M.add` URI invariant canary.
 
 local adapter
 local uri_mod
@@ -156,69 +155,11 @@ describe("manicule.adapter reverse-map", function()
   end)
 end)
 
-describe("manicule.store load-time cleanup", function()
+describe("manicule M.add invariant canary", function()
   before_each(setup_env)
   after_each(teardown_env)
 
-  it("drops records with nvim-runtime-shaped URIs and marks cache dirty", function()
-    local store = require("manicule.store")
-    local uv = vim.uv or vim.loop
-
-    -- Hand-craft a store file containing both a real record and a
-    -- broken one whose URI points at a prior-session runtime path.
-    local path = store.path(tmp_root)
-    vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
-    local bad_uri = "file:///private/var/folders/aa/bb/T/nvim.tester/ABCDEF/1/.config/cmux/settings.json"
-    local good_uri = vim.uri_from_fname(tmp_root .. "/real.lua")
-    local contents = {
-      {
-        id = "bad",
-        uri = bad_uri,
-        scope = "project",
-        project_root = tmp_root,
-        range = { start = { 0, 0 }, end_ = { 0, 0 } },
-        body = "broken",
-        author = "",
-        created_at = 0,
-        updated_at = 0,
-        resolved = false,
-        meta = {},
-      },
-      {
-        id = "good",
-        uri = good_uri,
-        scope = "project",
-        project_root = tmp_root,
-        range = { start = { 0, 0 }, end_ = { 0, 0 } },
-        body = "ok",
-        author = "",
-        created_at = 0,
-        updated_at = 0,
-        resolved = false,
-        meta = {},
-      },
-    }
-    local fd = uv.fs_open(path, "w", 420)
-    uv.fs_write(fd, vim.json.encode(contents), 0)
-    uv.fs_close(fd)
-
-    -- Reset the cache and reload via store.load so drop runs fresh.
-    store._reset()
-    local loaded = store.load(tmp_root)
-    assert.are.equal(1, #loaded)
-    assert.are.equal("good", loaded[1].id)
-
-    -- The cache entry is dirty — a save() flushes and the file now
-    -- contains only the good record.
-    local ok = store.save(tmp_root)
-    assert.is_true(ok)
-    store._reset()
-    local reloaded = store.load(tmp_root)
-    assert.are.equal(1, #reloaded)
-    assert.are.equal("good", reloaded[1].id)
-  end)
-
-  it("M.add invariant canary refuses to persist when identify is injected to diverge", function()
+  it("refuses to persist when identify is injected to diverge", function()
     local manicule = require("manicule")
     local store = require("manicule.store")
     local adapter_mod = require("manicule.adapter")
@@ -272,36 +213,5 @@ describe("manicule.store load-time cleanup", function()
       end
     end
     assert.is_true(matched)
-  end)
-
-  it("leaves plain /tmp file URIs intact on load", function()
-    local store = require("manicule.store")
-    local uv = vim.uv or vim.loop
-
-    local path = store.path(tmp_root)
-    vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
-    local contents = {
-      {
-        id = "scratch",
-        uri = "file:///tmp/scratch.txt",
-        scope = "project",
-        project_root = tmp_root,
-        range = { start = { 0, 0 }, end_ = { 0, 0 } },
-        body = "scratch note",
-        author = "",
-        created_at = 0,
-        updated_at = 0,
-        resolved = false,
-        meta = {},
-      },
-    }
-    local fd = uv.fs_open(path, "w", 420)
-    uv.fs_write(fd, vim.json.encode(contents), 0)
-    uv.fs_close(fd)
-
-    store._reset()
-    local loaded = store.load(tmp_root)
-    assert.are.equal(1, #loaded)
-    assert.are.equal("scratch", loaded[1].id)
   end)
 end)

@@ -36,8 +36,8 @@ local TMP_PREFIXES = {
   "/private/var/folders/",
 }
 
----Exposed so the adapter (reverse-map) and store (load-time cleanup)
----share the same list without re-declaring the ordering.
+---Exposed so the adapter (reverse-map) and any other caller share the
+---same list without re-declaring the ordering.
 ---@return string[]
 function M.tmp_prefixes()
   return TMP_PREFIXES
@@ -69,14 +69,10 @@ end
 ---staged under Neovim's per-session runtime dir — *any* session, past
 ---or present?
 ---
----Used by the store's load-time cleanup to drop records that were
----persisted against `<stdpath('run')>/<N>/<project-relative-path>` in a
----prior launch, where the runtime dir's `<run-id>` rotates every
----startup and re-anchoring would require a round-trip through the
----reverse-map. Because those broken records were written under a
----*prior* `<run-id>`, we can't pin to today's `stdpath('run')` literal
----— we match by shape instead: any path anywhere under a temp prefix
----that contains an `nvim.<user>/<run-id>/<N>/<suffix>` segment.
+---Matches by shape: any path anywhere under a temp prefix that contains
+---an `nvim.<user>/<run-id>/<N>/<suffix>` segment. Used by the adapter's
+---reverse-map so staged buffers anchor to the real project file rather
+---than the per-launch `<run-id>`.
 ---@param abs string
 ---@return boolean
 function M.is_nvim_runtime_staged_path(abs)

@@ -37,20 +37,19 @@ local M = {}
 ---@field diff_side "working"|"reference"|nil
 ---@field reject_reason string?
 
----Temp-path detection lives in `manicule.uri` so the store's load-time
----cleanup, the reverse-map in this module, and the diff-pair heuristic
----all share a single list. On macOS `/tmp` and `/var/folders/...`
----symlink under `/private`, and the nvim-runtime prefix
----(`stdpath('run')`) lives under `/var/folders/...` as well — temp
----detection collapses all of these.
+---Temp-path detection lives in `manicule.uri` so the reverse-map in
+---this module and the diff-pair heuristic share a single list. On
+---macOS `/tmp` and `/var/folders/...` symlink under `/private`, and
+---the nvim-runtime prefix (`stdpath('run')`) lives under
+---`/var/folders/...` as well — temp detection collapses all of these.
 local function is_temp_path(path)
   return require("manicule.uri").is_temp_path(path)
 end
 
 ---Normalize a buffer's name to an absolute filesystem path (no URI
 ---decoding). Returns nil when the buffer has no name. Thin delegate to
----`manicule.uri.abs_for_bufnr` so adapter + reverse-map + store cleanup
----all see identical normalisation.
+---`manicule.uri.abs_for_bufnr` so adapter + reverse-map see identical
+---normalisation.
 ---@param bufnr integer
 ---@return string?
 local function bufname_abs(bufnr)
