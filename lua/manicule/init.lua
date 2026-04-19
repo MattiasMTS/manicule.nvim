@@ -18,6 +18,7 @@
 --   ManiculeResolved  record (with resolved=true)
 --   ManiculeSent      { sink, count, ok, err }
 --   ManiculeOrphaned  { id, record }
+--   ManiculeRenamed   { bufnr, old_uri, new_uri, record_count }
 --
 -- Rendering is owned by `lua/manicule/ui/render.lua`. `init.lua`
 -- resolves records for the affected buffer on every mutation and
@@ -33,33 +34,6 @@ local M = {}
 
 local function emit(pattern, data)
   vim.api.nvim_exec_autocmds("User", { pattern = pattern, data = data })
-end
-
----Resolve a buffer path to a project-relative path.
----@param bufnr integer
----@param root string|nil
----@return string relpath, string abspath
-local function relpath_for_buf(bufnr, root)
-  local abs = vim.fs.normalize(vim.api.nvim_buf_get_name(bufnr))
-  if not root or abs == "" then
-    return abs, abs
-  end
-  local rel
-  if vim.fs.relpath then
-    rel = vim.fs.relpath(root, abs)
-  end
-  if rel and rel ~= "" then
-    return rel, abs
-  end
-  -- Manual fallback: strip the root prefix.
-  local root_norm = vim.fs.normalize(root)
-  if root_norm:sub(-1) ~= "/" then
-    root_norm = root_norm .. "/"
-  end
-  if abs:sub(1, #root_norm) == root_norm then
-    return abs:sub(#root_norm + 1), abs
-  end
-  return abs, abs
 end
 
 ---Return the 0-indexed range currently in play for M.add.
@@ -118,7 +92,7 @@ local function resolve_range(opts)
   return { start = { cur[1] - 1, 0 }, end_ = { cur[1] - 1, 0 } }
 end
 
----Return records that belong to `bufnr` (path equality) under `root`.
+---Return records that belong to `bufnr` (URI equality) under `root`.
 ---@param bufnr integer
 ---@param root string|nil
 ---@return table[]
@@ -127,8 +101,11 @@ local function records_for_buffer(bufnr, root)
     return {}
   end
   local store = require("manicule.store")
-  local relpath = relpath_for_buf(bufnr, root)
-  return store.for_path(root, relpath)
+  local uri = require("manicule.uri").for_bufnr(bufnr)
+  if not uri then
+    return {}
+  end
+  return store.for_uri(root, uri)
 end
 
 ---Run reconcile for every buffer that already has an entry in `buffer_to_path`
@@ -216,6 +193,89 @@ local function attach_buffer(bufnr)
   refresh_viewport(bufnr)
 end
 
+---Per-bufnr snapshot of the URI that was live when `BufFilePre`
+---fired. `:saveas` / `:file` mutate the buffer name before the autocmd
+---dispatch chain lands on `BufFilePost`; without snapshotting in
+---`BufFilePre` there is no reliable way to recover the old URI for
+---the rename rewrite. Keys are cleared once the paired `BufFilePost`
+---handler runs (or the buffer is wiped).
+---@type table<integer, string>
+local pre_rename_uris = {}
+
+---`BufFilePre` handler — stash the buffer's current URI so the paired
+---`BufFilePost` can rewrite records whose `uri` matches it.
+---
+---`:saveas` fires `BufFilePre`/`BufFilePost` on both the originally-
+---edited buffer (loaded, listed, carries the records) and a brand-
+---new alternate buffer Neovim creates for the prior name (unloaded,
+---unlisted). We only care about the loaded one; otherwise the
+---alternate's pair would swap the rewrite back as the second
+---`BufFilePost` fires.
+---@param bufnr integer
+local function on_bufname_pre(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  local uri = require("manicule.uri").for_bufnr(bufnr)
+  if uri then
+    pre_rename_uris[bufnr] = uri
+  end
+end
+
+---Handle a buffer whose name just changed (`:saveas`, `:file`,
+---`:Move`-style plugin renames). Looks up the pre-rename URI captured
+---by `on_bufname_pre`, rewrites every record whose `uri` matches to
+---the new buffer URI, marks the store dirty, saves, reconciles the
+---buffer so handles re-attach under the new URI, and fires a single
+---`User ManiculeRenamed` autocmd with the aggregate payload. Silent
+---no-op when no matching records exist or the URI didn't change.
+---@param bufnr integer
+local function on_bufname_changed(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    -- Same alternate-buffer filter as `on_bufname_pre`: only the
+    -- loaded, records-carrying buffer should drive the rewrite.
+    return
+  end
+  local old_uri = pre_rename_uris[bufnr]
+  pre_rename_uris[bufnr] = nil
+  local store = require("manicule.store")
+  local uri_mod = require("manicule.uri")
+  local root = store.root()
+  if not root then
+    return
+  end
+  local new_uri = uri_mod.for_bufnr(bufnr)
+  if not new_uri or not old_uri or old_uri == new_uri then
+    return
+  end
+  local all = store.all(root)
+  local ids = {}
+  for _, record in ipairs(all) do
+    if record.uri == old_uri then
+      record.uri = new_uri
+      table.insert(ids, record.id)
+    end
+  end
+  if #ids == 0 then
+    return
+  end
+  store.mark_dirty(root)
+  store.save(root)
+  -- Re-reconcile the buffer so the render layer (which keyed handles
+  -- off the old URI via reconcile_buffer) rebuilds against the new
+  -- URI. Without this, BufWinEnter's reconcile during the saveas
+  -- flow tore down every handle before we rewrote the records.
+  reconcile_buffer(bufnr)
+  refresh_viewport(bufnr)
+  emit("ManiculeRenamed", {
+    bufnr = bufnr,
+    old_uri = old_uri,
+    new_uri = new_uri,
+    record_count = #ids,
+    ids = ids,
+  })
+end
+
 ---Initialize manicule with user options.
 ---@param opts manicule.Config|nil
 function M.setup(opts)
@@ -290,6 +350,27 @@ function M.setup(opts)
     end,
   })
 
+  -- `:saveas`, `:file`, and plugin-driven renames all fire
+  -- BufFilePre (old name still live) → BufFilePost (new name
+  -- installed). We snapshot the URI in Pre because by Post the buffer
+  -- name has already been swapped, leaving no reliable way to
+  -- discover the URI records were filed under. BufFilePost then
+  -- rewrites matching records, saves, and fires ManiculeRenamed.
+  vim.api.nvim_create_autocmd("BufFilePre", {
+    group = group,
+    callback = function(ev)
+      on_bufname_pre(ev.buf)
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufFilePost", {
+    group = group,
+    callback = function(ev)
+      vim.schedule(function()
+        on_bufname_changed(ev.buf)
+      end)
+    end,
+  })
+
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
     callback = function()
@@ -320,7 +401,14 @@ function M.setup(opts)
   -- suffices; the refresh path no-ops when no manicule qf is visible.
   vim.api.nvim_create_autocmd("User", {
     group = group,
-    pattern = { "ManiculeAdded", "ManiculeEdited", "ManiculeDeleted", "ManiculeResolved", "ManiculeOrphaned" },
+    pattern = {
+      "ManiculeAdded",
+      "ManiculeEdited",
+      "ManiculeDeleted",
+      "ManiculeResolved",
+      "ManiculeOrphaned",
+      "ManiculeRenamed",
+    },
     callback = function()
       -- Defer so a burst of events coalesces and we don't mutate the
       -- qflist from inside the autocmd dispatch.
@@ -356,24 +444,36 @@ local function finalize_add(body, bufnr, range)
   local store = require("manicule.store")
   local id_mod = require("manicule.id")
   local ui = require("manicule.ui")
+  local uri_mod = require("manicule.uri")
+
+  local uri = uri_mod.for_bufnr(bufnr)
+  if not uri then
+    -- Buffer has no name (scratch, anonymous). Phase 3 will route these
+    -- into the session-scoped store; for now, refuse rather than
+    -- persist a URI-less record.
+    vim.notify("manicule: buffer has no name — comment not saved.", vim.log.levels.WARN)
+    return
+  end
 
   local root = store.root()
   if not root then
     -- No project root resolved and the user hasn't opted in to
     -- `store.persist_unrooted`. Tell them instead of silently dropping
     -- the comment on the floor.
+    -- TODO(manicule): phase 3 — route unrooted to session store
     vim.notify(
-      "manicule: current buffer isn't in a project (no .git/.hg/package.json) and "
-        .. "`store.persist_unrooted` is false — comment not saved.",
+      "manicule: buffer is not in a project (scope='session' will handle this in phase 3)",
       vim.log.levels.WARN
     )
     return
   end
-  local relpath = relpath_for_buf(bufnr, root)
+
   local now = os.time()
   local record = {
     id = id_mod.new(),
-    path = relpath,
+    uri = uri,
+    scope = "project",
+    project_root = root,
     range = range,
     body = body,
     author = ui.git_email(),
@@ -476,7 +576,7 @@ function M.resolve(id)
   emit("ManiculeResolved", record)
 end
 
----Sort records by path → start line → id so every surface that lists
+---Sort records by uri → start line → id so every surface that lists
 ---records (quickfix, picker, completion) sees the same order. Returning
 ---a sorted list from `list()` itself — rather than relying on callers
 ---to re-sort — is load-bearing for the picker: positional numbers from
@@ -492,8 +592,8 @@ local function sort_records(records)
     return 1
   end
   table.sort(records, function(a, b)
-    local ap = tostring(a.path or "")
-    local bp = tostring(b.path or "")
+    local ap = tostring(a.uri or "")
+    local bp = tostring(b.uri or "")
     if ap ~= bp then
       return ap < bp
     end
@@ -508,15 +608,16 @@ local function sort_records(records)
 end
 
 ---List comments, optionally filtered. Results are always sorted by
----`path → start line → id` so the ordering seen in `:ManiculeList`,
+---`uri → start line → id` so the ordering seen in `:ManiculeList`,
 ---the picker, and the positional-number completer is identical.
----@param filter {path?: string, unresolved?: boolean, orphaned?: boolean, author?: string}|nil
+---@param filter {uri?: string, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string}|nil
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
   local store = require("manicule.store")
   local anchor = require("manicule.anchor")
   local render = require("manicule.ui.render")
+  local uri_mod = require("manicule.uri")
   local root = store.root()
   if not root then
     return {}
@@ -527,8 +628,19 @@ function M.list(filter)
   local results = vim
     .iter(all)
     :filter(function(r)
-      if filter.path and r.path ~= filter.path then
+      if filter.uri and r.uri ~= filter.uri then
         return false
+      end
+      if filter.path_suffix then
+        -- Case-sensitive suffix match. Prefer resolving URIs back to a
+        -- filesystem path so callers can query with the natural
+        -- project-relative suffix (`src/foo.lua`); fall back to the raw
+        -- URI for non-file schemes so phase 3 adapters still match.
+        local candidate = uri_mod.to_path(r.uri) or tostring(r.uri or "")
+        local suffix = filter.path_suffix
+        if #candidate < #suffix or candidate:sub(-#suffix) ~= suffix then
+          return false
+        end
       end
       if filter.unresolved and r.resolved then
         return false

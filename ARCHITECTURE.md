@@ -1,5 +1,24 @@
 # Architecture
 
+## 0. Phased roadmap
+
+manicule is being rewired around a URI-based record identity to unblock
+cross-scope storage. The phases land incrementally so each drop keeps
+the plugin usable end-to-end.
+
+- **Phase 1 (complete).** Records key off `(scope, project_root, uri)`
+  instead of `(project_root, project-relative-path)`. `scope` is always
+  `"project"`; the envelope is versioned (`.v2.mpack` /`.v2.json`);
+  `BufFilePost` rewrites URIs when files are renamed via `:saveas` /
+  `:file` and fires a `User ManiculeRenamed` autocmd.
+- **Phase 2 (pending).** A diff-mode adapter that recognises diffview /
+  Git diff pairs and mirrors comments across the pre/post sides.
+- **Phase 3 (pending).** A session-scoped store for unrooted buffers
+  and special buftypes (`term://`, scratch, `man://`, …). The
+  `scope = "session"` variant shares this machinery; Phase 1 already
+  rejects unrooted adds with a notify so Phase 3 slots in as a pure
+  addition.
+
 ## 1. Overview
 
 manicule.nvim pins free-form comments to arbitrary buffer ranges via
@@ -131,9 +150,9 @@ plugin/manicule ──► init.add(opts)
          │
          ├─ store.root()        (vim.fs.root(store.root_markers) || cwd fallback)
          ├─ store.load(root)    (fills module-local cache[root])
-         ├─ relpath_for_buf()   (vim.fs.relpath, fallback prefix strip)
+         ├─ manicule.uri.for_bufnr(bufnr)  (fs_realpath + vim.uri_from_fname)
          │
-         ├─ records = store.for_path(root, relpath)
+         ├─ records = store.for_uri(root, uri)
          ├─ ui.render.reconcile(bufnr, records)
          │     └─ for each record: create/refresh anchor extmark and
          │        (sticky) popup, prune handles that no longer appear
@@ -148,7 +167,11 @@ plugin/manicule ──► init.add(opts)
 Viewport / scroll / resize events fan out to
 `render.update_viewport_popups(bufnr, records)` when `ui.sticky` is
 false. `BufLeave` / `WinLeave` call `render.hide_all_popups(bufnr)` so
-stale popups don't leak across windows. Every handler is wrapped in
+stale popups don't leak across windows. `BufFilePost` triggers
+`init.on_bufname_changed(bufnr)`, which rewrites every record anchored
+in the buffer to the buffer's new URI, marks the store dirty, saves,
+and fires a single `User ManiculeRenamed` autocmd (`{ bufnr, old_uri,
+new_uri, record_count, ids }`). Every handler is wrapped in
 `vim.schedule` so a burst of autocmds coalesces into one render pass.
 
 Setup must run before the first `BufReadPost` you want rendered, so
@@ -198,17 +221,48 @@ The store lives under `stdpath("state") .. "/manicule/"` (overridable
 via `store.dir`), one file per project root. The root is resolved with
 `vim.fs.root(0, store.root_markers)` — defaults to `{".git", ".hg",
 "package.json"}`. The filename is the root path with `[\\/:]+` collapsed
-to `%%` (same trick persistence.nvim uses), so
-`/Users/me/src/foo`  → `%Users%me%src%foo.mpack`. Keying by the git root
-rather than `getcwd()` means comments survive `cd`'ing into subdirs.
+to `%%` (same trick persistence.nvim uses), plus a `.v2` marker before
+the format suffix, so `/Users/me/src/foo` →
+`%Users%me%src%foo.v2.mpack`. Keying by the git root rather than
+`getcwd()` means comments survive `cd`'ing into subdirs.
 
-The on-disk payload is a bare array of record tables — no wrapper
-envelope — encoded with `vim.mpack.encode` by default; `store.format =
-"json"` switches to `vim.json.encode` for users who want a human-readable
-file. mpack is the default because nothing human reads these files
-anymore (they live under `stdpath('state')`, not the repo), and mpack
-is smaller, faster, and handles Lua `nil`/array cases without JSON's
-coercion quirks.
+### Record schema (phase 1)
+
+```
+{
+  id           = "unique",                            -- id.new()
+  uri          = "file:///abs/path.lua",              -- canonical URI
+  scope        = "project",                           -- only scope in phase 1
+  project_root = "/abs/path/to/root",                 -- absolute root
+  range        = { start = {row,col}, end_ = {row,col} },
+  body         = "text",
+  author       = "user@example.com",
+  created_at   = 1731000000,
+  updated_at   = 1731000000,
+  resolved     = false,
+  meta         = {},                                  -- free-form
+}
+```
+
+`uri` is the canonical identity. `manicule.uri.for_bufnr` runs file
+paths through `vim.uv.fs_realpath` before encoding so opening a file
+via a symlink still matches records saved against the real path; set
+`store.canonicalize_symlinks = false` to disable. Non-file URIs
+(`term://`, `man://`, …) pass through untouched so the session-scoped
+store phase 3 introduces can key off the same field.
+
+### On-disk envelope
+
+The on-disk payload is `{ version = 2, records = [...] }`, encoded with
+`vim.mpack.encode` by default; `store.format = "json"` switches to
+`vim.json.encode` for users who want a human-readable file. mpack is
+the default because nothing human reads these files anymore (they live
+under `stdpath('state')`, not the repo), and mpack is smaller, faster,
+and handles Lua `nil`/array cases without JSON's coercion quirks. The
+loader refuses any file that isn't `version = 2` (notify WARN, start
+empty) — including pre-v2 files written against the old `(root, path)`
+identity schema. The `.v2` infix on the filename makes the mismatch
+visible at the filesystem level too.
 
 Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
 `<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash
@@ -267,6 +321,7 @@ All events are native `User` autocmds — subscribe with
 | `ManiculeResolved`   | `M.resolve` marks a record resolved        | record (with `resolved = true`)     |
 | `ManiculeSent`       | `M.send` sink dispatch settles             | `{ sink, count, ok, err }`          |
 | `ManiculeOrphaned`   | reload detects an extmark is invalid       | `{ id, record }`                    |
+| `ManiculeRenamed`    | `BufFilePost` rewrote record URIs for a buffer | `{ bufnr, old_uri, new_uri, record_count, ids }` |
 | `ManiculeVisibility` | `:ManiculeToggle` flips the visibility flag | `{ hidden = <bool> }`              |
 
 ## 9. Extension points

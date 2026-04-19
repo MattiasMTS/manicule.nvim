@@ -19,6 +19,12 @@ local function setup_env()
     store = {
       dir = tmp_state .. "/",
       format = "json",
+      -- The test builds synthetic records against `tmp_root`; disable
+      -- symlink canonicalisation so the URIs we build here match what
+      -- the plugin resolves for the currently-open buffer without
+      -- racing `fs_realpath` through the `/private/...` symlink macOS
+      -- inserts in `$TMPDIR`.
+      canonicalize_symlinks = false,
     },
   })
   vim.cmd.edit(tmp_root .. "/a.lua")
@@ -30,14 +36,17 @@ local function teardown_env()
   pcall(vim.fn.delete, tmp_root, "rf")
 end
 
-local function add(body, line, path)
+local function add(body, line, relpath)
   local store = require("manicule.store")
   local root = store.root()
   assert.is_truthy(root)
   local id = require("manicule.id").new()
+  local uri = require("manicule.uri").for_path(root .. "/" .. relpath)
   store.put(root, {
     id = id,
-    path = path,
+    uri = uri,
+    scope = "project",
+    project_root = root,
     range = { start = { line - 1, 0 }, end_ = { line - 1, 0 } },
     body = body,
     author = "t@example.com",
@@ -181,9 +190,14 @@ describe("manicule positional picker", function()
       table.insert(qf_ids, it.user_data)
     end
     assert.are.same(list_ids, qf_ids)
-    -- Sanity check: a.lua records should come before b.lua.
-    assert.are.equal("a.lua", require("manicule").list({ _quiet = true })[1].path)
-    assert.are.equal("a.lua", require("manicule").list({ _quiet = true })[2].path)
-    assert.are.equal("b.lua", require("manicule").list({ _quiet = true })[3].path)
+    -- Sanity check: a.lua records should come before b.lua (URI order
+    -- reflects the filesystem path order).
+    local ordered = require("manicule").list({ _quiet = true })
+    local function ends_with(uri, suffix)
+      return uri:sub(-#suffix) == suffix
+    end
+    assert.is_true(ends_with(ordered[1].uri, "/a.lua"))
+    assert.is_true(ends_with(ordered[2].uri, "/a.lua"))
+    assert.is_true(ends_with(ordered[3].uri, "/b.lua"))
   end)
 end)

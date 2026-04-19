@@ -123,13 +123,34 @@ local function lpad(s, w)
   return string.rep(" ", delta) .. s
 end
 
+---Resolve a record's URI to a display-ready path. Prefers the
+---project-relative form when `project_root` is set and the URI maps
+---to a real filesystem path; falls back to the absolute path or the
+---raw URI string for non-file schemes (forward-compat for phase 3).
+---@param record table
+---@return string
+local function display_path(record)
+  local uri_mod = require("manicule.uri")
+  local abs = uri_mod.to_path(record.uri)
+  if abs and record.project_root and record.project_root ~= "" then
+    local rel
+    if vim.fs.relpath then
+      rel = vim.fs.relpath(record.project_root, abs)
+    end
+    if rel and rel ~= "" then
+      return rel
+    end
+  end
+  return abs or tostring(record.uri or "")
+end
+
 ---Build the `<path>:<line>` or `<path>:<start>-<end>` string for a
 ---record, applying the left-truncation budget so the column stays
 ---aligned.
 ---@param record table
 ---@return string
 local function location_for(record)
-  local path = tostring(record.path or "")
+  local path = display_path(record)
   local line
   if record.range and record.range.start then
     local sl = (record.range.start[1] or 0) + 1

@@ -15,7 +15,8 @@ local M = {}
 ---@field dir string Directory where per-root store files live.
 ---@field format "mpack"|"json" On-disk envelope format.
 ---@field branch boolean Scope the filename by the current git branch (main/master skipped).
----@field persist_unrooted boolean Persist buffers with no project root using cwd as the key.
+---@field persist_unrooted boolean Placeholder — phase 3 routes unrooted buffers to the session store.
+---@field canonicalize_symlinks boolean Resolve symlinks via `fs_realpath` before encoding URIs.
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
 
 ---@type manicule.Config
@@ -29,10 +30,15 @@ M.defaults = {
     -- Annotations should stay visible across branches by default; manicule
     -- stores notes the user wants anchored, not editing state.
     branch = false,
-    -- Persist buffers without a project root (keyed by cwd). Off by default
-    -- to avoid scattering files under stdpath("state")/manicule/ for every
-    -- random /tmp/foo.txt the user opens.
+    -- Placeholder for phase 3: when true + no project root is resolved,
+    -- records will route to a session-scoped store. Phase 1 still
+    -- rejects unrooted adds with a notify — see `init.finalize_add`.
     persist_unrooted = false,
+    -- Resolve symlinks through `fs_realpath` before encoding URIs so a
+    -- file accessed via a symlink still matches records saved against
+    -- the real path. Disable if you want URIs to reflect the access
+    -- path instead.
+    canonicalize_symlinks = true,
     -- Markers passed to `vim.fs.root` when resolving the project key.
     root_markers = { ".git", ".hg", "package.json" },
   },
@@ -84,6 +90,7 @@ function M.setup(opts)
       ["store.format"] = { opts.store.format, "string", true },
       ["store.branch"] = { opts.store.branch, "boolean", true },
       ["store.persist_unrooted"] = { opts.store.persist_unrooted, "boolean", true },
+      ["store.canonicalize_symlinks"] = { opts.store.canonicalize_symlinks, "boolean", true },
       ["store.root_markers"] = { opts.store.root_markers, "table", true },
     })
     if opts.store.format ~= nil and opts.store.format ~= "mpack" and opts.store.format ~= "json" then

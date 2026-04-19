@@ -64,8 +64,8 @@ end
 local function sort_records(records)
   local ordered = vim.deepcopy(records)
   table.sort(ordered, function(a, b)
-    local ap = tostring(a.path or "")
-    local bp = tostring(b.path or "")
+    local ap = tostring(a.uri or "")
+    local bp = tostring(b.uri or "")
     if ap ~= bp then
       return ap < bp
     end
@@ -77,6 +77,16 @@ local function sort_records(records)
     return tostring(a.id or "") < tostring(b.id or "")
   end)
   return ordered
+end
+
+---Resolve a record's URI back to an absolute filesystem path for the
+---quickfix `filename` slot (so `:cc <n>` / `<CR>` navigation jumps to
+---the right file). Returns nil for non-file URIs so the caller can
+---fall back to `bufnr`.
+---@param record table
+---@return string?
+local function filename_for(record)
+  return require("manicule.uri").to_path(record.uri)
 end
 
 ---@param text string
@@ -114,7 +124,6 @@ local function build_items(records)
   local items = {}
   for _, r in ipairs(sort_records(records or {})) do
     local item = {
-      filename = r.path,
       lnum = start_line(r),
       col = start_col(r),
       type = r.resolved and "N" or "I",
@@ -125,6 +134,21 @@ local function build_items(records)
       -- trivial round-tripping through `getqflist({items=true})`.
       user_data = r.id,
     }
+    local fname = filename_for(r)
+    if fname then
+      -- Quickfix needs a real filesystem path for `<CR>`/`:cc` jumps.
+      -- Non-file URIs (term://, …) won't reach phase 1, but forward-
+      -- compat: fall through to a live-bufnr lookup so the jump lands
+      -- somewhere sensible.
+      item.filename = fname
+    else
+      for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == r.uri then
+          item.bufnr = bufnr
+          break
+        end
+      end
+    end
     table.insert(items, item)
   end
   return items

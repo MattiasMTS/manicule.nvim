@@ -9,7 +9,8 @@
 -- manicule is buffer-agnostic, so the keying is `[bufnr][comment_id]`
 -- rather than codediff's `[tabpage][comment_id]` / diff-side /
 -- session-keyed layout. A record "belongs to" a buffer when the
--- buffer's project-relative path equals `record.path`.
+-- buffer's canonical URI (see `manicule.uri.for_bufnr`) equals
+-- `record.uri`.
 --
 -- Sticky vs non-sticky is driven by `config.get().ui.sticky`:
 --   * sticky  = true  -> popups are always shown for every record in
@@ -431,7 +432,7 @@ local function render_comment_popup(record, handle, records)
   local stack_offset = 0
   for _, other in ipairs(records) do
     local other_id = tostring(other.id or "")
-    if other_id ~= my_id and other.path == record.path and record_start_line(other) == my_line and other_id < my_id then
+    if other_id ~= my_id and other.uri == record.uri and record_start_line(other) == my_line and other_id < my_id then
       if tab[other_id] then
         stack_offset = stack_offset + 1
       end
@@ -878,16 +879,15 @@ function M.show()
     return
   end
   store.load(root)
+  local uri_mod = require("manicule.uri")
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
-      local abs = vim.fs.normalize(vim.api.nvim_buf_get_name(bufnr))
-      local relpath = abs
-      if vim.fs.relpath then
-        relpath = vim.fs.relpath(root, abs) or abs
+      local uri = uri_mod.for_bufnr(bufnr)
+      if uri then
+        local records = store.for_uri(root, uri)
+        M.reconcile(bufnr, records)
+        M.update_viewport_popups(bufnr, records)
       end
-      local records = store.for_path(root, relpath)
-      M.reconcile(bufnr, records)
-      M.update_viewport_popups(bufnr, records)
     end
   end
 end

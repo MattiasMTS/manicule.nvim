@@ -8,7 +8,8 @@ M.spec = {
   name = "clipboard",
   format = function(c)
     local line = (c.range and c.range.start and c.range.start[1] or 0) + 1
-    return string.format("%s:%d: %s", c.path or "?", line, c.body or "")
+    local display = require("manicule.uri").to_path(c.uri) or c.uri or "?"
+    return string.format("%s:%d: %s", display, line, c.body or "")
   end,
   send = function(comments, _ctx, cb)
     local lines = {}

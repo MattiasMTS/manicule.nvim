@@ -40,10 +40,15 @@ Full default configuration (every key is optional):
         -- notes are scoped per-branch. `main`/`master` collapse to the
         -- unsuffixed filename.
         branch = false,
-        -- When true, buffers without a project root (no .git/.hg/
-        -- package.json ancestor) are keyed by cwd instead of being
-        -- ignored. Off by default.
+        -- Placeholder for phase 3 (session-scoped store). Phase 1
+        -- rejects unrooted adds with a notify; this key is kept so
+        -- phase 3 is a pure addition.
         persist_unrooted = false,
+        -- Resolve symlinks through `fs_realpath` before encoding
+        -- URIs so a file accessed via a symlink still matches records
+        -- saved against the real path. Disable if you want URIs to
+        -- reflect the access path instead.
+        canonicalize_symlinks = true,
         -- Markers passed to `vim.fs.root` to resolve the project root.
         root_markers = { ".git", ".hg", "package.json" },
       },
@@ -63,9 +68,12 @@ Full default configuration (every key is optional):
                                                              *manicule-storage*
 
 Store files live at >
-    <store.dir>/<escaped-project-root>[%%<escaped-branch>].<format>
+    <store.dir>/<escaped-project-root>[%%<escaped-branch>].v2.<format>
 <
-where `[\\/:]+` in each path segment is replaced with `%%`. Run
+where `[\\/:]+` in each path segment is replaced with `%%`. The `.v2`
+marker identifies the URI-identity envelope introduced in phase 1 —
+older `.<format>` files are ignored so mixed-version sessions never
+silently clobber each other. Run
 `:echo stdpath('state').'/manicule/'` to find the default directory.
 
                                                                *manicule-editor*
@@ -205,7 +213,7 @@ the picker / positional commands are the "pick from a list" path.
     m.edit(id)
     m.delete(id)
     m.resolve(id)
-    m.list({ path, unresolved, orphaned, author })
+    m.list({ uri, path_suffix, unresolved, orphaned, author })
     m.send(sink_name, filter, ctx)
     m.register_sink(spec)
 <
@@ -263,6 +271,10 @@ Patterns and payload shapes:
     ManiculeResolved       data = record (resolved=true)
     ManiculeSent           data = { sink, count, ok, err }
     ManiculeOrphaned       data = { id, record }  (anchor invalidated on reload)
+    ManiculeRenamed        data = { bufnr, old_uri, new_uri,
+                                    record_count, ids }
+                                    (fired on BufFilePost when records
+                                     were re-anchored to a new URI)
     ManiculeVisibility     data = { hidden }      (fired on :ManiculeToggle)
 
 ==============================================================================

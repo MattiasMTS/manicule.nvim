@@ -155,7 +155,8 @@ require("manicule").setup({
     dir = vim.fn.stdpath("state") .. "/manicule/", -- per-user state dir
     format = "mpack",                              -- "mpack" | "json"
     branch = false,                                -- branch-scope the filename
-    persist_unrooted = false,                      -- key unrooted bufs by cwd
+    persist_unrooted = false,                      -- placeholder (phase 3: session store)
+    canonicalize_symlinks = true,                  -- resolve symlinks before encoding URIs
     root_markers = { ".git", ".hg", "package.json" },
   },
   ui = {
@@ -174,12 +175,13 @@ require("manicule").setup({
 
 Run `:echo stdpath('state').'/manicule/'` — that is the default
 `store.dir`. One file per project root, named after the root with path
-separators escaped as `%%`, e.g. `%Users%me%src%foo.mpack`. Switch to
+separators escaped as `%%` and a `.v2` marker before the format
+suffix, e.g. `%Users%me%src%foo.v2.mpack`. Switch to
 `store.format = "json"` if you want the files to be human-readable.
 
 With `store.branch = true` the filename is scoped per-branch
-(`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to
-the unsuffixed filename so the common case doesn't fragment.
+(`<root>%%<branch>.v2.<ext>`), except for `main`/`master` which
+collapse to the unsuffixed filename so the common case doesn't fragment.
 
 ## Registering a custom sink
 
@@ -225,7 +227,7 @@ vim.api.nvim_create_autocmd("User", {
 
 Patterns: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
 `ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`,
-`ManiculeVisibility`. Payload shapes are documented in
+`ManiculeRenamed`, `ManiculeVisibility`. Payload shapes are documented in
 [`ARCHITECTURE.md`](./ARCHITECTURE.md#event-catalog) and
 `:help manicule-events`.
 
