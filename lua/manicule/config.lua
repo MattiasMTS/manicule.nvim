@@ -13,7 +13,7 @@ local M = {}
 
 ---@class manicule.StoreConfig
 ---@field dir string Directory where per-root store files live.
----@field format "mpack"|"json" On-disk envelope format.
+---@field format "mpack"|"json" On-disk format.
 ---@field branch boolean Scope the filename by the current git branch (main/master skipped).
 ---@field persist_unrooted boolean Placeholder — phase 3 routes unrooted buffers to the session store.
 ---@field canonicalize_symlinks boolean Resolve symlinks via `fs_realpath` before encoding URIs.

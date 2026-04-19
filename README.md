@@ -175,13 +175,12 @@ require("manicule").setup({
 
 Run `:echo stdpath('state').'/manicule/'` — that is the default
 `store.dir`. One file per project root, named after the root with path
-separators escaped as `%%` and a `.v2` marker before the format
-suffix, e.g. `%Users%me%src%foo.v2.mpack`. Switch to
+separators escaped as `%%`, e.g. `%Users%me%src%foo.mpack`. Switch to
 `store.format = "json"` if you want the files to be human-readable.
 
 With `store.branch = true` the filename is scoped per-branch
-(`<root>%%<branch>.v2.<ext>`), except for `main`/`master` which
-collapse to the unsuffixed filename so the common case doesn't fragment.
+(`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to
+the unsuffixed filename so the common case doesn't fragment.
 
 ## Registering a custom sink
 

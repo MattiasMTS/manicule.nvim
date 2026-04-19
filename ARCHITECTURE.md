@@ -8,9 +8,8 @@ the plugin usable end-to-end.
 
 - **Phase 1 (complete).** Records key off `(scope, project_root, uri)`
   instead of `(project_root, project-relative-path)`. `scope` is always
-  `"project"`; the envelope is versioned (`.v2.mpack` /`.v2.json`);
-  `BufFilePost` rewrites URIs when files are renamed via `:saveas` /
-  `:file` and fires a `User ManiculeRenamed` autocmd.
+  `"project"`; `BufFilePost` rewrites URIs when files are renamed via
+  `:saveas` / `:file` and fires a `User ManiculeRenamed` autocmd.
 - **Phase 2 (pending).** A diff-mode adapter that recognises diffview /
   Git diff pairs and mirrors comments across the pre/post sides.
 - **Phase 3 (pending).** A session-scoped store for unrooted buffers
@@ -221,9 +220,8 @@ The store lives under `stdpath("state") .. "/manicule/"` (overridable
 via `store.dir`), one file per project root. The root is resolved with
 `vim.fs.root(0, store.root_markers)` — defaults to `{".git", ".hg",
 "package.json"}`. The filename is the root path with `[\\/:]+` collapsed
-to `%%` (same trick persistence.nvim uses), plus a `.v2` marker before
-the format suffix, so `/Users/me/src/foo` →
-`%Users%me%src%foo.v2.mpack`. Keying by the git root rather than
+to `%%` (same trick persistence.nvim uses), so `/Users/me/src/foo` →
+`%Users%me%src%foo.mpack`. Keying by the git root rather than
 `getcwd()` means comments survive `cd`'ing into subdirs.
 
 ### Record schema (phase 1)
@@ -251,18 +249,16 @@ via a symlink still matches records saved against the real path; set
 (`term://`, `man://`, …) pass through untouched so the session-scoped
 store phase 3 introduces can key off the same field.
 
-### On-disk envelope
+### On-disk layout
 
-The on-disk payload is `{ version = 2, records = [...] }`, encoded with
+The on-disk payload is a bare array of record tables, encoded with
 `vim.mpack.encode` by default; `store.format = "json"` switches to
 `vim.json.encode` for users who want a human-readable file. mpack is
 the default because nothing human reads these files anymore (they live
 under `stdpath('state')`, not the repo), and mpack is smaller, faster,
-and handles Lua `nil`/array cases without JSON's coercion quirks. The
-loader refuses any file that isn't `version = 2` (notify WARN, start
-empty) — including pre-v2 files written against the old `(root, path)`
-identity schema. The `.v2` infix on the filename makes the mismatch
-visible at the filesystem level too.
+and handles Lua `nil`/array cases without JSON's coercion quirks. If
+the decoded payload isn't a list the loader logs a `WARN` notification
+and starts from an empty record list rather than crashing.
 
 Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
 `<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash

@@ -33,8 +33,8 @@ Full default configuration (every key is optional):
         -- Directory the per-root store lives under. Defaults to
         -- `stdpath('state').'/manicule/'` — out of the project tree.
         dir = vim.fn.stdpath("state") .. "/manicule/",
-        -- On-disk envelope format. "mpack" (default) is binary and
-        -- compact; "json" is human-readable.
+        -- On-disk format. "mpack" (default) is binary and compact;
+        -- "json" is human-readable.
         format = "mpack",
         -- When true, append the current git branch to the filename so
         -- notes are scoped per-branch. `main`/`master` collapse to the
@@ -68,12 +68,9 @@ Full default configuration (every key is optional):
                                                              *manicule-storage*
 
 Store files live at >
-    <store.dir>/<escaped-project-root>[%%<escaped-branch>].v2.<format>
+    <store.dir>/<escaped-project-root>[%%<escaped-branch>].<format>
 <
-where `[\\/:]+` in each path segment is replaced with `%%`. The `.v2`
-marker identifies the URI-identity envelope introduced in phase 1 —
-older `.<format>` files are ignored so mixed-version sessions never
-silently clobber each other. Run
+where `[\\/:]+` in each path segment is replaced with `%%`. Run
 `:echo stdpath('state').'/manicule/'` to find the default directory.
 
                                                                *manicule-editor*

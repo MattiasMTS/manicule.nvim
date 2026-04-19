@@ -1,72 +1,25 @@
 -- manicule.nvim: per-project persistence.
 --
--- Comment record schema (phase 1)
--- -------------------------------
---
---   {
---     id           = "unique",                            -- id.new()
---     uri          = "file:///abs/path.lua",              -- canonical URI
---     scope        = "project",                           -- only "project"
---                                                         -- exists in phase 1;
---                                                         -- phase 3 introduces
---                                                         -- scope = "session"
---     project_root = "/abs/path/to/root",                 -- absolute root
---     range        = { start = {row,col}, end_ = {row,col} },
---     body         = "text",
---     author       = "user@example.com",
---     created_at   = 1731000000,
---     updated_at   = 1731000000,
---     resolved     = false,
---     meta         = {},                                  -- free-form
---   }
---
--- Records are keyed by URI — the pre-phase-1 `path` field (project-
--- relative string) is gone so the same machinery can later anchor
--- non-file buffers (term://, scratch, …) in the session-scoped store
--- without needing a second schema. `manicule.uri.for_bufnr` runs every
--- buffer path through `fs_realpath` before encoding so opening a file
--- via a symlink still matches records saved against the real path.
---
--- On-disk layout
--- --------------
 -- Records live in `stdpath("state")/manicule/` (configurable via
--- `config.store.dir`), one file per project root. Path separators in
--- the root are escaped with `[\\/:]+` → `%%` (persistence.nvim
--- convention) so every root flattens to a single filename. If
--- `config.store.branch` is true, the current git branch is appended as
--- `%%<branch>` before the extension — except for `main` and `master`,
--- which collapse to the unsuffixed filename so the common case doesn't
--- fragment.
---
--- The file is named `<escaped-root>.v2.<format>` (with the optional
--- `%%<branch>` segment inserted before `.v2`). The `.v2` suffix marks
--- the URI-identity schema — pre-v2 files written by the `(root, path)`
--- identity version are ignored entirely so a user running a mixed
--- version set up never sees a silently-truncated record list.
---
--- The envelope format is `vim.mpack` by default (`config.store.format =
--- "mpack"`); `"json"` is available for users who want a human-readable
--- file. The on-disk payload is `{ version = 2, records = [...] }`.
--- `decode()` rejects anything that doesn't match that shape (notify
--- WARN, start empty) — this includes both corrupt bytes and the old
--- bare-array schema.
---
--- Atomic write strategy
--- ---------------------
--- `save()` writes to `<path>.tmp` then `vim.uv.fs_rename`s into place.
--- A mid-write crash leaves the prior file intact.
---
--- Caching
--- -------
--- State is kept per-root in a module-local `cache` table. Writes flip a
--- dirty flag; `save()` is a no-op when the flag is clean.
+-- `config.store.dir`), one file per project root. Path separators in the
+-- root are escaped with `[\\/:]+` → `%%` (persistence.nvim convention) so
+-- every root flattens to a single filename. If `config.store.branch` is
+-- true, the current git branch is appended as `%%<branch>` before the
+-- extension — except for `main` and `master`, which collapse to the
+-- unsuffixed filename so the common case doesn't fragment. The file is
+-- named `<escaped-root>[%%<branch>].<format>`. The on-disk payload is a
+-- bare array of records encoded with `vim.mpack.encode` (or
+-- `vim.json.encode` when `config.store.format == "json"`); records carry
+-- `scope`, `uri`, `project_root`, `range`, `body`, `author`, timestamps,
+-- `resolved`, and free-form `meta`. `save()` writes to `<path>.tmp` then
+-- renames so a mid-write crash never truncates the prior file. State is
+-- kept per-root in a module-local `cache`; writes flip a dirty flag and
+-- `save()` is a no-op when the flag is clean.
 
 local M = {}
 
 local uv = vim.uv or vim.loop
 local config = require("manicule.config")
-
-local STORE_VERSION = 2
 
 ---@class manicule.StoreEntry
 ---@field records table[]
@@ -124,11 +77,7 @@ function M.path(root)
       name = name .. "%%" .. escape(branch)
     end
   end
-  -- `.v2` marks the URI-identity envelope. Old `.mpack` / `.json`
-  -- files from the pre-phase-1 schema are left on disk untouched
-  -- rather than silently migrated — users can delete them once they
-  -- confirm the new files carry the records they care about.
-  return cfg.dir .. name .. ".v2." .. cfg.format
+  return cfg.dir .. name .. "." .. cfg.format
 end
 
 ---Resolve the current project root using `store.root_markers`. Falls back
@@ -189,32 +138,29 @@ local function write_atomic(path, data)
   return true
 end
 
----Encode records per the configured format. Wraps them in the
----`{ version = STORE_VERSION, records = [...] }` envelope.
+---Encode records per the configured format as a bare array.
 ---@param records table[]
 ---@return string|nil data, string? err
 local function encode(records)
   local cfg = config.current.store
-  local envelope = { version = STORE_VERSION, records = records }
   if cfg.format == "json" then
-    local ok, encoded = pcall(vim.json.encode, envelope)
+    local ok, encoded = pcall(vim.json.encode, records)
     if not ok then
       return nil, tostring(encoded)
     end
     return encoded
   end
   -- Default / "mpack".
-  local ok, encoded = pcall(vim.mpack.encode, envelope)
+  local ok, encoded = pcall(vim.mpack.encode, records)
   if not ok then
     return nil, tostring(encoded)
   end
   return encoded
 end
 
----Decode `data` using the configured format. Expects the versioned
----`{ version = 2, records = [...] }` envelope — any other shape
----(including the pre-v2 bare-array schema) is treated as corrupt /
----incompatible and produces an empty list plus a WARN notify.
+---Decode `data` using the configured format. Expects a bare array of
+---records; anything else (non-table, dict with non-integer keys) is
+---treated as corrupt and produces an empty list plus a WARN notify.
 ---@param data string
 ---@param path string used purely for diagnostics
 ---@return table[] records
@@ -232,30 +178,11 @@ local function decode(data, path)
   if next(decoded) == nil then
     return {}
   end
-  if decoded.version ~= STORE_VERSION then
-    vim.notify(
-      ("manicule: store %s has unsupported version %s (expected %d); starting fresh"):format(
-        path,
-        tostring(decoded.version),
-        STORE_VERSION
-      ),
-      vim.log.levels.WARN
-    )
-    return {}
-  end
-  local records = decoded.records
-  if type(records) ~= "table" then
-    vim.notify(("manicule: store %s missing records array; starting fresh"):format(path), vim.log.levels.WARN)
-    return {}
-  end
-  if next(records) == nil then
-    return {}
-  end
-  if vim.islist and not vim.islist(records) then
+  if vim.islist and not vim.islist(decoded) then
     vim.notify(("manicule: unrecognised store shape at %s; starting fresh"):format(path), vim.log.levels.WARN)
     return {}
   end
-  return records
+  return decoded
 end
 
 ---Load all records for `root` into the cache. No-op if already loaded.
