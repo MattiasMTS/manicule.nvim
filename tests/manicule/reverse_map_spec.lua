@@ -215,3 +215,70 @@ describe("manicule M.add invariant canary", function()
     assert.is_true(matched)
   end)
 end)
+
+describe("manicule M.list adapter-routed project root", function()
+  before_each(setup_env)
+  after_each(teardown_env)
+
+  it("finds the project record when reading from a staged DiffToolGit-style buffer", function()
+    -- Reproduces the `:ManiculeSend claude-cmux` bug: a comment added
+    -- from a staged buffer lands in the real project store (via
+    -- adapter.identify's reverse-map), but the read path in `M.list`
+    -- used raw `store.root()` which walks up the staged path under
+    -- `stdpath('run')` and never finds a marker — making the record
+    -- invisible. Requires `M.list` (and every other read site in
+    -- init.lua that resolves "project root for the current buffer")
+    -- to route through `adapter.identify` first.
+    local manicule = require("manicule")
+    local store = require("manicule.store")
+
+    -- Plant a real project file at the mapped location so the
+    -- reverse-map has exactly one candidate.
+    vim.fn.mkdir(tmp_root .. "/src", "p")
+    vim.fn.writefile({ "real contents" }, tmp_root .. "/src/feature.lua")
+
+    local staged = make_staged_file("src/feature.lua", { "real contents" })
+    local prev_cwd = vim.loop.cwd()
+    vim.cmd("cd " .. vim.fn.fnameescape(tmp_root))
+
+    -- Open the staged path. From the plugin's perspective the current
+    -- buffer sits under `stdpath('run')` — the DiffToolGit scenario.
+    vim.cmd.edit(vim.fn.fnameescape(staged))
+    local staged_bufnr = vim.api.nvim_get_current_buf()
+
+    -- Sanity-check the adapter already reverse-maps to the real file
+    -- under the real project root. This is the baseline the fix
+    -- relies on (writes are known-good).
+    local adapter_mod = require("manicule.adapter")
+    local identity = adapter_mod.identify(staged_bufnr)
+    assert.is_truthy(identity)
+    assert.are.equal("project", identity.scope)
+    assert.are.equal(vim.fs.normalize(tmp_root), vim.fs.normalize(identity.project_root))
+
+    -- Add a comment FROM the staged buffer. The add path already
+    -- routes through `adapter.identify`, so this record should land in
+    -- the real project store keyed at `tmp_root`.
+    manicule.add({ body = "routed via adapter", range = { start = { 0, 0 }, end_ = { 0, 0 } } })
+
+    -- Confirm the project store actually owns the record (if this
+    -- assertion fails, the fix isn't what's being exercised — the
+    -- bug would be on the write side instead).
+    local project_records = store.all(vim.fs.normalize(identity.project_root))
+    assert.are.equal(1, #project_records)
+
+    -- Stay on the staged buffer. The user's scenario is
+    -- `:ManiculeSend claude-cmux` from *inside* the DiffToolGit view.
+    assert.are.equal(staged_bufnr, vim.api.nvim_get_current_buf())
+
+    -- The bug: `M.list()` previously called raw `store.root()` on the
+    -- staged buffer, walked up to a dead end, and returned 0 records.
+    -- With the fix it routes through `adapter.identify` and sees the
+    -- project record. Pass `_quiet` so the call doesn't open a
+    -- quickfix list during the test run.
+    local results = manicule.list({ _quiet = true })
+    assert.are.equal(1, #results)
+    assert.are.equal("routed via adapter", results[1].body)
+
+    pcall(vim.cmd, "cd " .. vim.fn.fnameescape(prev_cwd))
+  end)
+end)

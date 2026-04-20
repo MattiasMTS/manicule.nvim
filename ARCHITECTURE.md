@@ -341,6 +341,10 @@ and needs the staged path to pair sibling buffers. The root for
 reverse-mapped records is resolved from the mapped path, not the
 staged buffer, so they land in the correct project store.
 
+Reads route through `adapter.identify` so staged buffers (e.g.
+DiffToolGit) find the real project store; writes use the record's
+stored `project_root` directly.
+
 **`M.add` invariant canary.** After building a record, `M.add` re-runs
 `adapter.identify(bufnr)` and refuses to persist when the returned URI
 doesn't match the record's URI. Any divergence triggers an ERROR

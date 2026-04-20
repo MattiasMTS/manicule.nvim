@@ -92,6 +92,27 @@ local function resolve_range(opts)
   return { start = { cur[1] - 1, 0 }, end_ = { cur[1] - 1, 0 } }
 end
 
+---Resolve the project root that should own comments for the current
+---buffer. Routes through `adapter.identify` first so staged buffers
+---(`<stdpath('run')>/nvim.<user>/<run-id>/<N>/<suffix>` — DiffToolGit
+---and friends) reach the real project store via the adapter's
+---reverse-map. Falls back to `store.root()` only when the adapter can't
+---resolve a project identity (e.g. the buffer is session-scoped, or
+---`identify` returned nothing useful), which preserves the existing
+---behaviour for non-staged cases.
+---@return string?
+local function current_project_root()
+  local adapter = require("manicule.adapter")
+  local bufnr = vim.api.nvim_get_current_buf()
+  if vim.api.nvim_buf_is_valid(bufnr) then
+    local identity = adapter.identify(bufnr)
+    if identity and identity.scope == "project" and identity.project_root then
+      return identity.project_root
+    end
+  end
+  return require("manicule.store").root()
+end
+
 ---Return records that belong to `bufnr` (URI equality). Merges project
 ---records from the currently-resolved root AND session records keyed on
 ---the same URI, so a session-scope comment on a scratch / terminal /
@@ -127,7 +148,11 @@ local function reconcile_buffer(bufnr)
     return
   end
   local store = require("manicule.store")
-  local root = store.root()
+  -- Route through `current_project_root` so a staged buffer
+  -- (DiffToolGit et al.) preloads the *real* project cache — raw
+  -- `store.root()` would walk up the staged path under `stdpath('run')`
+  -- and miss the project entirely.
+  local root = current_project_root()
   if root then
     store.load(root)
   end
@@ -255,7 +280,11 @@ local function on_bufname_changed(bufnr)
   -- record to move along with the file. This quirk is documented.
   local ids = {}
   local touched_project = false
-  local root = store.root()
+  -- Use the adapter-resolved root: on a staged buffer `:saveas` is
+  -- unlikely, but any read-side "which project owns this buffer?"
+  -- question has to reverse-map through the adapter to reach the real
+  -- store.
+  local root = current_project_root()
   if root then
     for _, record in ipairs(store.all(root)) do
       if record.uri == old_uri then
@@ -359,7 +388,10 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
     callback = function()
-      local root = store.root()
+      -- Route through the adapter-aware helper so a write from a
+      -- staged buffer still flushes the right project store. `save`
+      -- on nil is a no-op, so the fallback path stays safe.
+      local root = current_project_root()
       if root then
         store.save(root)
       end
@@ -552,7 +584,11 @@ end
 ---@return table? record, (fun())? save, (fun())? remove
 local function find(id)
   local store = require("manicule.store")
-  local root = store.root()
+  -- Lookups from `M.edit`/`M.delete`/`M.resolve` run against the
+  -- project store that owns the *current* buffer. Route through the
+  -- adapter-aware helper so an id coming off a staged buffer still
+  -- finds the real project records.
+  local root = current_project_root()
   if root then
     local record = store.get(root, id)
     if record then
@@ -685,7 +721,12 @@ function M.list(filter)
   -- filter winnows and consumers can scope further. Keeps the scope
   -- transparent — no caller branches on `record.scope`.
   local all = {}
-  local root = store.root()
+  -- Resolve the project root via the adapter so a staged buffer
+  -- (DiffToolGit et al.) hits the real project store rather than
+  -- walking up through `stdpath('run')` to a dead end — raw
+  -- `store.root()` here returned nil and left M.list blind to every
+  -- record saved via `adapter.identify`'s reverse-map.
+  local root = current_project_root()
   if root then
     for _, r in ipairs(store.all(root)) do
       table.insert(all, r)
