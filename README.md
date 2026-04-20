@@ -196,6 +196,11 @@ If the mapping fails you'll see one of:
 
 Open the real file directly and retry.
 
+Comments added from `:DiffToolGit` anchor to the real file's line
+numbers from the view — for plain one-way diffs this approximates the
+working tree, but lines may drift if the staged view differs
+significantly from the working tree (three-way / unusual diff setups).
+
 ### Diff mode
 
 manicule works inside `nvim -d` and `git difftool -t nvimdiff` views.

@@ -26,6 +26,15 @@
 -- a.lua b.lua` with no temp buffer leaves the heuristic ambiguous, so
 -- each buffer is treated as its own identity (each side shows its own
 -- comments, each allows add).
+--
+-- When BOTH sides of a diff live under `stdpath('run')` (e.g. a
+-- `:DiffToolGit` command that stages both blobs) the heuristic can't
+-- pick a working side, so diff-pair returns nil. That's fine: the
+-- reverse-map branch runs first and anchors each buffer's URI to the
+-- real on-disk file. Line numbers shown in the diff view may drift
+-- from the working tree for three-way or unusual diff setups; for
+-- plain "old vs new" diffs they approximate the working tree well
+-- enough.
 
 local M = {}
 
@@ -131,18 +140,30 @@ local function reverse_map_temp_path(abs)
   return vim.uri_from_fname(real or resolved)
 end
 
----Is `bufnr` displayed in a window with `&diff` set? Reverse-mapping
----is off-limits for diff views because the diff-pair logic owns those
----temp paths and needs the staged URI to find the sibling buffer.
+---Resolve the URI we want to key records under for `bufnr`. For plain
+---file buffers whose bufname is an nvim-runtime staged path, attempt
+---the reverse-map first so both sides of a DiffToolGit-style view
+---anchor to the real on-disk file instead of the per-launch staged
+---copy. When reverse-map fails (ambiguous, no candidate, etc.) we fall
+---back to the raw URI so callers that don't strictly require a mapped
+---URI (e.g. diff-pair's `working_uri` reporting) still get *something*
+---sensible instead of crashing.
+---
+---Exposed on `M` under an underscore-prefixed name so tests and the
+---diff-pair branch can share the same resolution without re-deriving
+---the logic. Not part of the public surface.
 ---@param bufnr integer
----@return boolean
-local function bufnr_in_diff_window(bufnr)
-  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr and vim.wo[winid].diff then
-      return true
+---@return string?
+function M._resolve_uri_for_bufnr(bufnr)
+  local uri_mod = require("manicule.uri")
+  local abs = bufname_abs(bufnr)
+  if abs and uri_mod.is_nvim_runtime_staged_path(abs) then
+    local mapped = reverse_map_temp_path(abs)
+    if mapped then
+      return mapped
     end
   end
-  return false
+  return uri_mod.for_bufnr(bufnr)
 end
 
 ---Detect whether `bufnr` is the reference side of a git-difftool pair.
@@ -193,7 +214,12 @@ function M.resolve_diff_pair(bufnr)
 
   if #real_bufs == 1 and #temp_bufs >= 1 then
     local working_bufnr = real_bufs[1]
-    local working_uri = require("manicule.uri").for_bufnr(working_bufnr)
+    -- Use the shared resolver so that if the "working" buffer itself
+    -- happens to be an nvim-runtime staged path (unusual difftool
+    -- configs), its URI still anchors to the real file. Falls back to
+    -- the raw URI when reverse-map fails — diff-pair is a secondary
+    -- concern, not worth crashing over.
+    local working_uri = M._resolve_uri_for_bufnr(working_bufnr)
     if not working_uri then
       return nil, "working-tree buffer has no URI"
     end
@@ -295,9 +321,16 @@ function M.identify(bufnr)
   -- Reverse-map staged buffers BEFORE any other path resolution. The
   -- source of these is typically a user command that writes a staged
   -- copy (e.g. `:DiffTool`'s `vim.fn.tempname()` pairs) under
-  -- `stdpath('run')` / `/var/folders/...`. Diff-mode buffers skip this
-  -- branch — the diff-pair detection below owns the staged-URI case
-  -- for them and needs the raw path to pair sibling buffers.
+  -- `stdpath('run')` / `/var/folders/...`.
+  --
+  -- DiffToolGit-style commands stage BOTH sides of the diff under
+  -- `stdpath('run')`, so the diff-pair heuristic (which needs exactly
+  -- one "real" buffer to identify the working side) returns nil for
+  -- them. We therefore reverse-map unconditionally when the buffer's
+  -- path looks like an nvim-runtime staged copy and let the later
+  -- diff-pair branch operate on bufnrs+raw paths as before — the two
+  -- code paths don't interfere because diff-pair keys off bufnrs, not
+  -- URIs.
   local abs = bufname_abs(bufnr)
   if not abs then
     return nil, "buffer has no bufname"
@@ -310,10 +343,8 @@ function M.identify(bufnr)
   -- persisted URI can never re-anchor. A plain `/tmp/foo.txt` the user
   -- opened as a scratch is *not* ephemeral from manicule's perspective
   -- — the URI is stable across launches — so it still flows through
-  -- the normal session-scope path. Diff-mode buffers also skip this
-  -- branch; the diff-pair detection below owns them and needs the raw
-  -- staged path to pair sibling buffers.
-  if buftype == "" and uri_mod.is_nvim_runtime_staged_path(abs) and not bufnr_in_diff_window(bufnr) then
+  -- the normal session-scope path.
+  if buftype == "" and uri_mod.is_nvim_runtime_staged_path(abs) then
     local mapped, map_err = reverse_map_temp_path(abs)
     if not mapped then
       return nil, map_err

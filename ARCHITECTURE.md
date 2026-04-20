@@ -336,10 +336,23 @@ detects the path shape (anything containing
    open the real file directly`. Exactly one → use
    `vim.uri_from_fname(fs_realpath(candidate))` as the identity URI.
 
-Diff-mode buffers skip reverse-mapping — the diff-pair logic owns them
-and needs the staged path to pair sibling buffers. The root for
-reverse-mapped records is resolved from the mapped path, not the
-staged buffer, so they land in the correct project store.
+Reverse-map runs on any buffer whose path looks nvim-runtime-staged,
+including diff-mode ones: DiffToolGit-style commands stage BOTH sides
+of a diff under `stdpath('run')`, leaving the diff-pair heuristic
+unable to pick a working side (it needs exactly one "real" buffer),
+so each buffer's URI has to be resolved independently. Reverse-map
+operates on URIs while diff-pair keys off bufnrs + raw paths, so the
+two code paths don't interfere. The root for reverse-mapped records
+is resolved from the mapped path, not the staged buffer, so they land
+in the correct project store.
+
+One acceptable limitation: comments added from a DiffToolGit view
+anchor to the real file's URI using the line numbers shown in the
+view — which represent the *staged* file's content. For plain "old
+vs new" diffs the newer side's line numbers approximate the working
+tree well enough; for three-way or unusual diff setups lines may
+drift. The alternative is refusing all diff-view comments, which is
+worse UX.
 
 Reads route through `adapter.identify` so staged buffers (e.g.
 DiffToolGit) find the real project store; writes use the record's
