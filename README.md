@@ -73,7 +73,7 @@ invoke a `:Manicule*` command or keymap for the first time, so include
 :ManiculeDelete        " picker → delete (or :ManiculeDelete 3)
 :ManiculeResolve       " picker → resolve (or :ManiculeResolve 3)
 :ManiculeToggle        " hide/restore all visuals without touching the store
-:ManiculeSend clipboard
+:ManiculeSend [sink]   " send to [sink], or pick when multiple sinks exist
 ```
 
 `:ManiculeAdd` opens a floating markdown scratch buffer. Type your
@@ -166,6 +166,9 @@ store; comments on a terminal buffer persist across nvim restarts as
 long as the `term://` URI is stable. `persist_unrooted` defaults to
 **true** so "works anywhere" is the honest default; set it to
 `false` to refuse adds on unrooted file buffers with a notify.
+Unnamed buffers use a current-session `manicule://buffer/...` URI:
+their comments can be listed and sent while the buffer lives, but are
+not written to disk unless the buffer later gets a real file name.
 
 If you `:saveas` a scratch-session comment into a project directory,
 the record's scope stays `session` with the new file URI. Delete and
@@ -234,6 +237,17 @@ require("manicule").setup({
     canonicalize_symlinks = true,                  -- resolve symlinks before encoding URIs
     root_markers = { ".git", ".hg", "package.json" },
   },
+  sinks = {
+    clipboard = true, -- generic built-in sink
+    cmux = "auto",   -- native cmux integration; true to force-register, false to disable
+    -- cmux = {
+    --   enabled = true,
+    --   command = "cmux",
+    --   auto_submit = true,
+    --   clear_on_success = true,
+    --   patterns = { "Claude Code", "Codex", "Amp" },
+    -- },
+  },
   ui = {
     width = 72,            -- floating editor width (columns)
     height = 6,            -- floating editor height (lines)
@@ -242,6 +256,9 @@ require("manicule").setup({
     cancel_keys = { "q" },
     opacity = 0,           -- winblend (0 = opaque, 100 = transparent)
     sticky = false,        -- true = always show popups; false = viewport only
+    -- Optional picker override for :ManiculeSend with no sink.
+    -- Called only when multiple sinks are registered.
+    -- sink_picker = function(choices, opts, cb) cb(choices[1]) end,
   },
 })
 ```
@@ -259,9 +276,26 @@ the unsuffixed filename so the common case doesn't fragment.
 
 ## Registering a custom sink
 
+manicule ships two bundled sinks:
+
+- `clipboard`: generic fallback, enabled by default.
+- `cmux`: native integration for running cmux coding-agent surfaces.
+  It auto-registers when `CMUX_WORKSPACE_ID` is set and a `cmux`
+  executable is available. It detects Claude Code, Codex, Amp, and
+  user-provided title/screen patterns, sends the markdown review, and
+  clears comments after successful handoff.
+
+Community integrations should live as small modules that return a sink
+spec from `setup(opts)` or `spec(opts)`. The sink registry handles
+validation, picker display, dispatch, and `clear_on_success` deletion.
+Use `require("manicule.sinks.helpers")` for consistent formatting.
+
 ```lua
 require("manicule").register_sink({
   name = "gist",
+  type = "integration",         -- "sink" by default; "integration" for external tools
+  label = "GitHub Gist",        -- optional display label for pickers
+  description = "draft review", -- optional picker hint
   clear_on_success = false,  -- set true to auto-delete records after cb(true)
   validate = function(ctx)
     if not ctx.token then return false, "missing GitHub token" end
@@ -278,6 +312,74 @@ require("manicule").register_sink({
 ```
 
 Then: `:ManiculeSend gist`.
+
+A reusable integration module looks like:
+
+```lua
+-- lua/manicule/sinks/mytool.lua
+local helpers = require("manicule.sinks.helpers")
+
+local M = {}
+
+function M.setup(opts)
+  opts = opts or {}
+  return {
+    name = "mytool",
+    type = "integration",
+    label = "My Tool",
+    description = "send review to My Tool",
+    clear_on_success = true,
+    format = helpers.format_line,
+    validate = function(ctx)
+      if not opts.token and not ctx.token then
+        return false, "missing token"
+      end
+      return true
+    end,
+    send = function(comments, ctx, cb)
+      local body = helpers.format_markdown_review(comments)
+      -- send body to the external tool
+      cb(true)
+    end,
+  }
+end
+
+return M
+```
+
+For local config, register that module after `setup()`:
+
+```lua
+local manicule = require("manicule")
+manicule.setup()
+manicule.register_sink(require("manicule.sinks.mytool").setup({ token = "..." }))
+```
+
+`:ManiculeSend` with no argument auto-dispatches when exactly one sink is
+registered. When multiple sinks are registered, it opens a picker so you
+can choose the target agent/sink. The default picker is `vim.ui.select`,
+so users who already route `vim.ui.select` through Snacks, Telescope,
+fzf-lua, dressing.nvim, etc. do not need extra configuration.
+
+For a direct picker integration, configure `ui.sink_picker`:
+
+```lua
+require("manicule").setup({
+  ui = {
+    sink_picker = function(choices, opts, cb)
+      -- choices are { name, label, description, display, sink } tables.
+      -- opts.prompt and opts.format_item mirror vim.ui.select.
+      vim.ui.select(choices, {
+        prompt = opts.prompt,
+        format_item = opts.format_item,
+      }, cb)
+    end,
+  },
+})
+```
+
+Custom pickers may call `cb(choice)` with one of the choice tables or
+`cb(choice.name)` with the sink name. Call `cb(nil)` to cancel.
 
 Set `clear_on_success = true` when the sink semantically *consumes* the
 records (e.g. handing a review off to an external reviewer) — the core

@@ -187,7 +187,7 @@ describe("manicule positional picker", function()
     local qf_items = require("manicule.ui.quickfix").build_items(require("manicule").list({ _quiet = true }))
     local qf_ids = {}
     for _, it in ipairs(qf_items) do
-      table.insert(qf_ids, it.user_data)
+      table.insert(qf_ids, it.user_data.id)
     end
     assert.are.same(list_ids, qf_ids)
     -- Sanity check: a.lua records should come before b.lua (URI order

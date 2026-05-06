@@ -2,6 +2,8 @@
 
 local M = {}
 
+---@alias manicule.SinkPicker fun(choices: manicule.SinkChoice[], opts: table, cb: function)
+
 ---@class manicule.UIConfig
 ---@field width integer Floating editor width (columns)
 ---@field height integer Floating editor height (lines)
@@ -10,6 +12,7 @@ local M = {}
 ---@field cancel_keys string[] Keys that cancel the editor
 ---@field opacity integer winblend (0 = opaque, 100 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
+---@field sink_picker? manicule.SinkPicker Custom picker for choosing a send sink
 
 ---@class manicule.StoreConfig
 ---@field dir string Directory where per-root store files live.
@@ -18,6 +21,10 @@ local M = {}
 ---@field persist_unrooted boolean When true (default), unrooted file buffers route into the session store.
 ---@field canonicalize_symlinks boolean Resolve symlinks via `fs_realpath` before encoding URIs.
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
+
+---@class manicule.SinksConfig
+---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
+---@field cmux boolean|"auto"|table Enable the bundled cmux integration ("auto" by default).
 
 ---@type manicule.Config
 M.defaults = {
@@ -43,13 +50,10 @@ M.defaults = {
     -- Markers passed to `vim.fs.root` when resolving the project key.
     root_markers = { ".git", ".hg", "package.json" },
   },
-  handlers = {
-    signs = { enabled = true },
-    virtual_text = { enabled = false },
-    float = { enabled = true },
-  },
   sinks = {
-    -- Named sink configurations populated by user/setup.
+    -- `clipboard = false` disables the generic clipboard sink.
+    -- `cmux = true` forces the cmux integration into the picker.
+    -- `cmux = "auto"` (default) registers it only inside cmux.
   },
   -- Floating editor + popup UI options. Mirrors the codediff.nvim surface.
   ui = {
@@ -81,7 +85,6 @@ function M.setup(opts)
   vim.validate({
     opts = { opts, "table" },
     store = { opts.store, "table", true },
-    handlers = { opts.handlers, "table", true },
     sinks = { opts.sinks, "table", true },
     ui = { opts.ui, "table", true },
   })
@@ -107,6 +110,7 @@ function M.setup(opts)
       ["ui.cancel_keys"] = { opts.ui.cancel_keys, "table", true },
       ["ui.opacity"] = { opts.ui.opacity, "number", true },
       ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
+      ["ui.sink_picker"] = { opts.ui.sink_picker, "function", true },
     })
   end
   M.current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)

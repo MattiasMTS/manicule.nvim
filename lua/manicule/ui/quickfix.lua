@@ -128,25 +128,25 @@ local function build_items(records)
       col = start_col(r),
       type = r.resolved and "N" or "I",
       text = format_text(r),
-      -- Tag each item with its record id so the live-refresh and
-      -- keymap paths can resolve the record under the cursor in O(1).
-      -- Neovim accepts any Lua value here; we use the string id for
-      -- trivial round-tripping through `getqflist({items=true})`.
-      user_data = r.id,
+      -- Tag each item with a stable locator so qf-local mutations don't
+      -- depend on the quickfix buffer's own project identity.
+      user_data = {
+        id = r.id,
+        scope = r.scope,
+        project_root = r.project_root,
+      },
     }
     local fname = filename_for(r)
     if fname then
       -- Quickfix needs a real filesystem path for `<CR>`/`:cc` jumps.
-      -- Non-file URIs (term://, …) won't reach phase 1, but forward-
-      -- compat: fall through to a live-bufnr lookup so the jump lands
-      -- somewhere sensible.
+      -- Non-file URIs fall through to a live-bufnr lookup so terminal,
+      -- help, and unnamed scratch-buffer comments still jump somewhere
+      -- sensible while the owning buffer exists.
       item.filename = fname
     else
-      for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == r.uri then
-          item.bufnr = bufnr
-          break
-        end
+      local bufnr = require("manicule.uri").bufnr_for_uri(r.uri)
+      if bufnr then
+        item.bufnr = bufnr
       end
     end
     table.insert(items, item)
@@ -198,8 +198,8 @@ end
 --- Resolve the record id at the cursor in the current quickfix window.
 --- Reads `user_data` off the qf item indexed by the cursor row. Returns
 --- nil if the current buffer isn't a quickfix or the item has no id.
----@return string|nil
-function M.record_id_at_cursor()
+---@return { id: string, scope?: "project"|"session", project_root?: string }|nil
+function M.record_locator_at_cursor()
   if vim.bo.buftype ~= "quickfix" then
     return nil
   end
@@ -212,9 +212,26 @@ function M.record_id_at_cursor()
   if not item then
     return nil
   end
-  local id = item.user_data
-  if type(id) == "string" and id ~= "" then
-    return id
+  local data = item.user_data
+  if type(data) == "table" and type(data.id) == "string" and data.id ~= "" then
+    return {
+      id = data.id,
+      scope = data.scope,
+      project_root = data.project_root,
+    }
+  end
+  if type(data) == "string" and data ~= "" then
+    return { id = data }
+  end
+  return nil
+end
+
+---Compatibility helper for callers that only need the id.
+---@return string|nil
+function M.record_id_at_cursor()
+  local locator = M.record_locator_at_cursor()
+  if locator then
+    return locator.id
   end
   return nil
 end

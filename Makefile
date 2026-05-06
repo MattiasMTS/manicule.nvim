@@ -1,11 +1,12 @@
-TESTS_INIT=tests/minimal_init.lua
-TESTS_DIR=tests/
+TESTS_INIT=tests/minit.lua
 
-.PHONY: test
+.PHONY: test test-unit test-integration
 
 test:
-	@nvim \
-		--headless \
-		--noplugin \
-		-u ${TESTS_INIT} \
-		-c "PlenaryBustedDirectory ${TESTS_DIR} { minimal_init = '${TESTS_INIT}' }"
+	@scripts/test
+
+test-unit:
+	@scripts/test tests/manicule
+
+test-integration:
+	@scripts/test tests/integration

@@ -110,6 +110,38 @@ function M.abs_for_bufnr(bufnr)
   return vim.fs.normalize(vim.fn.fnamemodify(name, ":p"))
 end
 
+local EPHEMERAL_SCHEME = "manicule://buffer/"
+local ephemeral_seq = 0
+
+---Return true when `uri` is a buffer-local, current-session URI for an
+---unnamed buffer. These URIs make comments usable for scratch buffers
+---but are intentionally not stable across Neovim restarts.
+---@param uri string?
+---@return boolean
+function M.is_ephemeral(uri)
+  return type(uri) == "string" and uri:sub(1, #EPHEMERAL_SCHEME) == EPHEMERAL_SCHEME
+end
+
+---Return the current-session URI for an unnamed buffer, creating it on
+---first use. Stored in a buffer variable so `:file` / `:saveas` can
+---rewrite records from the same identity when the buffer later gains a
+---real name.
+---@param bufnr integer
+---@return string?
+local function ephemeral_for_bufnr(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  local ok, existing = pcall(vim.api.nvim_buf_get_var, bufnr, "manicule_ephemeral_uri")
+  if ok and M.is_ephemeral(existing) then
+    return existing
+  end
+  ephemeral_seq = ephemeral_seq + 1
+  local uri = ("%s%s/%d"):format(EPHEMERAL_SCHEME, tostring(vim.fn.getpid()), ephemeral_seq)
+  pcall(vim.api.nvim_buf_set_var, bufnr, "manicule_ephemeral_uri", uri)
+  return uri
+end
+
 ---Return true if symlink canonicalisation is enabled (default true).
 ---@return boolean
 local function canonicalize_symlinks()
@@ -134,7 +166,9 @@ end
 ---Return the canonical URI for a buffer, as `manicule` stores it.
 ---For file-backed buffers with a readable path, resolves symlinks via
 ---`vim.uv.fs_realpath` before encoding; non-file URIs (term://, etc.)
----pass through.
+---pass through. Unnamed buffers get a current-session-only
+---`manicule://buffer/...` URI so scratch buffers can still carry
+---comments until they are sent or named.
 ---@param bufnr integer
 ---@return string?
 function M.for_bufnr(bufnr)
@@ -143,7 +177,7 @@ function M.for_bufnr(bufnr)
   end
   local name = vim.api.nvim_buf_get_name(bufnr)
   if name == "" then
-    return nil
+    return ephemeral_for_bufnr(bufnr)
   end
   local scheme = scheme_of(name)
   if scheme and scheme ~= "file" then
@@ -159,6 +193,28 @@ function M.for_bufnr(bufnr)
     end
   end
   return vim.uri_from_fname(abs)
+end
+
+---Find a loaded buffer that currently corresponds to `uri`.
+---@param uri string
+---@return integer?
+function M.bufnr_for_uri(uri)
+  if type(uri) ~= "string" or uri == "" then
+    return nil
+  end
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      if M.is_ephemeral(uri) then
+        local ok, existing = pcall(vim.api.nvim_buf_get_var, bufnr, "manicule_ephemeral_uri")
+        if ok and existing == uri then
+          return bufnr
+        end
+      elseif vim.api.nvim_buf_get_name(bufnr) == uri then
+        return bufnr
+      end
+    end
+  end
+  return nil
 end
 
 ---Return the canonical URI for an absolute file path (post-realpath

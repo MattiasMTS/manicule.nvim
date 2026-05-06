@@ -40,7 +40,7 @@ local function teardown_env()
   require("manicule.store")._reset()
   -- Reset to a single window with a nameless scratch so the next test
   -- doesn't inherit diff windows from the previous one.
-  pcall(vim.cmd, "only")
+  pcall(vim.cmd, "silent! only")
   pcall(vim.cmd, "enew!")
   pcall(vim.fn.delete, tmp_state, "rf")
   pcall(vim.fn.delete, tmp_root, "rf")
@@ -110,12 +110,31 @@ describe("manicule.adapter temp detection", function()
     assert.are.equal(uri_mod.for_bufnr(bufnr), id.uri)
   end)
 
-  it("identify returns nil+err for a buffer without a bufname", function()
+  it("identify returns writable session identity for an unnamed buffer", function()
     vim.cmd.enew()
     local bufnr = vim.api.nvim_get_current_buf()
     local id, err = adapter.identify(bufnr)
-    assert.is_nil(id)
-    assert.is_truthy(err)
+    assert.is_nil(err)
+    assert.is_truthy(id)
+    assert.are.equal("session", id.scope)
+    assert.is_true(id.is_writable)
+    assert.is_true(id.ephemeral)
+    assert.is_truthy(id.uri:match("^manicule://buffer/"))
+    assert.are.equal(id.uri, require("manicule.uri").for_bufnr(bufnr))
+  end)
+
+  it("add works on unnamed buffers and keeps the record session-local", function()
+    vim.cmd.enew()
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, { "scratch line" })
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    require("manicule").add({ body = "scratch note", range = { start = { 0, 0 }, end_ = { 0, 0 } } })
+
+    local records = require("manicule.store").session_all()
+    assert.are.equal(1, #records)
+    assert.are.equal("scratch note", records[1].body)
+    assert.are.equal(adapter.identify(bufnr).uri, records[1].uri)
+    assert.is_true(records[1].meta.ephemeral)
   end)
 
   it("identify refuses add on the reference side of a git diff pair", function()
@@ -167,11 +186,11 @@ describe("manicule.adapter temp detection", function()
   end)
 
   it("identify returns session scope on a terminal buffer", function()
-    -- Spawn a short-lived terminal (on macOS /bin/true exits fast).
     vim.cmd("enew")
-    vim.fn.termopen({ "/bin/sh", "-c", "sleep 1" })
+    local job = vim.fn.termopen({ "/bin/sh", "-c", "exit 0" })
     local bufnr = vim.api.nvim_get_current_buf()
     local id = adapter.identify(bufnr)
+    pcall(vim.fn.jobstop, job)
     assert.is_truthy(id)
     assert.are.equal("session", id.scope)
     assert.is_true(id.is_writable)
@@ -194,14 +213,9 @@ describe("manicule.adapter temp detection", function()
   end)
 
   it("identify rejects a quickfix buffer", function()
-    vim.fn.setqflist({}, " ", { title = "manicule-adapter-test", items = {} })
-    vim.cmd.copen()
+    vim.cmd("enew")
     local bufnr = vim.api.nvim_get_current_buf()
-    -- Only exercise when the copen actually produced a quickfix buf.
-    if vim.bo[bufnr].buftype ~= "quickfix" then
-      pending("copen did not produce a quickfix buftype")
-      return
-    end
+    vim.bo[bufnr].buftype = "quickfix"
     local id = adapter.identify(bufnr)
     assert.is_truthy(id)
     assert.is_false(id.is_writable)

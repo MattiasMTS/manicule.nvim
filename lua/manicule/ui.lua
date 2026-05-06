@@ -5,11 +5,19 @@
 -- multi-line markdown-flavoured editing with user-configurable submit /
 -- cancel keys instead of the single-line `vim.ui.input` we used in v0.
 --
--- `M.select_sink` still uses `vim.ui.select` so dressing.nvim /
--- snacks.nvim / fzf-lua / telescope-ui-select continue to work out of
--- the box for sink selection.
+-- `M.select_sink` auto-sends when there is a single sink and opens a
+-- configurable picker when multiple sinks are registered. The default
+-- picker is `vim.ui.select`, so dressing.nvim / snacks.nvim / fzf-lua /
+-- telescope-ui-select continue to work out of the box.
 
 local M = {}
+
+---@class manicule.SinkChoice
+---@field name string Registered sink name
+---@field label string Human-friendly label
+---@field description string? Optional description from the sink spec
+---@field display string Rendered picker label
+---@field sink table Raw sink spec
 
 ---Open the floating comment editor and invoke `cb` with the body
 ---(or `nil` on cancel).
@@ -30,8 +38,65 @@ end
 ---Prompt for a registered sink name.
 ---@param cb fun(name: string|nil)
 function M.select_sink(cb)
-  local sinks = require("manicule.sinks").list()
-  vim.ui.select(sinks, { prompt = "Sink:" }, cb)
+  local sinks = require("manicule.sinks")
+  local names = sinks.list()
+  if #names == 0 then
+    vim.notify("manicule: no sinks registered", vim.log.levels.WARN)
+    cb(nil)
+    return
+  end
+  if #names == 1 then
+    cb(names[1])
+    return
+  end
+
+  local choices = {}
+  for _, name in ipairs(names) do
+    local sink = sinks.get(name) or {}
+    local label = sink.label or sink.display_name or name
+    local description = sink.description
+    local display = label
+    if type(description) == "string" and description ~= "" then
+      display = display .. " - " .. description
+    end
+    table.insert(choices, {
+      name = name,
+      label = label,
+      description = description,
+      display = display,
+      sink = sink,
+    })
+  end
+
+  local function finish(choice)
+    if type(choice) == "string" then
+      cb(choice)
+      return
+    end
+    if type(choice) == "table" and type(choice.name) == "string" then
+      cb(choice.name)
+      return
+    end
+    cb(nil)
+  end
+
+  local picker = ((require("manicule.config").get() or {}).ui or {}).sink_picker
+  local opts = {
+    prompt = "Manicule: send to",
+    format_item = function(item)
+      return item.display or item.name
+    end,
+  }
+  if type(picker) == "function" then
+    local ok, err = pcall(picker, choices, opts, finish)
+    if not ok then
+      vim.notify("manicule: sink picker failed: " .. tostring(err), vim.log.levels.ERROR)
+      cb(nil)
+    end
+    return
+  end
+
+  vim.ui.select(choices, opts, finish)
 end
 
 local cached_email

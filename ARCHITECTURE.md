@@ -74,9 +74,10 @@ knob and defaults to viewport-driven.
                           │      │       │
                           │      ▼       │
                           │ clipboard.lua│
+                          │ cmux.lua     │
+                          │ helpers.lua  │
                           └──────────────┘
 
-                  handlers.lua  ← STUB (v2 render handlers)
 ```
 
 Identity flow (phase 2):
@@ -92,7 +93,7 @@ Identity flow (phase 2):
               │     │                  is_writable=false, diff_side="reference"
               │     └─ working side / no pair: continue
               │
-              ├─ store.root() matches? → scope="project", writable
+              ├─ vim.fs.root(bufnr, markers) matches? → scope="project", writable
               └─ fall through           → scope="session"
                                           (writable iff buftype policy allows)
 ```
@@ -143,7 +144,8 @@ trimmed to fit manicule's buffer-agnostic model.
   completion numbers and picker rows stay 1:1.
 
 `lua/manicule/ui.lua` stays as a thin facade: `prompt` hands off to
-`ui/editor`, `select_sink` still uses `vim.ui.select`.
+`ui/editor`, and `select_sink` auto-selects a single sink or delegates
+multiple choices to `ui.sink_picker` / `vim.ui.select`.
 
 ## 3. Data flow: add comment
 
@@ -177,11 +179,11 @@ plugin/manicule ──► init.add(opts)
          ▼
    init.reconcile_buffer(bufnr)
          │
-         ├─ store.root()        (vim.fs.root(store.root_markers) || cwd fallback)
-         ├─ store.load(root)    (fills module-local cache[root])
-         ├─ manicule.uri.for_bufnr(bufnr)  (fs_realpath + vim.uri_from_fname)
-         │
-         ├─ records = store.for_uri(root, uri)
+        ├─ adapter.identify(bufnr)       (URI + target-buffer project root)
+        ├─ store.load(root)              (fills module-local cache[root])
+        ├─ manicule.uri.for_bufnr(bufnr) (fs_realpath, passthrough, or ephemeral URI)
+        │
+        ├─ records = store.all_for_uri(uri, root)
          ├─ ui.render.reconcile(bufnr, records)
          │     └─ for each record: create/refresh anchor extmark and
          │        (sticky) popup, prune handles that no longer appear
@@ -210,10 +212,14 @@ sweep; use `event = { "BufReadPost", "BufNewFile" }` as the trigger.
 ## 5. Data flow: send
 
 ```
-  :ManiculeSend clipboard
+  :ManiculeSend [clipboard]
          │
          ▼
    init.send(sink_name, filter, ctx)
+         │
+         ├─ no sink? ui.select_sink(cb)
+         │     ├─ one sink       → cb(name)
+         │     └─ multiple sinks → ui.sink_picker? / vim.ui.select
          │
          ├─ list(filter)  (vim.iter over store.all(root); _quiet = true)
          │
@@ -248,20 +254,20 @@ entry naturally.
 
 The store lives under `stdpath("state") .. "/manicule/"` (overridable
 via `store.dir`), one file per project root. The root is resolved with
-`vim.fs.root(0, store.root_markers)` — defaults to `{".git", ".hg",
+`vim.fs.root(bufnr, store.root_markers)` — defaults to `{".git", ".hg",
 "package.json"}`. The filename is the root path with `[\\/:]+` collapsed
 to `%%` (same trick persistence.nvim uses), so `/Users/me/src/foo` →
 `%Users%me%src%foo.mpack`. Keying by the git root rather than
 `getcwd()` means comments survive `cd`'ing into subdirs.
 
-### Record schema (phase 1)
+### Record schema
 
 ```
 {
   id           = "unique",                            -- id.new()
   uri          = "file:///abs/path.lua",              -- canonical URI
-  scope        = "project",                           -- only scope in phase 1
-  project_root = "/abs/path/to/root",                 -- absolute root
+  scope        = "project",                           -- or "session"
+  project_root = "/abs/path/to/root",                 -- nil for session records
   range        = { start = {row,col}, end_ = {row,col} },
   body         = "text",
   author       = "user@example.com",
@@ -314,6 +320,10 @@ defaults to `true`; setting it to `false` makes unrooted *file*
 buffers reject adds with a notify — special buftypes still route to
 session regardless. Quickfix, prompt, and cmdwin buffers reject
 unconditionally.
+Unnamed buffers get a current-session-only `manicule://buffer/...` URI.
+Those records remain available for list/send while the buffer exists,
+but are omitted from `session.<format>` until `:file` / `:saveas`
+rewrites them to a stable URI.
 
 **Runtime-staged buffers.** Plugins (a `:DiffTool` command, a stash-
 blob viewer, a codediff review buffer, …) sometimes write content to
@@ -327,7 +337,8 @@ detects the path shape (anything containing
 
 1. Peel the `/nvim.<user>/<run-id>/<N>/` triplet from the path.
 2. Resolve the remaining `<suffix>` against, in order:
-   - `vim.fs.root(0, store.root_markers)` — the current project root.
+   - `vim.fs.root(0, store.root_markers)` — the current project root /
+     cwd fallback used by the reverse-map heuristic.
    - `vim.fn.getcwd()`.
    - `$HOME`, only when the suffix starts with `.` (dotfile/config).
 3. Zero candidates that exist on disk → reject with
@@ -414,25 +425,45 @@ All events are native `User` autocmds — subscribe with
 ## 9. Extension points
 
 - **Sinks** (primary, stable): register via `require("manicule").register_sink(spec)`.
-  A spec is `{ name, send(comments, ctx, cb), format?, validate?, clear_on_success? }`.
+  A spec is `{ name, type?, label?, description?, send(comments, ctx, cb), format?, validate?, health?, clear_on_success? }`.
   Opt in with `clear_on_success = true` to have the core auto-delete
   every record in the batch after the sink's callback returns `ok = true`
   (`ManiculeSent` fires first, then one `ManiculeDeleted` per record).
-  See `lua/manicule/sinks/clipboard.lua` for a reference adapter.
-- **handlers.* (v2)**: `lua/manicule/handlers.lua` sketches
-  `signs` / `virtual_text` / `float` entries shaped like
-  `vim.diagnostic.handlers`. Wiring them into a real render pass is a
-  v2 item.
+  Built-ins are loaded by `manicule.sinks.setup`: `clipboard` is the
+  generic sink, and `cmux` is an auto-enabled integration when the user
+  is inside cmux. Community integrations should expose `setup(opts)`
+  and use `lua/manicule/sinks/helpers.lua` for shared formatting so
+  tests can exercise dispatch without real external services.
 
-## 10. Non-goals (for now)
+## 10. Test strategy
+
+`make test` is the publishing gate. It runs `tests/minit.lua`, a direct
+`mini.test` harness that bootstraps `mini.test` into `.tests/` and then
+executes all `tests/**/*_spec.lua` files in headless Neovim. The runner
+does not load the user's config and does not depend on manual UI.
+
+- Unit specs under `tests/manicule/` exercise module-level behavior:
+  adapter identity, URI reverse-map, store persistence, picker routing,
+  and sink selection.
+- Integration specs under `tests/integration/` exercise user workflows:
+  add → list → send, command dispatch, fake prompt input, fake sinks,
+  sink `clear_on_success`, and `User Manicule*` events.
+- `make test-unit` and `make test-integration` keep the two layers
+  runnable independently when debugging failures.
+
+External integrations such as cmux should stay behind sink specs or
+fake sink adapters in tests. The core contract to validate is that
+manicule selects the right comments, passes the right context, emits
+the right events, and clears comments only when the sink declares that
+policy.
+
+## 11. Non-goals (for now)
 
 - Multi-user / real-time sync.
 - Threading, replies, or reactions.
 - SQLite or any structured-storage backend.
 - A pluggable display-handler system. Rendering lives in
-  `ui/render.lua` and is opinionated around floating popups; the
-  `handlers.lua` stub is kept as a sketch of where a user-facing
-  handler API could land, but it is not wired.
+  `ui/render.lua` and is opinionated around floating popups.
 - (Done — see UI layer above.) The floating-window comment editor has
   replaced the v0 single-line `vim.ui.input` prompt.
 - Matching saved records by line text. v1 re-anchors by saved

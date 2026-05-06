@@ -4,12 +4,17 @@
 
 local M = {}
 
+function M.setup()
+  return M.spec
+end
+
 M.spec = {
   name = "clipboard",
+  type = "sink",
+  label = "Clipboard",
+  description = "copy formatted comments to the + register",
   format = function(c)
-    local line = (c.range and c.range.start and c.range.start[1] or 0) + 1
-    local display = require("manicule.uri").to_path(c.uri) or c.uri or "?"
-    return string.format("%s:%d: %s", display, line, c.body or "")
+    return require("manicule.sinks.helpers").format_line(c)
   end,
   send = function(comments, _ctx, cb)
     local lines = {}

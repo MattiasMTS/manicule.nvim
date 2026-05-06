@@ -228,7 +228,10 @@ function M.pick(action, records)
     if not chosen then
       return
     end
-    require("manicule")[action](chosen.record.id)
+    require("manicule")[action](chosen.record.id, {
+      scope = chosen.record.scope,
+      project_root = chosen.record.project_root,
+    })
   end)
 end
 

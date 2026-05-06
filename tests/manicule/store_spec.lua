@@ -220,4 +220,66 @@ describe("manicule.store session scope", function()
     table.sort(ids)
     assert.are.same({ "p", "s" }, ids)
   end)
+
+  it("all_for_uri accepts an explicit project root for non-current buffers", function()
+    local store = require("manicule.store")
+    local uri = require("manicule.uri").for_path(tmp_root .. "/target.lua")
+    store.put(tmp_root, {
+      id = "p",
+      uri = uri,
+      scope = "project",
+      project_root = tmp_root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "project",
+      author = "",
+      created_at = 0,
+      updated_at = 0,
+      resolved = false,
+      meta = {},
+    })
+    store.session_put({
+      id = "s",
+      uri = uri,
+      scope = "session",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "session",
+      author = "",
+      created_at = 0,
+      updated_at = 0,
+      resolved = false,
+      meta = {},
+    })
+
+    vim.cmd.enew()
+
+    local explicit = store.all_for_uri(uri, tmp_root)
+    assert.are.equal(2, #explicit)
+
+    local session_only = store.all_for_uri(uri, nil)
+    assert.are.equal(1, #session_only)
+    assert.are.equal("s", session_only[1].id)
+  end)
+
+  it("session_save keeps ephemeral unnamed-buffer records in memory but off disk", function()
+    local store = require("manicule.store")
+    store.session_put({
+      id = "ephemeral",
+      uri = "manicule://buffer/1/1",
+      scope = "session",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "scratch",
+      author = "",
+      created_at = 0,
+      updated_at = 0,
+      resolved = false,
+      meta = { ephemeral = true },
+    })
+
+    local ok = store.session_save()
+    assert.is_true(ok)
+    assert.are.equal(1, #store.session_all())
+
+    store._reset()
+    assert.are.equal(0, #store.session_all())
+  end)
 end)

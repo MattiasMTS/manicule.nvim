@@ -28,7 +28,6 @@ local M = {}
 
 ---@class manicule.Config
 ---@field store? table
----@field handlers? table
 ---@field sinks? table
 ---@field ui? manicule.UIConfig
 
@@ -92,25 +91,36 @@ local function resolve_range(opts)
   return { start = { cur[1] - 1, 0 }, end_ = { cur[1] - 1, 0 } }
 end
 
----Resolve the project root that should own comments for the current
----buffer. Routes through `adapter.identify` first so staged buffers
+---Resolve the project root that should own comments for `bufnr`. Routes
+---through `adapter.identify` first so staged buffers
 ---(`<stdpath('run')>/nvim.<user>/<run-id>/<N>/<suffix>` — DiffToolGit
 ---and friends) reach the real project store via the adapter's
----reverse-map. Falls back to `store.root()` only when the adapter can't
----resolve a project identity (e.g. the buffer is session-scoped, or
----`identify` returned nothing useful), which preserves the existing
----behaviour for non-staged cases.
+---reverse-map. Falls back to `vim.fs.root(bufnr, ...)` only when the
+---adapter can't resolve a project identity, so scheduled autocmds operate
+---on their event buffer instead of whatever happens to be current.
+---@param bufnr integer
 ---@return string?
-local function current_project_root()
+local function project_root_for_bufnr(bufnr)
   local adapter = require("manicule.adapter")
-  local bufnr = vim.api.nvim_get_current_buf()
-  if vim.api.nvim_buf_is_valid(bufnr) then
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
     local identity = adapter.identify(bufnr)
     if identity and identity.scope == "project" and identity.project_root then
       return identity.project_root
     end
+    local cfg = require("manicule.config").get()
+    local markers = ((cfg or {}).store or {}).root_markers
+    local ok, root = pcall(vim.fs.root, bufnr, markers)
+    if ok then
+      return root
+    end
   end
-  return require("manicule.store").root()
+  return nil
+end
+
+---Resolve the project root for the current buffer.
+---@return string?
+local function current_project_root()
+  return project_root_for_bufnr(vim.api.nvim_get_current_buf())
 end
 
 ---Return records that belong to `bufnr` (URI equality). Merges project
@@ -137,7 +147,7 @@ local function records_for_buffer(bufnr)
   if identity.diff_side == "reference" then
     return {}
   end
-  return store.all_for_uri(identity.uri)
+  return store.all_for_uri(identity.uri, identity.project_root)
 end
 
 ---Run reconcile for every buffer that already has an entry in `buffer_to_path`
@@ -152,7 +162,7 @@ local function reconcile_buffer(bufnr)
   -- (DiffToolGit et al.) preloads the *real* project cache — raw
   -- `store.root()` would walk up the staged path under `stdpath('run')`
   -- and miss the project entirely.
-  local root = current_project_root()
+  local root = project_root_for_bufnr(bufnr)
   if root then
     store.load(root)
   end
@@ -206,6 +216,99 @@ local function refresh_viewport(bufnr)
   end
   local records = records_for_buffer(bufnr)
   require("manicule.ui.render").update_viewport_popups(bufnr, records)
+end
+
+---Copy live extmark positions back into their records. Extmarks are the
+---source of truth while a buffer is open; persisted ranges need to follow
+---them before writes, sends, and list formatting.
+---@param bufnr integer
+---@return { roots: table<string, boolean>, session: boolean, count: integer }
+local function sync_positions_for_buffer(bufnr)
+  local touched = { roots = {}, session = false, count = 0 }
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return touched
+  end
+
+  local store = require("manicule.store")
+  local adapter = require("manicule.adapter")
+  local render = require("manicule.ui.render")
+  local identity = adapter.identify(bufnr)
+  if not identity or not identity.uri or identity.diff_side == "reference" then
+    return touched
+  end
+
+  if identity.project_root then
+    store.load(identity.project_root)
+  end
+  store.session_load()
+
+  local records = store.all_for_uri(identity.uri, identity.project_root)
+  if #records == 0 then
+    return touched
+  end
+
+  local by_id = {}
+  for _, record in ipairs(records) do
+    by_id[tostring(record.id or "")] = record
+  end
+
+  local patches = render.capture_position_patches(bufnr, records)
+  for _, patch in ipairs(patches.updates or {}) do
+    local record = by_id[tostring(patch.id or "")]
+    if record then
+      record.range = patch.range
+      touched.count = touched.count + 1
+      if record.scope == "session" then
+        store.session_mark_dirty()
+        touched.session = true
+      else
+        local root = record.project_root or identity.project_root
+        if root then
+          store.mark_dirty(root)
+          touched.roots[root] = true
+        end
+      end
+    end
+  end
+
+  return touched
+end
+
+---Synchronise every loaded buffer and return the roots that need flushing.
+---@return { roots: table<string, boolean>, session: boolean, count: integer }
+local function sync_all_loaded_positions()
+  local total = { roots = {}, session = false, count = 0 }
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local touched = sync_positions_for_buffer(bufnr)
+      total.count = total.count + touched.count
+      total.session = total.session or touched.session
+      for root in pairs(touched.roots) do
+        total.roots[root] = true
+      end
+    end
+  end
+  return total
+end
+
+---@param action string
+---@param err string?
+local function notify_save_failed(action, err)
+  vim.notify(
+    ("manicule: failed to persist %s: %s"):format(action, tostring(err or "unknown error")),
+    vim.log.levels.ERROR
+  )
+end
+
+---@param target table
+---@param source table
+local function replace_table_contents(target, source)
+  for key in pairs(target) do
+    target[key] = nil
+  end
+  for key, value in pairs(source) do
+    target[key] = value
+  end
 end
 
 ---Bring `bufnr` up to date with the store: reconcile extmarks/popups and
@@ -284,7 +387,7 @@ local function on_bufname_changed(bufnr)
   -- unlikely, but any read-side "which project owns this buffer?"
   -- question has to reverse-map through the adapter to reach the real
   -- store.
-  local root = current_project_root()
+  local root = project_root_for_bufnr(bufnr)
   if root then
     for _, record in ipairs(store.all(root)) do
       if record.uri == old_uri then
@@ -302,6 +405,8 @@ local function on_bufname_changed(bufnr)
   for _, record in ipairs(store.session_all()) do
     if record.uri == old_uri then
       record.uri = new_uri
+      record.meta = record.meta or {}
+      record.meta.ephemeral = uri_mod.is_ephemeral(new_uri) or nil
       table.insert(ids, record.id)
       touched_session = true
     end
@@ -335,13 +440,8 @@ function M.setup(opts)
   local config = require("manicule.config")
   config.setup(opts)
 
-  -- Register built-in sinks unless the user opted out.
-  local sinks_cfg = opts.sinks or {}
-  if sinks_cfg.clipboard ~= false then
-    local sinks = require("manicule.sinks")
-    local clipboard = require("manicule.sinks.clipboard")
-    sinks.register(clipboard.spec)
-  end
+  -- Register bundled sinks/integrations unless the user opted out.
+  require("manicule.sinks").setup(require("manicule.config").get().sinks)
 
   -- Initialize the render layer (highlights).
   require("manicule.ui.render").setup()
@@ -387,18 +487,33 @@ function M.setup(opts)
 
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
-    callback = function()
+    callback = function(ev)
+      local touched = sync_positions_for_buffer(ev.buf)
       -- Route through the adapter-aware helper so a write from a
       -- staged buffer still flushes the right project store. `save`
       -- on nil is a no-op, so the fallback path stays safe.
-      local root = current_project_root()
+      local root = project_root_for_bufnr(ev.buf)
       if root then
-        store.save(root)
+        local ok, err = store.save(root)
+        if not ok then
+          notify_save_failed("project store", err)
+        end
+      end
+      for touched_root in pairs(touched.roots) do
+        if touched_root ~= root then
+          local ok, err = store.save(touched_root)
+          if not ok then
+            notify_save_failed("project store", err)
+          end
+        end
       end
       -- A write to a file that owns session-scope records (e.g. an
       -- unrooted scratch that the user `:w <path>`ed) should flush the
       -- session store too. Cheap no-op when nothing is dirty.
-      store.session_save()
+      local ok, err = store.session_save()
+      if not ok then
+        notify_save_failed("session store", err)
+      end
     end,
   })
 
@@ -433,6 +548,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
     callback = function()
+      sync_all_loaded_positions()
       store.flush_all()
     end,
   })
@@ -527,7 +643,7 @@ local function finalize_add(body, bufnr, range)
     created_at = now,
     updated_at = now,
     resolved = false,
-    meta = {},
+    meta = identity.ephemeral and { ephemeral = true } or {},
   }
   -- Invariant canary: re-run `identify` and refuse to persist if it
   -- doesn't reproduce the URI we built the record around. Guards
@@ -548,10 +664,20 @@ local function finalize_add(body, bufnr, range)
     return
   end
   store.put_record(record)
+  local ok, err
   if record.scope == "session" then
-    store.session_save()
+    ok, err = store.session_save()
   else
-    store.save(identity.project_root)
+    ok, err = store.save(identity.project_root)
+  end
+  if not ok then
+    if record.scope == "session" then
+      store.session_remove(record.id)
+    else
+      store.remove(identity.project_root, record.id)
+    end
+    notify_save_failed("new comment", err)
+    return
   end
   -- Reconcile rebuilds extmarks + popups idempotently; no need for a
   -- per-mutation attach/detach API.
@@ -581,49 +707,94 @@ end
 ---Returns the record and a closure that persists any mutation back
 ---through the right store path.
 ---@param id string
+---@param locator? { scope?: "project"|"session", project_root?: string }
 ---@return table? record, (fun())? save, (fun())? remove
-local function find(id)
+local function find(id, locator)
   local store = require("manicule.store")
+  locator = locator or {}
+
+  local function find_project(root)
+    if not root then
+      return nil, nil, nil
+    end
+    local record = store.get(root, id)
+    if record then
+      local function save()
+        store.put(root, record)
+        return store.save(root)
+      end
+      local function remove()
+        local removed = store.remove(root, id)
+        local ok, err = store.save(root)
+        return ok, err, removed
+      end
+      return record, save, remove
+    end
+    return nil, nil, nil
+  end
+
+  local function find_session()
+    for _, r in ipairs(store.session_all()) do
+      if r.id == id then
+        local function save()
+          store.session_put(r)
+          return store.session_save()
+        end
+        local function remove()
+          local removed = store.session_remove(id)
+          local ok, err = store.session_save()
+          return ok, err, removed
+        end
+        return r, save, remove
+      end
+    end
+    return nil, nil, nil
+  end
+
+  if locator.scope == "session" then
+    local record, save, remove = find_session()
+    if record then
+      return record, save, remove
+    end
+  elseif locator.project_root then
+    local record, save, remove = find_project(locator.project_root)
+    if record then
+      return record, save, remove
+    end
+  end
+
   -- Lookups from `M.edit`/`M.delete`/`M.resolve` run against the
   -- project store that owns the *current* buffer. Route through the
   -- adapter-aware helper so an id coming off a staged buffer still
   -- finds the real project records.
   local root = current_project_root()
   if root then
-    local record = store.get(root, id)
+    local record, save, remove = find_project(root)
     if record then
-      local function save()
-        store.put(root, record)
-        store.save(root)
-      end
-      local function remove()
-        store.remove(root, id)
-        store.save(root)
-      end
       return record, save, remove
     end
   end
-  -- Fall through to the session store.
-  for _, r in ipairs(store.session_all()) do
-    if r.id == id then
-      local function save()
-        store.session_put(r)
-        store.session_save()
-      end
-      local function remove()
-        store.session_remove(id)
-        store.session_save()
-      end
-      return r, save, remove
+
+  -- Quickfix and picker paths may carry a root, but fall back to every
+  -- loaded project cache so ids remain actionable after the current window
+  -- moved to a qf/help/scratch buffer. This does not load arbitrary store
+  -- files from disk; it only searches roots already touched this session.
+  for cached_root in pairs(store._cache()) do
+    local record, save, remove = find_project(cached_root)
+    if record then
+      return record, save, remove
     end
   end
-  return nil, nil, nil
+
+  -- Fall through to the session store.
+  return find_session()
 end
 
 ---Edit an existing comment by id.
 ---@param id string
-function M.edit(id)
-  local record, save = find(id)
+---@param opts? { scope?: "project"|"session", project_root?: string }
+function M.edit(id, opts)
+  local record, save = find(id, opts)
   if not record or not save then
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
@@ -632,9 +803,15 @@ function M.edit(id)
     if not body or body == "" then
       return
     end
+    local before = vim.deepcopy(record)
     record.body = body
     record.updated_at = os.time()
-    save()
+    local ok, err = save()
+    if not ok then
+      replace_table_contents(record, before)
+      notify_save_failed("edited comment", err)
+      return
+    end
     -- Rebuild popups for every buffer that currently renders this record.
     reconcile_all_loaded()
     for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
@@ -648,28 +825,42 @@ end
 
 ---Delete a comment by id.
 ---@param id string
-function M.delete(id)
-  local record, _, remove = find(id)
+---@param opts? { scope?: "project"|"session", project_root?: string }
+function M.delete(id, opts)
+  local record, _, remove = find(id, opts)
   if not record or not remove then
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
   end
-  remove()
+  local snapshot = vim.deepcopy(record)
+  local ok, err = remove()
+  if not ok then
+    require("manicule.store").put_record(snapshot)
+    notify_save_failed("deleted comment", err)
+    return
+  end
   reconcile_all_loaded()
   emit("ManiculeDeleted", { id = id, record = record })
 end
 
 ---Mark a comment as resolved.
 ---@param id string
-function M.resolve(id)
-  local record, save = find(id)
+---@param opts? { scope?: "project"|"session", project_root?: string }
+function M.resolve(id, opts)
+  local record, save = find(id, opts)
   if not record or not save then
     vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
     return
   end
+  local before = vim.deepcopy(record)
   record.resolved = true
   record.updated_at = os.time()
-  save()
+  local ok, err = save()
+  if not ok then
+    replace_table_contents(record, before)
+    notify_save_failed("resolved comment", err)
+    return
+  end
   emit("ManiculeResolved", record)
 end
 
@@ -711,6 +902,7 @@ end
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
+  sync_all_loaded_positions()
   local store = require("manicule.store")
   local anchor = require("manicule.anchor")
   local render = require("manicule.ui.render")
@@ -784,10 +976,18 @@ function M.list(filter)
 end
 
 ---Dispatch filtered comments to a named sink.
----@param sink_name string
+---@param sink_name string|nil
 ---@param filter table|nil
 ---@param ctx table|nil
 function M.send(sink_name, filter, ctx)
+  if sink_name == nil or sink_name == "" then
+    require("manicule.ui").select_sink(function(name)
+      if name then
+        M.send(name, filter, ctx)
+      end
+    end)
+    return
+  end
   filter = filter or {}
   filter._quiet = true
   local records = M.list(filter)
@@ -819,7 +1019,7 @@ function M.send(sink_name, filter, ctx)
       -- (emits a WARN notify and returns early), so a sink that already
       -- cleared records itself becomes a no-op here.
       for _, record in ipairs(records) do
-        M.delete(record.id)
+        M.delete(record.id, { scope = record.scope, project_root = record.project_root })
       end
     end
   end)

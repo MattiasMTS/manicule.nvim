@@ -22,7 +22,10 @@ local function dispatch_positional(action, opts)
     vim.notify(("manicule: no comment at position %q"):format(opts.args), vim.log.levels.ERROR)
     return
   end
-  require("manicule")[action](records[n].id)
+  require("manicule")[action](records[n].id, {
+    scope = records[n].scope,
+    project_root = records[n].project_root,
+  })
 end
 
 ---Tab-completion returns stringified positions `"1"`..`"N"`. Command-
@@ -49,7 +52,7 @@ end, {})
 vim.api.nvim_create_user_command("ManiculeSend", function(opts)
   require("manicule").send(opts.args)
 end, {
-  nargs = 1,
+  nargs = "?",
   complete = function()
     return require("manicule.sinks").list()
   end,

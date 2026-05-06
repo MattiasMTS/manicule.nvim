@@ -874,17 +874,16 @@ function M.show()
   if not ok_store then
     return
   end
-  local root = store.root()
-  if not root then
-    return
-  end
-  store.load(root)
-  local uri_mod = require("manicule.uri")
+  local adapter = require("manicule.adapter")
+  store.session_load()
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
-      local uri = uri_mod.for_bufnr(bufnr)
-      if uri then
-        local records = store.for_uri(root, uri)
+      local identity = adapter.identify(bufnr)
+      if identity and identity.uri and identity.diff_side ~= "reference" then
+        if identity.project_root then
+          store.load(identity.project_root)
+        end
+        local records = store.all_for_uri(identity.uri, identity.project_root)
         M.reconcile(bufnr, records)
         M.update_viewport_popups(bufnr, records)
       end

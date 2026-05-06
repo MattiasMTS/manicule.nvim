@@ -54,6 +54,10 @@ Full default configuration (every key is optional):
         -- Markers passed to `vim.fs.root` to resolve the project root.
         root_markers = { ".git", ".hg", "package.json" },
       },
+      sinks = {
+        clipboard = true, -- generic built-in sink
+        cmux = "auto",   -- true to force-register, false to disable
+      },
       ui = {
         width = 72,             -- floating editor width
         height = 6,             -- floating editor height
@@ -63,6 +67,9 @@ Full default configuration (every key is optional):
         opacity = 0,            -- winblend (0 = opaque, 100 = clear)
         sticky = false,         -- true = always show comment popups;
                                 -- false = only when the line is in view
+        -- Optional picker override for :ManiculeSend with no sink.
+        -- Called only when multiple sinks are registered.
+        -- sink_picker = function(choices, opts, cb) cb(choices[1]) end,
       },
     })
 <
@@ -92,7 +99,7 @@ scope — `:ManiculeAdd`, `:ManiculeList`, and the render layer all
 dispatch through the store automatically.
 
 PROJECT SCOPE
-  Used when `vim.fs.root(0, store.root_markers)` resolves to a
+  Used when `vim.fs.root(bufnr, store.root_markers)` resolves to a
   directory. Records live in `<store.dir>/<escaped-root>.<format>`
   (one file per project). Carry a `project_root` field.
 
@@ -202,8 +209,11 @@ set `vim.g.manicule_no_default_keymaps = 1` to skip them.
                             (populates the quickfix list).
 
                                                                  *:ManiculeSend*
-:ManiculeSend {sink}        Dispatch comments to {sink}. Completion lists
-                            all registered sinks.
+:ManiculeSend [{sink}]      Dispatch comments to {sink}. With no {sink},
+                            auto-send when exactly one sink exists, or open
+                            the sink picker when multiple sinks are
+                            registered. Completion lists all registered
+                            sinks.
 
                                                               *:ManiculeResolve*
 :ManiculeResolve [{n}]      Mark a comment as resolved. {n} is the 1-
@@ -274,6 +284,9 @@ A sink is any table matching: >lua
 
     {
       name             = "my-sink",
+      type             = "integration",   -- optional: "sink" by default
+      label            = "My Sink",        -- optional picker label
+      description      = "review target",  -- optional picker hint
       send             = function(comments, ctx, cb) ... end,
       format           = function(comment) return "..." end, -- optional
       validate         = function(ctx) return true end,      -- optional
@@ -281,18 +294,76 @@ A sink is any table matching: >lua
     }
 <
 
+`:ManiculeSend` without an argument chooses the target for you. If one
+sink is registered it sends immediately; if multiple sinks are registered
+it opens a picker. The default picker is |vim.ui.select()|, which means
+plugins that replace |vim.ui.select()| (Snacks, Telescope UI select,
+fzf-lua, dressing.nvim, etc.) work without extra manicule-specific code.
+
+For a direct picker integration, set `ui.sink_picker`: >lua
+
+    require("manicule").setup({
+      ui = {
+        sink_picker = function(choices, opts, cb)
+          -- choices are { name, label, description, display, sink } tables.
+          -- opts.prompt and opts.format_item mirror vim.ui.select.
+          vim.ui.select(choices, {
+            prompt = opts.prompt,
+            format_item = opts.format_item,
+          }, cb)
+        end,
+      },
+    })
+<
+
+Custom pickers may call `cb(choice)` with one of the choice tables or
+`cb(choice.name)` with the sink name. Call `cb(nil)` to cancel.
+
 `clear_on_success` (boolean, default false): when true, manicule.send
 calls `manicule.delete(record.id)` for every record in the dispatched
 batch after the sink's `cb` reports `ok = true`. `User ManiculeSent`
 fires first, then one `User ManiculeDeleted` per record. Off by default,
 so records persist after dispatch.
 
+Bundled sinks:
+
+- `clipboard`: generic fallback, enabled by default.
+- `cmux`: native integration for running cmux coding-agent surfaces.
+  `sinks.cmux = "auto"` (default) registers it when `CMUX_WORKSPACE_ID`
+  is set and `cmux` is executable. Set `sinks.cmux = true` to force it,
+  or `sinks.cmux = false` to disable it. It detects Claude Code, Codex,
+  Amp, and custom title/screen patterns, sends the markdown review, and
+  clears comments after successful handoff.
+
 Register with: >lua
 
     require("manicule").register_sink(spec)
 <
 
-The bundled `clipboard` sink serves as a reference adapter.
+Community integrations should expose a small `setup(opts)` function that
+returns a sink spec. Use `require("manicule.sinks.helpers")` for common
+formatters:
+
+>lua
+    local helpers = require("manicule.sinks.helpers")
+
+    return {
+      setup = function(opts)
+        return {
+          name = "mytool",
+          type = "integration",
+          label = "My Tool",
+          clear_on_success = true,
+          format = helpers.format_line,
+          send = function(comments, ctx, cb)
+            local body = helpers.format_markdown_review(comments)
+            -- send body to the external tool
+            cb(true)
+          end,
+        }
+      end,
+    }
+<
 
 ==============================================================================
 6. EVENTS                                                     *manicule-events*

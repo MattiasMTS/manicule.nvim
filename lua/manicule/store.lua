@@ -359,6 +359,12 @@ function M.session_path()
   return cfg.dir .. "session." .. cfg.format
 end
 
+---@param record table
+---@return boolean
+local function is_ephemeral_record(record)
+  return type(record) == "table" and type(record.meta) == "table" and record.meta.ephemeral == true
+end
+
 ---Load the session records into `session_cache`. No-op after the first
 ---call; use `_reset()` to invalidate from tests.
 ---@return table[]
@@ -386,7 +392,13 @@ function M.session_save()
     return true
   end
   vim.fn.mkdir(config.current.store.dir, "p")
-  local encoded, err = encode(session_cache.records)
+  local persisted = {}
+  for _, record in ipairs(session_cache.records) do
+    if not is_ephemeral_record(record) then
+      table.insert(persisted, record)
+    end
+  end
+  local encoded, err = encode(persisted)
   if not encoded then
     return false, "failed to encode session records: " .. tostring(err)
   end
@@ -466,17 +478,23 @@ end
 
 ---Return all records that match `uri` across both stores. Project
 ---records are only included if the record's `project_root` matches the
----currently-resolved project root (so project A doesn't see project B's
----records just because the URIs collide). Session records match purely
----by URI.
+---given project root. When no project root argument is passed, the
+---current buffer's root is used for backwards compatibility with older
+---callers. Passing nil explicitly means "session records only".
 ---@param uri string
+---@param project_root? string|nil Optional explicit root for project records.
 ---@return table[]
-function M.all_for_uri(uri)
+function M.all_for_uri(uri, ...)
   local out = {}
   if not uri or uri == "" then
     return out
   end
-  local current_root = M.root()
+  local current_root
+  if select("#", ...) > 0 then
+    current_root = select(1, ...)
+  else
+    current_root = M.root()
+  end
   if current_root then
     for _, r in ipairs(M.for_uri(current_root, uri)) do
       table.insert(out, r)

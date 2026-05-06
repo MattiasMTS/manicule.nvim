@@ -45,6 +45,7 @@ local M = {}
 ---@field is_writable boolean
 ---@field diff_side "working"|"reference"|nil
 ---@field reject_reason string?
+---@field ephemeral boolean? True when the URI is current-session-only.
 
 ---Temp-path detection lives in `manicule.uri` so the reverse-map in
 ---this module and the diff-pair heuristic share a single list. On
@@ -63,6 +64,17 @@ end
 ---@return string?
 local function bufname_abs(bufnr)
   return require("manicule.uri").abs_for_bufnr(bufnr)
+end
+
+---@param bufnr integer
+---@param markers string[]
+---@return string?
+local function root_for_bufnr(bufnr, markers)
+  local abs = bufname_abs(bufnr)
+  if not abs then
+    return nil
+  end
+  return vim.fs.root(abs, markers)
 end
 
 ---Attempt to reverse-map a buffer path that looks like an
@@ -289,8 +301,7 @@ local function in_cmdwin()
 end
 
 ---Resolve the identity for a buffer. Returns nil only when the buffer
----cannot be identified at all (no bufname AND no special buftype that
----we can describe).
+---cannot be identified at all.
 ---@param bufnr integer
 ---@return manicule.Identity?, string? err
 function M.identify(bufnr)
@@ -299,7 +310,6 @@ function M.identify(bufnr)
   end
 
   local uri_mod = require("manicule.uri")
-  local store = require("manicule.store")
   local config = require("manicule.config")
 
   local buftype = vim.bo[bufnr].buftype
@@ -332,9 +342,6 @@ function M.identify(bufnr)
   -- code paths don't interfere because diff-pair keys off bufnrs, not
   -- URIs.
   local abs = bufname_abs(bufnr)
-  if not abs then
-    return nil, "buffer has no bufname"
-  end
   local uri
   local reverse_mapped_path ---@type string? absolute path we mapped to (nil when not reverse-mapped)
   -- Only reverse-map paths that look like an nvim-runtime staged copy
@@ -344,7 +351,7 @@ function M.identify(bufnr)
   -- opened as a scratch is *not* ephemeral from manicule's perspective
   -- — the URI is stable across launches — so it still flows through
   -- the normal session-scope path.
-  if buftype == "" and uri_mod.is_nvim_runtime_staged_path(abs) then
+  if abs and buftype == "" and uri_mod.is_nvim_runtime_staged_path(abs) then
     local mapped, map_err = reverse_map_temp_path(abs)
     if not mapped then
       return nil, map_err
@@ -356,7 +363,7 @@ function M.identify(bufnr)
   end
 
   if not uri then
-    return nil, "buffer has no bufname"
+    return nil, "buffer has no identity"
   end
 
   -- Cmdwin is its own weird thing: we refuse to touch it regardless of
@@ -378,7 +385,6 @@ function M.identify(bufnr)
   if buftype == "" and uri_mod.is_file(uri) then
     local pair = M.resolve_diff_pair(bufnr)
     if pair then
-      local store_mod = require("manicule.store")
       if bufnr == pair.reference_bufnr then
         local working_path = bufname_abs(pair.working_bufnr)
         local reject = string.format(
@@ -389,7 +395,7 @@ function M.identify(bufnr)
         -- reference side still routes records to the right project.
         local root
         if pair.working_bufnr and vim.api.nvim_buf_is_valid(pair.working_bufnr) then
-          root = vim.fs.root(pair.working_bufnr, config.current.store.root_markers)
+          root = root_for_bufnr(pair.working_bufnr, config.current.store.root_markers)
         end
         return {
           uri = pair.working_uri,
@@ -400,7 +406,7 @@ function M.identify(bufnr)
           reject_reason = reject,
         }
       elseif bufnr == pair.working_bufnr then
-        local root = store_mod.root()
+        local root = root_for_bufnr(bufnr, config.current.store.root_markers)
         return {
           uri = uri,
           scope = root and "project" or "session",
@@ -424,7 +430,7 @@ function M.identify(bufnr)
     if reverse_mapped_path then
       root = vim.fs.root(reverse_mapped_path, config.current.store.root_markers)
     else
-      root = store.root()
+      root = root_for_bufnr(bufnr, config.current.store.root_markers)
     end
     if root then
       return {
@@ -464,6 +470,7 @@ function M.identify(bufnr)
     is_writable = writable,
     diff_side = nil,
     reject_reason = (not writable) and reason or nil,
+    ephemeral = uri_mod.is_ephemeral(uri),
   }
 end
 

@@ -54,7 +54,7 @@ end
 
 local function teardown_env()
   require("manicule.store")._reset()
-  pcall(vim.cmd, "only")
+  pcall(vim.cmd, "silent! only")
   pcall(vim.cmd, "enew!")
   pcall(vim.fn.delete, tmp_state, "rf")
   pcall(vim.fn.delete, tmp_root, "rf")

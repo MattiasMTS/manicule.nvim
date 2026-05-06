@@ -39,23 +39,23 @@ function M.attach(qf_bufnr)
   local map_opts = { buffer = qf_bufnr, nowait = true, silent = true }
 
   vim.keymap.set("n", "dd", function()
-    local id = require("manicule.ui.quickfix").record_id_at_cursor()
-    if not id then
+    local locator = require("manicule.ui.quickfix").record_locator_at_cursor()
+    if not locator then
       return
     end
     -- The `User ManiculeDeleted` event fires on completion; the
     -- live-refresh autocmd then replaces the qf list in place.
-    require("manicule").delete(id)
+    require("manicule").delete(locator.id, locator)
   end, vim.tbl_extend("keep", { desc = "Manicule: delete comment under cursor" }, map_opts))
 
   vim.keymap.set("n", "ce", function()
-    local id = require("manicule.ui.quickfix").record_id_at_cursor()
-    if not id then
+    local locator = require("manicule.ui.quickfix").record_locator_at_cursor()
+    if not locator then
       return
     end
     -- Opens the floating editor. Submitting fires `User
     -- ManiculeEdited`, which triggers the live refresh.
-    require("manicule").edit(id)
+    require("manicule").edit(locator.id, locator)
   end, vim.tbl_extend("keep", { desc = "Manicule: edit comment under cursor" }, map_opts))
 end
 
