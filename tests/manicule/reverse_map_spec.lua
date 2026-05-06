@@ -72,6 +72,8 @@ describe("manicule.uri nvim-runtime shape detection", function()
     local uri = require("manicule.uri")
     assert.is_true(uri.is_nvim_runtime_staged_path("/var/folders/xx/yy/T/nvim.user/ABCDEF/1/.config/foo.txt"))
     assert.is_true(uri.is_nvim_runtime_staged_path("/private/var/folders/xx/yy/T/nvim.user/ABCDEF/1/src/foo.lua"))
+    assert.is_true(uri.is_nvim_runtime_staged_path(uri.run_dir_prefix() .. "1/src/foo.lua"))
+    assert.are.equal("src/foo.lua", uri.nvim_runtime_staged_suffix(uri.run_dir_prefix() .. "1/src/foo.lua"))
     -- Three segments after the temp prefix but not matching nvim.<user>:
     -- must reject.
     assert.is_false(uri.is_nvim_runtime_staged_path("/var/folders/xx/yy/T/other/aaa/bbb/src.lua"))

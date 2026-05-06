@@ -69,16 +69,26 @@ end
 ---staged under Neovim's per-session runtime dir — *any* session, past
 ---or present?
 ---
----Matches by shape: any path anywhere under a temp prefix that contains
----an `nvim.<user>/<run-id>/<N>/<suffix>` segment. Used by the adapter's
----reverse-map so staged buffers anchor to the real project file rather
----than the per-launch `<run-id>`.
+---Matches by shape: either a path under the current `stdpath('run')`
+---with one staging bucket before the project-relative suffix, or a
+---macOS-style `nvim.<user>/<run-id>/<N>/<suffix>` segment from any
+---session. Used by the adapter's reverse-map so staged buffers anchor
+---to the real project file rather than the per-launch `<run-id>`.
 ---@param abs string
----@return boolean
-function M.is_nvim_runtime_staged_path(abs)
+---@return string?
+function M.nvim_runtime_staged_suffix(abs)
   if type(abs) ~= "string" or abs == "" then
-    return false
+    return nil
   end
+
+  if abs:sub(1, #RUN_DIR_PREFIX) == RUN_DIR_PREFIX then
+    local rest = abs:sub(#RUN_DIR_PREFIX + 1)
+    local suffix = rest:match("^[^/]+/(.+)$")
+    if suffix and suffix:find("/", 1, true) then
+      return suffix
+    end
+  end
+
   local has_tmp_prefix = false
   for _, p in ipairs(TMP_PREFIXES) do
     if abs:sub(1, #p) == p then
@@ -87,11 +97,18 @@ function M.is_nvim_runtime_staged_path(abs)
     end
   end
   if not has_tmp_prefix then
-    return false
+    return nil
   end
+
   -- Look for a `/nvim.<user>/<run-id>/<N>/<suffix>` segment anywhere in
   -- the path. Four segments minimum after the `nvim.<user>` one.
-  return abs:match("/nvim%.[^/]+/[^/]+/[^/]+/.+") ~= nil
+  return abs:match("/nvim%.[^/]+/[^/]+/[^/]+/(.+)$")
+end
+
+---@param abs string
+---@return boolean
+function M.is_nvim_runtime_staged_path(abs)
+  return M.nvim_runtime_staged_suffix(abs) ~= nil
 end
 
 ---Return the normalised absolute path of `bufnr`'s bufname, or nil

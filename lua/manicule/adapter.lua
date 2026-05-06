@@ -99,14 +99,10 @@ end
 ---@return string? uri, string? err
 local function reverse_map_temp_path(abs)
   local config = require("manicule.config")
+  local uri_mod = require("manicule.uri")
   local uv = vim.uv or vim.loop
 
-  -- Locate the `/nvim.<user>/<run-id>/<N>/<suffix>` segment anywhere
-  -- in the path. `string.match` returns the captured suffix directly.
-  -- Allowed user, run-id, and N are all `[^/]+` — we don't care about
-  -- their content, only that three full segments sit between us and
-  -- the project-relative tail.
-  local suffix = abs:match("/nvim%.[^/]+/[^/]+/[^/]+/(.+)$")
+  local suffix = uri_mod.nvim_runtime_staged_suffix(abs)
   if not suffix or suffix == "" or not suffix:find("/", 1, true) then
     return nil, "staged path has no project-relative suffix"
   end
