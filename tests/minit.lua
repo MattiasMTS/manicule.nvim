@@ -78,107 +78,6 @@ package.path = table.concat({
   package.path,
 }, ";")
 
--- Neovim 0.11 can hang in `vim.fs.normalize()` when called from a
--- mini.test scheduled case on this runner. The production plugin still
--- uses the native function; tests only need deterministic slash
--- normalization and `~` expansion.
-local native_normalize = vim.fs.normalize
-vim.fs.normalize = function(path, opts)
-  if type(path) ~= "string" then
-    return native_normalize(path, opts)
-  end
-  if path:sub(1, 1) == "~" then
-    path = (vim.env.HOME or "") .. path:sub(2)
-  end
-  path = path:gsub("\\", "/"):gsub("/+", "/")
-  if #path > 1 then
-    path = path:gsub("/$", "")
-  end
-  return path
-end
-
-local function path_is_dir(path)
-  local stat = uv.fs_stat(path)
-  return stat and stat.type == "directory"
-end
-
-local function dirname(path)
-  if path == "/" then
-    return "/"
-  end
-  path = path:gsub("/+$", "")
-  if path == "" then
-    return "/"
-  end
-  local parent = path:match("^(.*)/[^/]+$")
-  if not parent or parent == "" then
-    return path:sub(1, 1) == "/" and "/" or "."
-  end
-  return parent
-end
-
-local native_root = vim.fs.root
-vim.fs.root = function(source, markers)
-  if type(source) ~= "number" and type(source) ~= "string" then
-    return native_root(source, markers)
-  end
-
-  local path = source
-  if type(source) == "number" then
-    if not vim.api.nvim_buf_is_valid(source) then
-      return nil
-    end
-    path = vim.api.nvim_buf_get_name(source)
-  end
-  if type(path) ~= "string" or path == "" then
-    return nil
-  end
-
-  if not path:match("^/") then
-    path = cwd .. "/" .. path
-  end
-  path = vim.fs.normalize(path)
-
-  local dir = path_is_dir(path) and path or dirname(path)
-  if type(markers) == "string" then
-    markers = { markers }
-  end
-  markers = markers or {}
-
-  while dir and dir ~= "" do
-    for _, marker in ipairs(markers) do
-      if uv.fs_stat(dir .. "/" .. marker) then
-        return dir
-      end
-    end
-    local parent = dirname(dir)
-    if parent == dir then
-      break
-    end
-    dir = parent
-  end
-  return nil
-end
-
-local native_system = vim.system
-vim.system = function(cmd, opts, on_exit)
-  if type(on_exit) == "function" then
-    return native_system(cmd, opts, on_exit)
-  end
-  opts = opts or {}
-  return {
-    wait = function()
-      local stdout = vim.fn.system(cmd, opts.stdin)
-      return {
-        code = vim.v.shell_error,
-        signal = 0,
-        stdout = opts.text == false and stdout or tostring(stdout or ""),
-        stderr = "",
-      }
-    end,
-  }
-end
-
 local function collect_files()
   if #args == 0 then
     return vim.fn.globpath("tests", "**/*_spec.lua", true, true)
@@ -228,4 +127,75 @@ MiniTest.setup({
 
 _G.assert = require("luassert")
 
-MiniTest.run()
+-- MiniTest's default executor schedules each case. Running plugin setup
+-- and filesystem-heavy integration paths from scheduled callbacks has
+-- exposed Neovim/macOS hangs in the past, which led to global vim.fs
+-- shims. Keep collection/reporting from MiniTest, but execute cases
+-- directly so tests use the real Neovim APIs.
+local function callable(fn, ...)
+  if type(fn) == "function" then
+    return fn(...)
+  end
+  local mt = type(fn) == "table" and getmetatable(fn) or nil
+  if mt and type(mt.__call) == "function" then
+    return fn(...)
+  end
+end
+
+local function final_state(case)
+  local pass_fail = #case.exec.fails == 0 and "Pass" or "Fail"
+  local with_notes = #case.exec.notes == 0 and "" or " with notes"
+  return pass_fail .. with_notes
+end
+
+local function execute_sync(cases, opts)
+  opts = opts or {}
+  local reporter = opts.reporter
+  MiniTest.current.all_cases = cases
+
+  if #cases == 0 then
+    print("(mini.test) No cases to execute.")
+    os.exit(0)
+  end
+
+  callable(reporter and reporter.start, cases)
+
+  for case_num, case in ipairs(cases) do
+    case.exec = { fails = {}, notes = {} }
+    MiniTest.current.case = case
+
+    local function run_step(fn, state)
+      case.exec.state = state
+      local ok, err = xpcall(fn, function(e)
+        return debug.traceback(tostring(e), 2)
+      end)
+      if not ok then
+        table.insert(case.exec.fails, err)
+      end
+      return ok
+    end
+
+    for i, hook in ipairs(case.hooks.pre or {}) do
+      run_step(hook, ("Executing 'pre' hook #%d"):format(i))
+    end
+
+    if #case.exec.fails == 0 then
+      run_step(function()
+        case.test(unpack(case.args or {}))
+      end, "Executing test")
+    else
+      table.insert(case.exec.notes, "Skip case due to error(s) in hooks.")
+    end
+
+    for i, hook in ipairs(case.hooks.post or {}) do
+      run_step(hook, ("Executing 'post' hook #%d"):format(i))
+    end
+
+    case.exec.state = final_state(case)
+    callable(reporter and reporter.update, case_num)
+  end
+
+  callable(reporter and reporter.finish)
+end
+
+execute_sync(MiniTest.collect(), { reporter = reporter })

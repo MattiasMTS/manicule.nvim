@@ -1,10 +1,11 @@
 local expect = require("mini.test").expect
+local native_assert = _G.assert
 
 local M = {}
 
 setmetatable(M, {
   __call = function(_, value, message)
-    return assert(value, message)
+    return native_assert(value, message)
   end,
 })
 

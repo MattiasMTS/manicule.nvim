@@ -1,21 +1,29 @@
 local H = {}
-
+local uv = vim.uv or vim.loop
 local function unique_name(prefix)
   return ("%s-%d-%d"):format(prefix, os.time(), math.random(1000000))
 end
 
-function H.project_dir(name)
-  local dir =
-    vim.fs.normalize(vim.fn.fnamemodify(vim.uv.cwd() .. "/" .. unique_name(name or ".manicule-test-root"), ":p"))
+local function temp_dir(prefix)
+  local parent = (vim.env.TMPDIR or "/tmp"):gsub("\\", "/"):gsub("/$", "")
+  local dir = ("%s/%s-%s"):format(parent, unique_name(prefix or "manicule"), tostring(vim.fn.getpid()))
   vim.fn.mkdir(dir, "p")
-  vim.fn.mkdir(dir .. "/.git", "p")
   return dir
 end
 
+function H.project_dir(base, name)
+  local dir = vim.fn.fnamemodify(base .. "/" .. unique_name(name or "project"), ":p"):gsub("\\", "/"):gsub("/$", "")
+  vim.fn.mkdir(dir, "p")
+  vim.fn.mkdir(dir .. "/.git", "p")
+  return (uv.fs_realpath(dir) or dir):gsub("\\", "/")
+end
+
 function H.setup(opts)
+  local artifact_root = temp_dir("manicule-test")
   local ctx = {
-    state = vim.fn.tempname(),
-    root = H.project_dir(".manicule-test-root"),
+    artifact_root = artifact_root,
+    state = artifact_root .. "/state",
+    root = H.project_dir(artifact_root, "project"),
   }
   vim.fn.mkdir(ctx.state, "p")
 
@@ -51,8 +59,7 @@ function H.teardown(ctx)
   end)
   vim.g.loaded_manicule = nil
   if ctx then
-    pcall(vim.fn.delete, ctx.state, "rf")
-    pcall(vim.fn.delete, ctx.root, "rf")
+    pcall(vim.fn.delete, ctx.artifact_root, "rf")
   end
 end
 
