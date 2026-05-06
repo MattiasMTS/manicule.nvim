@@ -1,72 +1,281 @@
-*manicule.txt*              Buffer-agnostic comments for Neovim
+*manicule.txt*           For Neovim >= 0.8.0          Last change: 2026 May 06
 
 ==============================================================================
-CONTENTS                                                    *manicule-contents*
+Table of Contents                                 *manicule-table-of-contents*
 
-  1. Overview ................................. |manicule-overview|
-  2. Setup .................................... |manicule-setup|
-  3. Commands ................................. |manicule-commands|
-  4. Public API ............................... |manicule-api|
-  5. Sinks .................................... |manicule-sinks|
-  6. Events ................................... |manicule-events|
-
-==============================================================================
-1. OVERVIEW                                                 *manicule-overview*
-
-manicule.nvim provides per-project, extmark-anchored comments that are
-decoupled from any particular buffer workflow (diffview, review tooling,
-chat). Comments persist under `stdpath('state')/manicule/` as one file
-per project root (mpack by default, JSON opt-in) and can be dispatched
-to pluggable sinks (clipboard, PR drafts, webhooks, …).
-
-Status: alpha — single-user, extmark-anchored, persisted under
-`stdpath('state')/manicule/`. API will change.
+1. manicule.nvim                                      |manicule-manicule.nvim|
+  - What it is                             |manicule-manicule.nvim-what-it-is|
+  - How it looks                         |manicule-manicule.nvim-how-it-looks|
+  - Why the name                         |manicule-manicule.nvim-why-the-name|
+  - Motivation                             |manicule-manicule.nvim-motivation|
+  - Install                                   |manicule-manicule.nvim-install|
+  - Usage                                       |manicule-manicule.nvim-usage|
+  - Configuration                       |manicule-manicule.nvim-configuration|
+  - Registering a custom sink|manicule-manicule.nvim-registering-a-custom-sink|
+  - Events                                     |manicule-manicule.nvim-events|
+  - See also                                 |manicule-manicule.nvim-see-also|
 
 ==============================================================================
-2. SETUP                                                       *manicule-setup*
+1. manicule.nvim                                      *manicule-manicule.nvim*
 
-Full default configuration (every key is optional):
+Buffer-agnostic comments for Neovim, pipeable to anywhere.
+
+
+  **Status:** Alpha — single-user, extmark-anchored, persisted under
+  `stdpath('state')/manicule/` as mpack (opt-in JSON). API will change.
+See `ARCHITECTURE.md` <./ARCHITECTURE.md> for a walkthrough of the module
+layout, data flow, and event catalog.
+
+
+WHAT IT IS                                 *manicule-manicule.nvim-what-it-is*
+
+manicule.nvim lets you attach annotations to arbitrary ranges in any buffer,
+anchored by extmarks so they survive edits and surface cleanly when their
+anchor is destroyed. Comments are persisted per-project under Neovim’s state
+directory (`stdpath('state')/manicule/`) and dispatched to pluggable **sinks**
+— clipboard, PR drafts, chat webhooks, whatever you plug in.
+
+
+HOW IT LOOKS                             *manicule-manicule.nvim-how-it-looks*
+
+Each comment tints its anchor line’s number column via `ManiculeLineNr`
+(default-linked to `DiagnosticSignInfo`, overridable) and is shown as a small
+floating popup pinned to the anchor line, titled with the short id (`c<6
+chars>`) and footered with the edit/delete hint. Popup footers show the
+last-touched timestamp (`updated_at` or `created_at`) followed by the keymap
+hint. Multiple comments on the same line stack above one another. By default
+popups only appear when the anchor line is in the current viewport; set
+`ui.sticky = true` to keep every popup visible at all times.
+
+
+WHY THE NAME                             *manicule-manicule.nvim-why-the-name*
+
+A _manicule_ is the pointing-hand mark medieval readers drew in the margins to
+flag a passage worth returning to.
+
+
+MOTIVATION                                 *manicule-manicule.nvim-motivation*
+
+Extracted from codediff.nvim <https://github.com/esmuellert/codediff.nvim>
+(specifically PR #332 <https://github.com/esmuellert/codediff.nvim/pull/332>),
+and inspired by Conductor <https://www.conductor.build/> which ships native
+cross-buffer commenting.
+
+
+INSTALL                                       *manicule-manicule.nvim-install*
+
+With lazy.nvim <https://github.com/folke/lazy.nvim>
+
+>lua
+    {
+      "MattiasMTS/manicule.nvim",
+      event = { "BufReadPost", "BufNewFile" },
+      cmd = { "ManiculeAdd", "ManiculeList", "ManiculeSend" },
+      keys = {
+        { "<leader>ma", "<Plug>(manicule-add)", mode = { "n", "x" }, desc = "Manicule: add comment" },
+        { "<leader>ml", "<Plug>(manicule-list)", desc = "Manicule: list comments" },
+      },
+      opts = {},
+    }
+<
+
+The`event` trigger matters: manicule attaches to buffers via autocmds
+registered in `setup`. A `cmd`/`keys`-only lazy load means existing buffers
+opened at startup won’t render their saved comments until you invoke a
+`:Manicule*` command or keymap for the first time, so include
+`BufReadPost`/`BufNewFile` to trigger the initial attach sweep.
+
+
+USAGE                                           *manicule-manicule.nvim-usage*
+
+>vim
+    :ManiculeAdd           " add a comment on the current line (or :'<,'>ManiculeAdd)
+    :ManiculeList          " list comments for this project (quickfix)
+    :ManiculeEdit          " picker → edit (or :ManiculeEdit 3 to jump straight to position 3)
+    :ManiculeDelete        " picker → delete (or :ManiculeDelete 3)
+    :ManiculeResolve       " picker → resolve (or :ManiculeResolve 3)
+    :ManiculeToggle        " hide/restore all visuals without touching the store
+    :ManiculeSend [sink]   " send to [sink], or pick when multiple sinks exist
+<
+
+`:ManiculeAdd` opens a floating markdown scratch buffer. Type your comment (it
+can span multiple lines), then press `<CR>` in normal mode to submit or `q` to
+cancel — both keys are configurable (see below).
+
+
+PICKER COMMANDS ~
+
+`:ManiculeEdit`, `:ManiculeDelete`, and `:ManiculeResolve` accept a single
+positional number matching the same 1-indexed order as `:ManiculeList`.
+Tab-completion returns the valid positions as raw numbers (`1`, `2`, …, `N`)
+— command-line completion can’t render descriptive text. With no argument
+the command opens a `vim.ui.select` picker showing every record in the same
+order, formatted so both the location and the body stay legible at a glance:
+
+>
+     1 │ src/foo.lua:42        │ fix this validation to handle nil
+     2 │ README.md:10-12       │ rephrase this paragraph so it reads…
+     3 │ src/bar.lua:7         │ [✓] already addressed in review
+<
+
+The cursor-based `gca` / `gcd` keymaps are unchanged — they remain the fast
+at-cursor path. Picker commands are the "pick from a list" path.
+
+
+QUICKFIX ~
+
+`:ManiculeList` pushes every comment for the current project into the quickfix
+list (title prefixed with `manicule`). While the cursor sits on an entry:
+
+  Key    Action
+  ------ -----------------------------------------------------
+  <CR>   Jump to the anchored location (native qf behaviour)
+  dd     Delete the comment under the cursor
+  ce     Edit the comment under the cursor
+The list auto-refreshes in place while it stays open: adding, editing,
+deleting, or resolving a comment from any surface (keymap, command, API,
+floating editor) updates the qf list without closing it, and the cursor stays
+on the same row. The title-prefix check makes sure grep results, diagnostic
+lists, and other plugins’ quickfix lists are never overwritten.
+
+The `dd`/`ce` bindings are buffer-local to manicule quickfix buffers only —
+native `dd`/`ce` behaviour elsewhere is unaffected. Opt out with the same
+`vim.g.manicule_no_default_keymaps = 1` flag used for `gca`/`gcd`.
+
+
+KEYMAPS ~
+
+Default normal-mode keymaps (matching the popup footer hint):
+
+  Key   Action
+  ----- -------------------------------------------
+  gca   Edit the comment at/covering the cursor
+  gcd   Delete the comment at/covering the cursor
+Opt out by setting `vim.g.manicule_no_default_keymaps = 1` before the plugin
+loads.
+
+All keymaps are available as `<Plug>` mappings — no `<leader>` bindings are
+installed for add/list so you can pick your own:
+
+>lua
+    vim.keymap.set({ "n", "x" }, "<leader>ca", "<Plug>(manicule-add)")
+    vim.keymap.set("n",          "<leader>cl", "<Plug>(manicule-list)")
+    vim.keymap.set("n",          "<leader>ce", "<Plug>(manicule-edit)")
+    vim.keymap.set("n",          "<leader>cd", "<Plug>(manicule-delete)")
+<
+
+
+SCOPES ~
+
+manicule owns two persistence scopes:
+
+- **Project scope** (`scope = "project"`): records live in a per-root
+    file named after the project root. Used whenever a buffer resolves
+    to a project (via `vim.fs.root` on `store.root_markers`). Project
+    records carry a `project_root` field.
+- **Session scope** (`scope = "session"`): records live in a single
+    `session.<format>` file under `stdpath('state')/manicule/`, keyed
+    purely by URI. Used for unrooted file buffers, `:terminal`, help
+    buffers, scratch / nofile / acwrite buffers — anything without a
+    project root or without a plain-file backing. `project_root` is nil.
+
+The caller never branches on scope — `:ManiculeAdd`, `:ManiculeList`, and the
+render layer all dispatch through the store automatically. Comments you add on
+an unrooted file follow you into the session store; comments on a terminal
+buffer persist across nvim restarts as long as the `term://` URI is stable.
+`persist_unrooted` defaults to **true** so "works anywhere" is the honest
+default; set it to `false` to refuse adds on unrooted file buffers with a
+notify. Unnamed buffers use a current-session `manicule://buffer/...` URI:
+their comments can be listed and sent while the buffer lives, but are not
+written to disk unless the buffer later gets a real file name.
+
+If you `:saveas` a scratch-session comment into a project directory, the
+record’s scope stays `session` with the new file URI. Delete and re-add it if
+you want project-scope ownership.
+
+Quickfix, prompt, and cmdwin buffers reject adds unconditionally with a notify
+— there’s no sensible per-line anchoring in those buftypes.
+
+
+TROUBLESHOOTING ~
+
+
+MY COMMENTS AREN’T PERSISTING FROM A DIFF TOOL / STAGED BUFFER
+
+Some plugins (custom `:DiffTool` commands, stash-blob viewers, a few review
+integrations) stage buffer contents under Neovim’s per-session runtime dir
+(`:echo stdpath('run')`). That directory’s `<run-id>` rotates every launch,
+so a URI pointing at it can never re-anchor on reload. manicule detects the
+staged-path shape and tries to _reverse-map_ it to the real file under your
+project root, cwd, or `$HOME` (for dotfile suffixes).
+
+If the mapping fails you’ll see one of:
+
+- `manicule: buffer is a nvim-runtime-staged path (<abs>); could not   map to a real file` — no candidate existed anywhere we looked.
+- `manicule: ambiguous reverse-map; open the real file directly` — the
+    same path suffix resolves to multiple files (e.g. under both the
+    project root and `$HOME`).
+
+Open the real file directly and retry.
+
+Comments added from `:DiffToolGit` anchor to the real file’s line numbers
+from the view — for plain one-way diffs this approximates the working tree,
+but lines may drift if the staged view differs significantly from the working
+tree (three-way / unusual diff setups).
+
+
+DIFF MODE ~
+
+manicule works inside `nvim -d` and `git difftool -t nvimdiff` views. When two
+diff-mode windows live in the same tab, the reference side is detected by its
+path: a buffer under `/tmp/`, `/var/folders/…/T/`, or the `/private/...`
+aliases (the typical location for git’s temporary blob extractions) is
+treated as the _reference_ view of the other buffer, which is assumed to be the
+working-tree file. Plain `nvim -d a.lua b.lua` with two real paths and no temp
+file leaves the heuristic ambiguous — each side is treated as its own
+identity and each allows adds against its own URI.
+
+Comments always anchor to the working-tree URI. Attempting `:ManiculeAdd` from
+the reference side produces a WARN notify directing you to the working-tree
+buffer; edit/delete still work on either side because they route by record id
+rather than identity. The reference buffer shows no visuals by default (the
+working-tree file owns the popups); switch to the working-tree window to
+interact with comments.
+
+
+CONFIGURATION                           *manicule-manicule.nvim-configuration*
+
+All keys are optional — the snippet below is the full default set.
 
 >lua
     require("manicule").setup({
       store = {
-        -- Directory the per-root store lives under. Defaults to
-        -- `stdpath('state').'/manicule/'` — out of the project tree.
-        dir = vim.fn.stdpath("state") .. "/manicule/",
-        -- On-disk format. "mpack" (default) is binary and compact;
-        -- "json" is human-readable.
-        format = "mpack",
-        -- When true, append the current git branch to the filename so
-        -- notes are scoped per-branch. `main`/`master` collapse to the
-        -- unsuffixed filename.
-        branch = false,
-        -- When true (default), unrooted file buffers and special
-        -- buftypes (terminal, help, scratch, …) route into the
-        -- session-scoped store. Set to false to reject unrooted file
-        -- adds with a notify; special buftypes still route to
-        -- session regardless.
-        persist_unrooted = true,
-        -- Resolve symlinks through `fs_realpath` before encoding
-        -- URIs so a file accessed via a symlink still matches records
-        -- saved against the real path. Disable if you want URIs to
-        -- reflect the access path instead.
-        canonicalize_symlinks = true,
-        -- Markers passed to `vim.fs.root` to resolve the project root.
+        dir = vim.fn.stdpath("state") .. "/manicule/", -- per-user state dir
+        format = "mpack",                              -- "mpack" | "json"
+        branch = false,                                -- branch-scope the filename
+        persist_unrooted = true,                       -- route unrooted adds to the session store
+        canonicalize_symlinks = true,                  -- resolve symlinks before encoding URIs
         root_markers = { ".git", ".hg", "package.json" },
       },
       sinks = {
         clipboard = true, -- generic built-in sink
-        cmux = "auto",   -- true to force-register, false to disable
+        cmux = "auto",   -- native cmux integration; true to force-register, false to disable
+        -- cmux = {
+        --   enabled = true,
+        --   command = "cmux",
+        --   auto_submit = true,
+        --   clear_on_success = true,
+        --   patterns = { "Claude Code", "Codex", "Amp" },
+        -- },
       },
       ui = {
-        width = 72,             -- floating editor width
-        height = 6,             -- floating editor height
-        editor_mode = "insert", -- "insert" or "normal"
+        width = 72,            -- floating editor width (columns)
+        height = 6,            -- floating editor height (lines)
+        editor_mode = "insert",-- "insert" or "normal"
         submit_keys = { "<CR>" },
         cancel_keys = { "q" },
-        opacity = 0,            -- winblend (0 = opaque, 100 = clear)
-        sticky = false,         -- true = always show comment popups;
-                                -- false = only when the line is in view
+        opacity = 0,           -- winblend (0 = opaque, 100 = transparent)
+        sticky = false,        -- true = always show popups; false = viewport only
         -- Optional picker override for :ManiculeSend with no sink.
         -- Called only when multiple sinks are registered.
         -- sink_picker = function(choices, opts, cb) cb(choices[1]) end,
@@ -74,234 +283,109 @@ Full default configuration (every key is optional):
     })
 <
 
-                                                           *manicule-diff-mode*
 
-manicule works inside `nvim -d` and `git difftool -t nvimdiff` views.
-The plugin walks the current tabpage's diff windows and classifies each
-buffer by path prefix: `/tmp`, `/var/folders`, `/private/tmp`, and
-`/private/var/folders` all mark the *reference* side (typical for git's
-temporary blob extractions). The non-temp side is treated as the
-working tree, and comments anchor to its URI.
+WHERE ARE MY NOTES STORED? ~
 
-`:ManiculeAdd` from the reference side is rejected with a WARN notify
-directing the user back to the working-tree buffer. Edits and deletes
-route by record id and work from either side. The reference buffer
-renders no visuals — switch to the working-tree window to see popups.
+Run `:echo stdpath('state').'/manicule/'` — that is the default `store.dir`.
+One file per project root, named after the root with path separators escaped as
+`%%`, e.g. `%Users%me%src%foo.mpack`. Switch to `store.format = "json"` if you
+want the files to be human-readable.
 
-Plain `nvim -d a.lua b.lua` with two real paths (no temp) leaves each
-buffer as its own identity: each side owns its own comments and each
-accepts add.
+With `store.branch = true` the filename is scoped per-branch
+(`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to the
+unsuffixed filename so the common case doesn’t fragment.
 
-                                                              *manicule-scopes*
 
-Records persist in one of two scopes. The caller never branches on
-scope — `:ManiculeAdd`, `:ManiculeList`, and the render layer all
-dispatch through the store automatically.
+REGISTERING A CUSTOM SINK   *manicule-manicule.nvim-registering-a-custom-sink*
 
-PROJECT SCOPE
-  Used when `vim.fs.root(bufnr, store.root_markers)` resolves to a
-  directory. Records live in `<store.dir>/<escaped-root>.<format>`
-  (one file per project). Carry a `project_root` field.
+manicule ships two bundled sinks:
 
-SESSION SCOPE
-  Used for unrooted file buffers (when `store.persist_unrooted ==
-  true`) and special buftypes (`terminal`, `help`, `nofile`,
-  `acwrite`, `nowrite`). Records live in a single
-  `<store.dir>/session.<format>` keyed purely by URI.
+- `clipboard`generic fallback, enabled by default.
+- `cmux`native integration for running cmux coding-agent surfaces.
+    It auto-registers when `CMUX_WORKSPACE_ID` is set and a `cmux`
+    executable is available. It detects Claude Code, Codex, Amp, and
+    user-provided title/screen patterns, sends the markdown review, and
+    clears comments after successful handoff.
 
-Quickfix, prompt, and cmdwin buffers reject adds unconditionally.
-
-If you `:saveas` a session-scope record into a project directory the
-scope stays `session` with the new URI — delete and re-add to move
-it into project scope.
-
-Runtime-staged buffers (paths under |stdpath()| `'run'` shaped
-`nvim.<user>/<run-id>/<N>/<suffix>`) are reverse-mapped to a real
-project file before persisting; failures notify "could not map to a
-real file" or "ambiguous reverse-map".
-
-                                                             *manicule-storage*
-
-Store files live at >
-    <store.dir>/<escaped-project-root>[%%<escaped-branch>].<format>   (project)
-    <store.dir>/session.<format>                                      (session)
-<
-where `[\\/:]+` in each path segment is replaced with `%%`. Run
-`:echo stdpath('state').'/manicule/'` to find the default directory.
-
-                                                               *manicule-editor*
-
-`:ManiculeAdd` and `:ManiculeEdit` open a floating markdown scratch
-buffer. Type the body (multiple lines are allowed), then press `<CR>`
-in normal mode to submit or `q` to cancel. Both key lists are
-configurable via the `ui.submit_keys` / `ui.cancel_keys` arrays.
-
-                                                              *manicule-popups*
-
-Each comment is rendered as a per-record floating popup anchored to its
-line. The popup title is the short record id (`c<6 chars>`) and the
-footer shows the last-touched timestamp (`updated_at` or `created_at`)
-followed by the keymap hint for the edit/delete `<Plug>` maps. Multiple
-comments on the same line stack above each other in id order.
-
-Set `ui.sticky = true` to keep every popup visible at all times; the
-default (`false`) shows popups only for records whose line is currently
-in the viewport, updating on scroll / resize / cursor movement.
-
-                                                          *manicule-highlights*
-
-manicule registers three highlight groups, all with `default = true` so
-user overrides survive `:colorscheme` changes:
-
-    ManiculeCommentBorder   Float border around comment popups.
-    ManiculeCommentMeta     Popup title (`c<id>`) and footer hint.
-    ManiculeLineNr          Line-number column tint on commented lines.
-                            Default-linked to |hl-DiagnosticSignInfo|.
-
-Override any of them with `:hi ManiculeLineNr ...` or
-`vim.api.nvim_set_hl(0, "ManiculeLineNr", { ... })`.
-
-                                                             *manicule-keymaps*
-
-Default normal-mode keymaps (matching the popup footer hint):
-
-    gca    Edit the comment at/covering the cursor.
-    gcd    Delete the comment at/covering the cursor.
-
-Set `vim.g.manicule_no_default_keymaps = 1` before the plugin loads to
-opt out. All actions are also available as `<Plug>` maps:
-
-    <Plug>(manicule-add)      n, x
-    <Plug>(manicule-list)     n
-    <Plug>(manicule-edit)     n
-    <Plug>(manicule-delete)   n
-    <Plug>(manicule-toggle)   n
-
-                                                            *manicule-quickfix*
-
-`:ManiculeList` populates the quickfix list (title prefixed with
-`manicule`). The quickfix buffer gets two extra buffer-local normal-
-mode bindings while the cursor sits on a manicule entry:
-
-    dd     Delete the comment under the cursor.
-    ce     Edit the comment under the cursor (opens the floating editor).
-    <CR>   Native quickfix jump to the anchored location (unchanged).
-
-The list refreshes in place while it stays open: `User
-ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`, `ManiculeResolved`,
-and `ManiculeOrphaned` events all trigger a `setqflist` `"r"`-mode
-replace that preserves the cursor row. A title-prefix check guards
-against stomping on non-manicule quickfix lists (grep, diagnostics,
-other plugins), so switching away mid-session is safe.
-
-The `dd`/`ce` bindings honour the same opt-out flag as `gca`/`gcd`:
-set `vim.g.manicule_no_default_keymaps = 1` to skip them.
-
-==============================================================================
-3. COMMANDS                                                 *manicule-commands*
-
-                                                                  *:ManiculeAdd*
-:[range]ManiculeAdd         Create a comment anchored to [range] (or the
-                            cursor line when no range is given).
-
-                                                                 *:ManiculeList*
-:ManiculeList               List all comments for the current project
-                            (populates the quickfix list).
-
-                                                                 *:ManiculeSend*
-:ManiculeSend [{sink}]      Dispatch comments to {sink}. With no {sink},
-                            auto-send when exactly one sink exists, or open
-                            the sink picker when multiple sinks are
-                            registered. Completion lists all registered
-                            sinks.
-
-                                                              *:ManiculeResolve*
-:ManiculeResolve [{n}]      Mark a comment as resolved. {n} is the 1-
-                            indexed position in `:ManiculeList` order;
-                            omit it to open a `vim.ui.select` picker.
-                            Tab-completion returns valid positions
-                            (`1`..`N`). Out-of-range or non-numeric
-                            arguments error.
-
-                                                               *:ManiculeDelete*
-:ManiculeDelete [{n}]       Remove a comment and its anchor. {n} is a
-                            1-indexed position in `:ManiculeList`
-                            order; omit it to open the picker.
-
-                                                                 *:ManiculeEdit*
-:ManiculeEdit [{n}]         Prompt to replace a comment body. {n} is a
-                            1-indexed position in `:ManiculeList`
-                            order; omit it to open the picker.
-
-                                                               *:ManiculeToggle*
-                                                              *manicule-toggle*
-:ManiculeToggle             Hide/restore all manicule visuals (popups +
-                            line-number tints) without touching the
-                            store. Records and anchor extmarks are
-                            preserved, so orphan detection keeps
-                            tracking edits while visuals are
-                            suppressed. State is in-memory only and
-                            resets on nvim restart. Fires a `User
-                            ManiculeVisibility` autocmd on each flip
-                            with `data.hidden = <bool>`. Also exposed
-                            as `<Plug>(manicule-toggle)`.
-
-                                                              *manicule-picker*
-
-`:ManiculeEdit`, `:ManiculeDelete`, and `:ManiculeResolve` open a
-`vim.ui.select` picker when invoked without an argument. Each row is
-formatted as `<n> │ <path>:<line> │ <body…>` (resolved records show a
-`[✓] ` prefix on the body). The picker and `:ManiculeList` share the
-same record order (path → start line → id), so positional arguments
-and picker selections are interchangeable.
-
-The cursor-based `gca` / `gcd` keymaps are the fast at-cursor path;
-the picker / positional commands are the "pick from a list" path.
-
-==============================================================================
-4. PUBLIC API                                                    *manicule-api*
+Community integrations should live as small modules that return a sink spec
+from `setup(opts)` or `spec(opts)`. The sink registry handles validation,
+picker display, dispatch, and `clear_on_success` deletion. Use
+`require("manicule.sinks.helpers")` for consistent formatting.
 
 >lua
-    local m = require("manicule")
-
-    m.setup(opts)
-    m.add({ range = {l1, l2}, body = "...", meta = {} })
-    m.edit(id)
-    m.delete(id)
-    m.resolve(id)
-    m.list({ uri, path_suffix, unresolved, orphaned, author })
-    m.send(sink_name, filter, ctx)
-    m.register_sink(spec)
+    require("manicule").register_sink({
+      name = "gist",
+      type = "integration",         -- "sink" by default; "integration" for external tools
+      label = "GitHub Gist",        -- optional display label for pickers
+      description = "draft review", -- optional picker hint
+      clear_on_success = false,  -- set true to auto-delete records after cb(true)
+      validate = function(ctx)
+        if not ctx.token then return false, "missing GitHub token" end
+        return true
+      end,
+      format = function(c)
+        return ("- `%s:%d` %s"):format(c.path, c.range.start[1] + 1, c.body)
+      end,
+      send = function(comments, ctx, cb)
+        -- POST to https://api.github.com/gists …
+        cb(true)
+      end,
+    })
 <
 
-There is NO `m.on(event, fn)` helper. Subscribe via |nvim_create_autocmd|
-on the `User` event — see |manicule-events|.
+Then: `:ManiculeSend gist`.
 
-==============================================================================
-5. SINKS                                                       *manicule-sinks*
+A reusable integration module looks like:
 
-A sink is any table matching: >lua
-
-    {
-      name             = "my-sink",
-      type             = "integration",   -- optional: "sink" by default
-      label            = "My Sink",        -- optional picker label
-      description      = "review target",  -- optional picker hint
-      send             = function(comments, ctx, cb) ... end,
-      format           = function(comment) return "..." end, -- optional
-      validate         = function(ctx) return true end,      -- optional
-      clear_on_success = false,                              -- optional
-    }
+>lua
+    -- lua/manicule/sinks/mytool.lua
+    local helpers = require("manicule.sinks.helpers")
+    
+    local M = {}
+    
+    function M.setup(opts)
+      opts = opts or {}
+      return {
+        name = "mytool",
+        type = "integration",
+        label = "My Tool",
+        description = "send review to My Tool",
+        clear_on_success = true,
+        format = helpers.format_line,
+        validate = function(ctx)
+          if not opts.token and not ctx.token then
+            return false, "missing token"
+          end
+          return true
+        end,
+        send = function(comments, ctx, cb)
+          local body = helpers.format_markdown_review(comments)
+          -- send body to the external tool
+          cb(true)
+        end,
+      }
+    end
+    
+    return M
 <
 
-`:ManiculeSend` without an argument chooses the target for you. If one
-sink is registered it sends immediately; if multiple sinks are registered
-it opens a picker. The default picker is |vim.ui.select()|, which means
-plugins that replace |vim.ui.select()| (Snacks, Telescope UI select,
-fzf-lua, dressing.nvim, etc.) work without extra manicule-specific code.
+For local config, register that module after `setup()`
 
-For a direct picker integration, set `ui.sink_picker`: >lua
+>lua
+    local manicule = require("manicule")
+    manicule.setup()
+    manicule.register_sink(require("manicule.sinks.mytool").setup({ token = "..." }))
+<
 
+`:ManiculeSend`with no argument auto-dispatches when exactly one sink is
+registered. When multiple sinks are registered, it opens a picker so you can
+choose the target agent/sink. The default picker is `vim.ui.select`, so users
+who already route `vim.ui.select` through Snacks, Telescope, fzf-lua,
+dressing.nvim, etc. do not need extra configuration.
+
+For a direct picker integration, configure `ui.sink_picker`
+
+>lua
     require("manicule").setup({
       ui = {
         sink_picker = function(choices, opts, cb)
@@ -316,60 +400,20 @@ For a direct picker integration, set `ui.sink_picker`: >lua
     })
 <
 
-Custom pickers may call `cb(choice)` with one of the choice tables or
+Custompickers may call `cb(choice)` with one of the choice tables or
 `cb(choice.name)` with the sink name. Call `cb(nil)` to cancel.
 
-`clear_on_success` (boolean, default false): when true, manicule.send
-calls `manicule.delete(record.id)` for every record in the dispatched
-batch after the sink's `cb` reports `ok = true`. `User ManiculeSent`
-fires first, then one `User ManiculeDeleted` per record. Off by default,
-so records persist after dispatch.
+Set `clear_on_success = true` when the sink semantically _consumes_ the records
+(e.g. handing a review off to an external reviewer) — the core will call
+`M.delete` on every record in the batch once the sink’s callback reports `ok
+= true`, firing one `ManiculeDeleted` per record. Default is `false`,
+i.e. records persist after dispatch.
 
-Bundled sinks:
 
-- `clipboard`: generic fallback, enabled by default.
-- `cmux`: native integration for running cmux coding-agent surfaces.
-  `sinks.cmux = "auto"` (default) registers it when `CMUX_WORKSPACE_ID`
-  is set and `cmux` is executable. Set `sinks.cmux = true` to force it,
-  or `sinks.cmux = false` to disable it. It detects Claude Code, Codex,
-  Amp, and custom title/screen patterns, sends the markdown review, and
-  clears comments after successful handoff.
+EVENTS                                         *manicule-manicule.nvim-events*
 
-Register with: >lua
-
-    require("manicule").register_sink(spec)
-<
-
-Community integrations should expose a small `setup(opts)` function that
-returns a sink spec. Use `require("manicule.sinks.helpers")` for common
-formatters:
-
->lua
-    local helpers = require("manicule.sinks.helpers")
-
-    return {
-      setup = function(opts)
-        return {
-          name = "mytool",
-          type = "integration",
-          label = "My Tool",
-          clear_on_success = true,
-          format = helpers.format_line,
-          send = function(comments, ctx, cb)
-            local body = helpers.format_markdown_review(comments)
-            -- send body to the external tool
-            cb(true)
-          end,
-        }
-      end,
-    }
-<
-
-==============================================================================
-6. EVENTS                                                     *manicule-events*
-
-Lifecycle events are fired as native |User| autocmds. Subscribe with
-|nvim_create_autocmd|:
+Lifecycle events are fired as native `User` autocmds — there is no `on()`
+helper. Subscribe directly:
 
 >lua
     vim.api.nvim_create_autocmd("User", {
@@ -380,19 +424,17 @@ Lifecycle events are fired as native |User| autocmds. Subscribe with
     })
 <
 
-Patterns and payload shapes:
+Patterns: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
+`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`, `ManiculeRenamed`,
+`ManiculeVisibility`. Payload shapes are documented in `ARCHITECTURE.md`
+<./ARCHITECTURE.md#event-catalog> and `:help manicule-events`.
 
-    ManiculeAdded          data = record
-    ManiculeEdited         data = record (after update)
-    ManiculeDeleted        data = { id, record }
-    ManiculeResolved       data = record (resolved=true)
-    ManiculeSent           data = { sink, count, ok, err }
-    ManiculeOrphaned       data = { id, record }  (anchor invalidated on reload)
-    ManiculeRenamed        data = { bufnr, old_uri, new_uri,
-                                    record_count, ids }
-                                    (fired on BufFilePost when records
-                                     were re-anchored to a new URI)
-    ManiculeVisibility     data = { hidden }      (fired on :ManiculeToggle)
 
-==============================================================================
-vim:ft=help:tw=78:ts=8:et:sw=2:
+SEE ALSO                                     *manicule-manicule.nvim-see-also*
+
+- codediff.nvim <https://github.com/esmuellert/codediff.nvim> — the
+    diff UI this was extracted from.
+
+Generated by panvimdoc <https://github.com/kdheepak/panvimdoc>
+
+vim:tw=78:ts=8:noet:ft=help:norl:
