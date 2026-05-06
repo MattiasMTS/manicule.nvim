@@ -3,9 +3,9 @@ set -euo pipefail
 
 timeout_seconds="${MANICULE_TEST_TIMEOUT:-60}"
 if command -v gtimeout >/dev/null 2>&1; then
-  exec gtimeout "$timeout_seconds" nvim -l tests/minit.lua --minitest "$@"
+  exec gtimeout --kill-after=5s "$timeout_seconds" nvim --clean --headless -l tests/minit.lua --minitest "$@"
 elif command -v timeout >/dev/null 2>&1; then
-  exec timeout "$timeout_seconds" nvim -l tests/minit.lua --minitest "$@"
+  exec timeout --kill-after=5s "$timeout_seconds" nvim --clean --headless -l tests/minit.lua --minitest "$@"
 else
-  exec perl -e 'alarm shift; exec @ARGV' "$timeout_seconds" nvim -l tests/minit.lua --minitest "$@"
+  exec perl -e 'alarm shift; exec @ARGV' "$timeout_seconds" nvim --clean --headless -l tests/minit.lua --minitest "$@"
 fi

@@ -1,14 +1,20 @@
----
-"on": [push, pull_request]
 name: lint-test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   stylua:
     name: stylua
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: JohnnyMorganz/stylua-action@v4
+      - uses: actions/checkout@v6
+      - uses: JohnnyMorganz/stylua-action@v5
         with:
           version: latest
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -16,19 +22,21 @@ jobs:
 
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        nvim-versions: ['stable', 'nightly']
+        nvim-version: [stable, nightly]
     runs-on: ${{ matrix.os }}
-    name: test
+    name: test (${{ matrix.os }}, ${{ matrix.nvim-version }})
+    timeout-minutes: 5
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - uses: rhysd/action-setup-vim@v1
+      - uses: rhysd/action-setup-vim@v1.6.1
         with:
           neovim: true
-          version: ${{ matrix.nvim-versions }}
+          version: ${{ matrix.nvim-version }}
 
       - name: run tests
         run: scripts/test
