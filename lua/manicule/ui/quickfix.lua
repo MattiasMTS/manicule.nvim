@@ -154,6 +154,17 @@ local function build_items(records)
   return items
 end
 
+---@param records table[]
+---@return string?
+local function root_for_records(records)
+  for _, record in ipairs(records or {}) do
+    if type(record.project_root) == "string" and record.project_root ~= "" then
+      return record.project_root
+    end
+  end
+  return nil
+end
+
 --- Build quickfix items without opening. Useful for tests / external callers.
 ---@param records table[]
 ---@return table[]
@@ -245,7 +256,7 @@ function M.show(records, opts)
   local title = string.format("%s (%d)", state.title_prefix, #items)
   -- Record the filter + root that produced this list so a later
   -- `M.refresh` can regenerate it without knowing who called `show`.
-  state.root = require("manicule.store").root()
+  state.root = opts.filter and opts.filter._root or root_for_records(records) or require("manicule.store").root()
   state.filter = opts.filter and vim.deepcopy(opts.filter) or nil
   vim.fn.setqflist({}, " ", { title = title, items = items })
   if opts.open ~= false and #items > 0 then
@@ -297,6 +308,7 @@ function M.refresh()
   -- implicit `show` call inside `list` so we don't recurse.
   local filter = state.filter and vim.deepcopy(state.filter) or {}
   filter._quiet = true
+  filter._root = state.root
   local records = require("manicule").list(filter)
   local items = build_items(records)
   local title = string.format("%s (%d)", state.title_prefix, #items)

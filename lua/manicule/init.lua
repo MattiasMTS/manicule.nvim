@@ -898,7 +898,7 @@ end
 ---List comments, optionally filtered. Results are always sorted by
 ---`uri → start line → id` so the ordering seen in `:ManiculeList`,
 ---the picker, and the positional-number completer is identical.
----@param filter {uri?: string, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string}|nil
+---@param filter {uri?: string, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, _root?: string}|nil
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
@@ -918,7 +918,7 @@ function M.list(filter)
   -- walking up through `stdpath('run')` to a dead end — raw
   -- `store.root()` here returned nil and left M.list blind to every
   -- record saved via `adapter.identify`'s reverse-map.
-  local root = current_project_root()
+  local root = filter._root or current_project_root()
   if root then
     for _, r in ipairs(store.all(root)) do
       table.insert(all, r)

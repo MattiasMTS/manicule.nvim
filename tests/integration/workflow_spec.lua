@@ -15,6 +15,29 @@ local function teardown_env()
   ctx = nil
 end
 
+local function floating_windows_containing(text)
+  local wins = {}
+  for _, winid in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(winid) then
+      local cfg = vim.api.nvim_win_get_config(winid)
+      if cfg.relative and cfg.relative ~= "" then
+        local bufnr = vim.api.nvim_win_get_buf(winid)
+        local lines = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+        if lines:find(text, 1, true) then
+          table.insert(wins, winid)
+        end
+      end
+    end
+  end
+  return wins
+end
+
+local function wait_for_popup_count(text, expected)
+  return vim.wait(1000, function()
+    return #floating_windows_containing(text) == expected
+  end, 10)
+end
+
 describe("manicule headless workflow", function()
   before_each(setup_env)
   after_each(teardown_env)
@@ -151,6 +174,48 @@ describe("manicule headless workflow", function()
     assert.are.equal(records[1].id, events[1].data.id)
 
     stop_capture()
+  end)
+
+  it("edits a project record through quickfix and repaints the source popup", function()
+    vim.cmd("runtime plugin/manicule.lua")
+
+    require("manicule").add({
+      body = "edit from qf before",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("edit from qf before", 1))
+
+    vim.cmd("ManiculeList")
+    local quickfix = require("manicule.ui.quickfix")
+    local qf_winid = quickfix.is_manicule_qf_open()
+    assert.is_truthy(qf_winid)
+    vim.api.nvim_set_current_win(qf_winid)
+
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ce", true, false, true), "mx", false)
+    assert.is_true(vim.wait(1000, function()
+      return require("manicule.ui.editor").is_active()
+    end, 10))
+
+    local editor_bufnr = vim.api.nvim_get_current_buf()
+    vim.bo[editor_bufnr].modifiable = true
+    vim.api.nvim_buf_set_lines(editor_bufnr, 0, -1, false, { "edit from qf after" })
+    vim.bo[editor_bufnr].modifiable = false
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+
+    assert.is_true(vim.wait(1000, function()
+      local records = require("manicule.store").all(ctx.root)
+      return records[1] and records[1].body == "edit from qf after"
+    end, 10))
+    assert.is_true(vim.wait(1000, function()
+      return not require("manicule.ui.editor").is_active()
+    end, 10))
+
+    assert.is_true(wait_for_popup_count("edit from qf before", 0))
+    assert.is_true(wait_for_popup_count("edit from qf after", 1))
+    assert.is_true(vim.wait(1000, function()
+      local qf = vim.fn.getqflist()
+      return #qf == 1 and qf[1].text:find("edit from qf after", 1, true) ~= nil
+    end, 10))
   end)
 
   it("persists extmark movement on write", function()

@@ -246,14 +246,25 @@ function M.open(opts, cb)
   local closed = false
   local result_sent = false
 
-  local function send_result(body)
+  local function finish(body)
     if result_sent then
       return
     end
     result_sent = true
-    -- Dispatch on the next tick so the window actually finishes closing
-    -- before any callback-side UI (e.g. another prompt) pops up.
+
     vim.schedule(function()
+      force_normal_mode()
+      if vim.api.nvim_win_is_valid(winid) then
+        pcall(vim.api.nvim_win_close, winid, true)
+      end
+      if vim.api.nvim_win_is_valid(previous_win) then
+        pcall(vim.api.nvim_set_current_win, previous_win)
+      end
+      force_normal_mode()
+
+      -- Dispatch after the editor window has actually finished closing.
+      -- Callback-side UI and render refreshes can otherwise race with
+      -- WinLeave/BufLeave cleanup from the closing float.
       cb(body)
     end)
   end
@@ -268,18 +279,7 @@ function M.open(opts, cb)
       active_editor = nil
     end
 
-    send_result(nil)
-
-    vim.schedule(function()
-      force_normal_mode()
-      if vim.api.nvim_win_is_valid(winid) then
-        pcall(vim.api.nvim_win_close, winid, true)
-      end
-      if vim.api.nvim_win_is_valid(previous_win) then
-        pcall(vim.api.nvim_set_current_win, previous_win)
-      end
-      force_normal_mode()
-    end)
+    finish(nil)
   end
 
   local function submit_comment()
@@ -299,18 +299,7 @@ function M.open(opts, cb)
       active_editor = nil
     end
 
-    send_result(text)
-
-    vim.schedule(function()
-      force_normal_mode()
-      if vim.api.nvim_win_is_valid(winid) then
-        pcall(vim.api.nvim_win_close, winid, true)
-      end
-      if vim.api.nvim_win_is_valid(previous_win) then
-        pcall(vim.api.nvim_set_current_win, previous_win)
-      end
-      force_normal_mode()
-    end)
+    finish(text)
   end
 
   apply_editor_keymaps(bufnr, cfg.submit_keys, cfg.cancel_keys, submit_comment, close_editor)
