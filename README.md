@@ -43,6 +43,8 @@ native cross-buffer commenting.
 
 ## Install
 
+Requires Neovim >= 0.10.
+
 With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
@@ -273,6 +275,10 @@ separators escaped as `%%`, e.g. `%Users%me%src%foo.mpack`. Switch to
 With `store.branch = true` the filename is scoped per-branch
 (`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to
 the unsuffixed filename so the common case doesn't fragment.
+
+Run `:checkhealth manicule` to verify the configured store directory,
+store schema version, Neovim API support, clipboard availability, and
+registered sinks.
 
 ## Registering a custom sink
 

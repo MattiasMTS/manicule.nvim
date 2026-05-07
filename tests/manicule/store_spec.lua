@@ -71,6 +71,39 @@ describe("manicule.store session scope", function()
     assert.are.same({}, store.session_for_uri("file:///nope"))
   end)
 
+  it("writes versioned envelopes and reads legacy bare arrays", function()
+    local store = require("manicule.store")
+    local legacy = {
+      {
+        id = "legacy",
+        uri = "term://legacy/1",
+        scope = "session",
+        range = { start = { 0, 0 }, end_ = { 0, 0 } },
+        body = "from old store",
+        author = "",
+        created_at = 0,
+        updated_at = 0,
+        resolved = false,
+        meta = {},
+      },
+    }
+
+    vim.fn.writefile({ vim.json.encode(legacy) }, store.session_path())
+    store._reset()
+
+    local reloaded = store.session_all()
+    assert.are.equal(1, #reloaded)
+    assert.are.equal("legacy", reloaded[1].id)
+
+    store.session_mark_dirty()
+    assert.is_true(store.session_save())
+
+    local encoded = table.concat(vim.fn.readfile(store.session_path()), "\n")
+    local payload = vim.json.decode(encoded)
+    assert.are.equal(store.schema_version(), payload.version)
+    assert.are.equal("legacy", payload.records[1].id)
+  end)
+
   it("session_remove drops the record and survives save/reload", function()
     local store = require("manicule.store")
     store.session_put({

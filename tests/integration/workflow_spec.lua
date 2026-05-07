@@ -116,27 +116,41 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
-  it("deletes a project record from the manicule quickfix buffer", function()
+  it("deletes a project record through the real manicule quickfix window", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local events, stop_capture = H.capture_events({ "ManiculeDeleted" })
+
     require("manicule").add({
       body = "delete from qf",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
     local records = require("manicule").list({ _quiet = true })
-    local items = require("manicule.ui.quickfix").build_items(records)
-    vim.fn.setqflist({}, " ", { title = "locator test", items = items })
-    vim.cmd.enew()
-    vim.bo.buftype = "quickfix"
+    assert.are.equal(1, #records)
+
+    vim.cmd("ManiculeList")
+
+    local quickfix = require("manicule.ui.quickfix")
+    local qf_winid = quickfix.is_manicule_qf_open()
+    assert.is_truthy(qf_winid)
+    vim.api.nvim_set_current_win(qf_winid)
 
     assert.are.equal("quickfix", vim.bo.buftype)
-    local locator = require("manicule.ui.quickfix").record_locator_at_cursor()
+    local locator = quickfix.record_locator_at_cursor()
     assert.is_truthy(locator)
+    assert.are.equal(records[1].id, locator.id)
     assert.are.equal("project", locator.scope)
     assert.are.equal(ctx.root, locator.project_root)
 
-    require("manicule").delete(locator.id, locator)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("dd", true, false, true), "mx", false)
 
-    assert.are.equal(0, #require("manicule.store").all(ctx.root))
+    assert.is_true(vim.wait(1000, function()
+      return #require("manicule.store").all(ctx.root) == 0 and #vim.fn.getqflist() == 0
+    end, 10))
+    assert.are.equal("ManiculeDeleted", events[1].pattern)
+    assert.are.equal(records[1].id, events[1].data.id)
+
+    stop_capture()
   end)
 
   it("persists extmark movement on write", function()

@@ -16,10 +16,13 @@
 --     Records in this store key purely off `uri`; they carry
 --     `project_root = nil`.
 --
--- The on-disk payload is a bare array of records encoded with
--- `vim.mpack.encode` (or `vim.json.encode` when `config.store.format ==
--- "json"`); records carry `scope`, `uri`, `project_root`, `range`,
--- `body`, `author`, timestamps, `resolved`, and free-form `meta`.
+-- The on-disk payload is a versioned envelope:
+--
+--   { version = 1, records = { ... } }
+--
+-- encoded with `vim.mpack.encode` (or `vim.json.encode` when
+-- `config.store.format == "json"`). Legacy bare arrays are still
+-- accepted and rewritten as the current envelope on the next save.
 -- `save()` writes to `<path>.tmp` then renames so a mid-write crash
 -- never truncates the prior file. State is kept per-root in a
 -- module-local `cache` (plus a single-slot session cache); writes flip
@@ -29,6 +32,8 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 local config = require("manicule.config")
+
+local STORE_VERSION = 1
 
 ---@class manicule.StoreEntry
 ---@field records table[]
@@ -147,20 +152,49 @@ local function write_atomic(path, data)
   return true
 end
 
----Encode records per the configured format as a bare array.
+---Return the current on-disk store schema version.
+---@return integer
+function M.schema_version()
+  return STORE_VERSION
+end
+
+---@param value any
+---@return boolean
+local function is_list(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  if vim.islist then
+    return vim.islist(value)
+  end
+  local count = 0
+  for key, _ in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false
+    end
+    count = count + 1
+  end
+  return count == #value
+end
+
+---Encode records per the configured format as a versioned envelope.
 ---@param records table[]
 ---@return string|nil data, string? err
 local function encode(records)
   local cfg = config.current.store
+  local payload = {
+    version = STORE_VERSION,
+    records = records,
+  }
   if cfg.format == "json" then
-    local ok, encoded = pcall(vim.json.encode, records)
+    local ok, encoded = pcall(vim.json.encode, payload)
     if not ok then
       return nil, tostring(encoded)
     end
     return encoded
   end
   -- Default / "mpack".
-  local ok, encoded = pcall(vim.mpack.encode, records)
+  local ok, encoded = pcall(vim.mpack.encode, payload)
   if not ok then
     return nil, tostring(encoded)
   end
@@ -168,7 +202,7 @@ local function encode(records)
 end
 
 ---Decode `data` using the configured format. Expects a bare array of
----records; anything else (non-table, dict with non-integer keys) is
+---records (legacy) or the current versioned envelope. Anything else is
 ---treated as corrupt and produces an empty list plus a WARN notify.
 ---@param data string
 ---@param path string used purely for diagnostics
@@ -181,17 +215,34 @@ local function decode(data, path)
     vim.notify(("manicule: failed to decode store %s; starting fresh"):format(path), vim.log.levels.WARN)
     return {}
   end
-  -- An empty table is a valid empty store regardless of whether the
-  -- decoder tags it as list/dict. (Freshly-created files can look this
-  -- way before any record is persisted.)
-  if next(decoded) == nil then
-    return {}
+
+  if is_list(decoded) then
+    return decoded
   end
-  if vim.islist and not vim.islist(decoded) then
+
+  local version = decoded.version
+  if type(version) ~= "number" then
     vim.notify(("manicule: unrecognised store shape at %s; starting fresh"):format(path), vim.log.levels.WARN)
     return {}
   end
-  return decoded
+  if version > STORE_VERSION then
+    vim.notify(("manicule: store %s uses newer schema v%d; starting fresh"):format(path, version), vim.log.levels.WARN)
+    return {}
+  end
+  if version ~= STORE_VERSION then
+    vim.notify(
+      ("manicule: unsupported store schema v%d at %s; starting fresh"):format(version, path),
+      vim.log.levels.WARN
+    )
+    return {}
+  end
+
+  local records = decoded.records
+  if not is_list(records) then
+    vim.notify(("manicule: unrecognised records shape at %s; starting fresh"):format(path), vim.log.levels.WARN)
+    return {}
+  end
+  return records
 end
 
 ---Load all records for `root` into the cache. No-op if already loaded.

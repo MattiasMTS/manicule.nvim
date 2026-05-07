@@ -1,4 +1,4 @@
-*manicule.txt*           For Neovim >= 0.8.0          Last change: 2026 May 06
+*manicule.txt*           For Neovim >= 0.10.0         Last change: 2026 May 07
 
 ==============================================================================
 Table of Contents                                 *manicule-table-of-contents*
@@ -63,6 +63,8 @@ cross-buffer commenting.
 
 
 INSTALL                                       *manicule-manicule.nvim-install*
+
+Requires Neovim >= 0.10.
 
 With lazy.nvim <https://github.com/folke/lazy.nvim>
 
@@ -294,6 +296,10 @@ want the files to be human-readable.
 With `store.branch = true` the filename is scoped per-branch
 (`<root>%%<branch>.<ext>`), except for `main`/`master` which collapse to the
 unsuffixed filename so the common case doesn’t fragment.
+
+Run `:checkhealth manicule` to verify the configured store directory, store
+schema version, Neovim API support, clipboard availability, and registered
+sinks.
 
 
 REGISTERING A CUSTOM SINK   *manicule-manicule.nvim-registering-a-custom-sink*

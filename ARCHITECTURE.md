@@ -297,14 +297,22 @@ store can key off the same field directly.
 
 ### On-disk layout
 
-The on-disk payload is a bare array of record tables, encoded with
-`vim.mpack.encode` by default; `store.format = "json"` switches to
-`vim.json.encode` for users who want a human-readable file. mpack is
-the default because nothing human reads these files anymore (they live
-under `stdpath('state')`, not the repo), and mpack is smaller, faster,
-and handles Lua `nil`/array cases without JSON's coercion quirks. If
-the decoded payload isn't a list the loader logs a `WARN` notification
-and starts from an empty record list rather than crashing.
+The on-disk payload is a versioned envelope:
+
+```lua
+{ version = 1, records = { ... } }
+```
+
+It is encoded with `vim.mpack.encode` by default; `store.format =
+"json"` switches to `vim.json.encode` for users who want a
+human-readable file. mpack is the default because nothing human reads
+these files anymore (they live under `stdpath('state')`, not the repo),
+and mpack is smaller, faster, and handles Lua `nil`/array cases without
+JSON's coercion quirks. Legacy bare record arrays still load and are
+rewritten as the current envelope on the next save. If the decoded
+payload is neither a list nor a supported envelope the loader logs a
+`WARN` notification and starts from an empty record list rather than
+crashing.
 
 Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
 `<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash
@@ -438,24 +446,30 @@ All events are native `User` autocmds — subscribe with
 ## 10. Test strategy
 
 `make test` is the publishing gate. It runs `tests/minit.lua`, a direct
-`mini.test` harness that bootstraps `mini.test` into `.tests/` and then
-executes all `tests/**/*_spec.lua` files in headless Neovim. The runner
-does not load the user's config and does not depend on manual UI.
+`mini.test` harness that bootstraps `mini.test` into `.tests/`, collects
+all `tests/**/*_spec.lua` files, and executes them synchronously in
+headless Neovim. The runner does not load the user's config, does not
+depend on manual UI, and does not replace core Neovim APIs such as
+`vim.fs.root`, `vim.fs.normalize`, or `vim.system`.
 
 - Unit specs under `tests/manicule/` exercise module-level behavior:
   adapter identity, URI reverse-map, store persistence, picker routing,
   and sink selection.
 - Integration specs under `tests/integration/` exercise user workflows:
   add → list → send, command dispatch, fake prompt input, fake sinks,
-  sink `clear_on_success`, and `User Manicule*` events.
+  sink `clear_on_success`, render visibility, real floating-window
+  lifecycle, and `User Manicule*` events.
 - `make test-unit` and `make test-integration` keep the two layers
   runnable independently when debugging failures.
 
-External integrations such as cmux should stay behind sink specs or
-fake sink adapters in tests. The core contract to validate is that
-manicule selects the right comments, passes the right context, emits
-the right events, and clears comments only when the sink declares that
-policy.
+Each helper setup creates one OS-temp artifact root containing both the
+state dir and a throwaway project with a `.git` marker, then deletes the
+whole tree during teardown. External integrations such as cmux should
+stay behind local sink specs or ephemeral fake CLIs in tests; the suite
+should not make network calls or depend on real external services. The
+core contract to validate is that manicule selects the right comments,
+passes the right context, emits the right events, and clears comments
+only when the sink declares that policy.
 
 ## 11. Non-goals (for now)
 
