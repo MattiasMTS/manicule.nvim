@@ -71,7 +71,7 @@ With lazy.nvim <https://github.com/folke/lazy.nvim>
     }
 <
 
-Use an event trigger because setup registers the autocmds that attach existing
+Usean event trigger because setup registers the autocmds that attach existing
 records to loaded buffers.
 
 
