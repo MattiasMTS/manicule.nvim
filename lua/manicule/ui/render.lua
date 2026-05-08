@@ -1,14 +1,12 @@
 -- manicule.nvim: per-comment floating popup renderer.
 --
--- Ported from codediff.nvim's `ui/comments/render.lua` (PR #332). For
--- each live record we own a Handle that carries the anchor extmark id,
+-- For each live record we own a Handle that carries the anchor extmark id,
 -- the popup window id, and the popup scratch buffer. `reconcile` is
 -- idempotent: it creates, updates, and tears down popups based on the
 -- records currently belonging to a buffer.
 --
--- manicule is buffer-agnostic, so the keying is `[bufnr][comment_id]`
--- rather than codediff's `[tabpage][comment_id]` / diff-side /
--- session-keyed layout. A record "belongs to" a buffer when the
+-- manicule is buffer-agnostic, so the keying is `[bufnr][comment_id]`.
+-- A record "belongs to" a buffer when the
 -- buffer's canonical URI (see `manicule.uri.for_bufnr`) equals
 -- `record.uri`.
 --
@@ -340,7 +338,7 @@ local function render_extmark(record, handle)
     invalidate = true,
     undo_restore = false,
     priority = 220,
-    -- number_hl_group only tints the start line; matches codediff
+    -- number_hl_group only tints the start line.
     number_hl_group = "ManiculeLineNr",
   }
 

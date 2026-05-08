@@ -55,7 +55,7 @@ M.defaults = {
     -- `cmux = true` forces the cmux integration into the picker.
     -- `cmux = "auto"` (default) registers it only inside cmux.
   },
-  -- Floating editor + popup UI options. Mirrors the codediff.nvim surface.
+  -- Floating editor + popup UI options.
   ui = {
     width = 72,
     height = 6,

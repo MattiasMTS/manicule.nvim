@@ -469,9 +469,8 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized", "CursorMoved", "CursorMovedI" }, {
     group = group,
     callback = function(ev)
-      -- `vim.schedule` mirrors codediff's render path: avoid doing float
-      -- reconfigure work from inside the autocmd, lets batched events
-      -- coalesce into a single render.
+      -- Avoid doing float reconfigure work from inside the autocmd;
+      -- scheduling lets batched events coalesce into a single render.
       vim.schedule(function()
         refresh_viewport(ev.buf)
       end)

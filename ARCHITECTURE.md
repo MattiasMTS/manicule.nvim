@@ -105,8 +105,9 @@ lazy spec pay no startup cost.
 
 The `ui/` submodule hosts the floating-window comment editor, the
 per-comment popup renderer, the quickfix formatter, and a small shared
-float primitives module — all ported from `codediff.nvim` (PR #332) and
-trimmed to fit manicule's buffer-agnostic model.
+float primitives module. The UI is intentionally buffer-agnostic: every
+surface works from record identity and buffer URI rather than a diff-only
+model.
 
 - `ui/float.lua` — shared float primitives used by both the editor and
   the popup renderer: `create_scratch_buf`, `open_or_reconfigure`,
@@ -334,7 +335,7 @@ but are omitted from `session.<format>` until `:file` / `:saveas`
 rewrites them to a stable URI.
 
 **Runtime-staged buffers.** Plugins (a `:DiffTool` command, a stash-
-blob viewer, a codediff review buffer, …) sometimes write content to
+blob viewer, a review buffer, …) sometimes write content to
 `<stdpath('run')>/<N>/<project-relative-path>` via `vim.fn.tempname()`
 so the buffer has a unique file-backed identity. That directory's
 `<run-id>` rotates every nvim launch, so the URI is useless the moment
@@ -411,8 +412,8 @@ lines are visually distinct; everything else is drawn by `ui/render.lua`.
 Each extmark is paired with a floating popup positioned against the
 anchor window, titled `c<short-id>` and footered with the edit/delete
 hint. Multiple popups on the same line stack vertically, ordered by
-record id. `number_hl_group` only tints the start line — multi-line
-ranges do not tint intermediate line numbers, matching codediff.
+record id. `number_hl_group` only tints the start line; additional decoration
+extmarks tint the rest of a multi-line range.
 
 ## 8. Event catalog
 

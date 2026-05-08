@@ -32,7 +32,7 @@ function M.create(bufnr, range)
     end_col = end_col,
     invalidate = true,
     undo_restore = false,
-    -- number_hl_group only tints the start line; matches codediff
+    -- number_hl_group only tints the start line.
     number_hl_group = "ManiculeLineNr",
   })
 end

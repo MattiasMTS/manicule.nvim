@@ -50,7 +50,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-The event trigger matters: setup registers the autocmds that attach existing
+Use an event trigger because setup registers the autocmds that attach existing
 records to loaded buffers.
 
 ## Usage
@@ -70,10 +70,8 @@ normal mode to submit, or `q` to cancel.
 
 Default at-cursor keymaps:
 
-| Key   | Action                                      |
-| ----- | ------------------------------------------- |
-| `gca` | Edit the comment at or covering the cursor  |
-| `gcd` | Delete the comment at or covering the cursor |
+- `gca` edits the comment at or covering the cursor.
+- `gcd` deletes the comment at or covering the cursor.
 
 Set `vim.g.manicule_no_default_keymaps = 1` before loading the plugin to opt
 out. Add/list are exposed only as `<Plug>` maps so you can choose your own
@@ -88,11 +86,9 @@ vim.keymap.set("n", "<leader>cl", "<Plug>(manicule-list)")
 
 `:ManiculeList` opens a quickfix list titled `manicule (...)`.
 
-| Key    | Action                           |
-| ------ | -------------------------------- |
-| `<CR>` | Jump to the anchored location    |
-| `dd`   | Delete the comment under cursor  |
-| `ce`   | Edit the comment under cursor    |
+- `<CR>` jumps to the anchored location.
+- `dd` deletes the comment under the cursor.
+- `ce` edits the comment under the cursor.
 
 The list refreshes in place when comments are added, edited, deleted, or
 resolved.
@@ -152,8 +148,8 @@ Sinks receive comment batches from `:ManiculeSend`.
 
 Built-ins:
 
-- `clipboard`: copies formatted comments to the `+` register.
-- `cmux`: sends a markdown review to a cmux coding-agent surface and clears
+- `clipboard` copies formatted comments to the `+` register.
+- `cmux` sends a markdown review to a cmux coding-agent surface and clears
   comments after a successful handoff.
 
 Register a custom sink:

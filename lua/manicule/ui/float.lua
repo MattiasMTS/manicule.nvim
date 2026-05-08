@@ -1,8 +1,7 @@
 -- manicule.nvim: shared floating-window helpers.
 --
--- Ported from codediff.nvim's `ui/lib/float.lua`. Both the comment
--- editor (`ui/editor.lua`) and the comment popup renderer
--- (`ui/render.lua`) share these primitives so title/footer and
+-- Both the comment editor (`ui/editor.lua`) and the comment popup
+-- renderer (`ui/render.lua`) share these primitives so title/footer and
 -- winhighlight handling live in one place.
 
 local M = {}

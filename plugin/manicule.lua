@@ -83,9 +83,8 @@ vim.keymap.set("n", "<Plug>(manicule-list)", function()
 end, { silent = true })
 
 -- Edit the first comment at/covering the cursor.
--- Mirrors codediff.nvim's <Plug>(codediff-comment-edit). Manicule is
--- buffer-agnostic so we resolve the target record via the render
--- layer's cursor hit-test helper.
+-- Manicule is buffer-agnostic, so we resolve the target record via the
+-- render layer's cursor hit-test helper.
 vim.keymap.set("n", "<Plug>(manicule-edit)", function()
   local bufnr = vim.api.nvim_get_current_buf()
   local id = require("manicule.ui.render").record_at_cursor(bufnr)

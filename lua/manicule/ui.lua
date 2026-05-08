@@ -1,7 +1,7 @@
 -- manicule.nvim: picker-agnostic UI glue.
 --
 -- `M.prompt` now delegates to the floating editor at
--- `lua/manicule/ui/editor.lua` (ported from codediff.nvim). That gives
+-- `lua/manicule/ui/editor.lua`. That gives
 -- multi-line markdown-flavoured editing with user-configurable submit /
 -- cancel keys instead of the single-line `vim.ui.input` we used in v0.
 --

@@ -1,9 +1,8 @@
 -- manicule.nvim: floating-window comment editor.
 --
--- Ported from codediff.nvim's `ui/comments/editor.lua`. Buffer-agnostic:
--- codediff anchored the editor to a diff pane, manicule just anchors it
--- to the cursor in the current window. Only one editor is live at a
--- time — opening a second one closes the first.
+-- Buffer-agnostic floating editor for adding and editing comment bodies.
+-- The editor anchors to the cursor in the current window. Only one
+-- editor is live at a time; opening a second one closes the first.
 --
 -- Float primitives (`create_scratch_buf`, `open_or_reconfigure`,
 -- `apply_title_footer`, `set_float_win_options`) are shared with
@@ -174,7 +173,7 @@ end
 ---
 --- `opts.cfg` must be the `manicule.config.get().ui` table. When
 --- `opts.default` is non-empty the cursor is placed at end-of-text; this
---- mirrors codediff's edit flow. On submit the concatenated buffer text
+--- matches the normal edit flow. On submit the concatenated buffer text
 --- is trimmed and passed to `cb`; empty after trim is treated as cancel.
 ---
 ---@param opts { title?: string, default?: string, anchor_winid?: integer, anchor_pos?: { [1]: integer, [2]: integer }, cfg: manicule.UIConfig }

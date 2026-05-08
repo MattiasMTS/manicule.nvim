@@ -1,9 +1,8 @@
 -- manicule.nvim: quickfix formatter for comment records.
 --
--- Ported from codediff.nvim's `ui/comments/quickfix.lua`. Adapted to
--- manicule's record shape (no `side`, `id` is a string, range carries
--- row/col pairs). Grouping follows codediff: sort by path, then by
--- start line, then by id so order is stable across reloads.
+-- Groups comments by path and sorts by line and id so order is stable
+-- across reloads and consistent across quickfix, pickers, and command
+-- completion.
 --
 -- Live refresh
 -- ------------
