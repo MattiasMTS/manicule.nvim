@@ -163,7 +163,7 @@ STORAGE                                       *manicule-manicule.nvim-storage*
 Project comments are stored in one SQLite database per project root. The
 database uses WAL mode and keeps both a current `records` projection and an
 append-only `events` log, so separate Neovim sessions in the same project can
-observe each other's changes without rewriting one whole store file.
+observe each other’s changes without rewriting one whole store file.
 
 Session comments share a `session.<format>` file for unrooted or special
 buffers. Stores live under `store.dir`; by default that is:
@@ -172,8 +172,8 @@ buffers. Stores live under `store.dir`; by default that is:
     :echo stdpath("state") . "/manicule/"
 <
 
-Legacy project files are imported into SQLite on first load. Set
-`store.backend = "file"` to keep the old whole-file project store.
+Legacy project files are imported into SQLite on first load. Set `store.backend
+= "file"` to keep the old whole-file project store.
 
 The session and legacy file schema is:
 
