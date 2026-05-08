@@ -23,15 +23,20 @@ the plugin usable end-to-end.
   cmdwin buffers still reject with a notify. Project and session
   records merge transparently in `store.all_for_uri` / `M.list`; the
   caller never branches on scope.
+- **Phase 4 (complete).** Project-scoped records moved to a local
+  SQLite event store in WAL mode. The projection still looks like a
+  list of records to callers, but writes append field-level events and
+  merge clean changes from other Neovim sessions.
 
 ## 1. Overview
 
 manicule.nvim pins free-form comments to arbitrary buffer ranges via
-Neovim extmarks, persists them to a per-project file under Neovim's
-state directory, and dispatches them to pluggable **sinks** (clipboard,
-PR drafts, chat webhooks, …). The core is intentionally lightweight:
-zero background work, every state transition is user-action or autocmd
-driven.
+Neovim extmarks, persists project comments to a local SQLite WAL store
+under Neovim's state directory, and dispatches them to pluggable
+**sinks** (clipboard, agent surfaces, chat webhooks, …). The core is
+intentionally local-first: no network service, no remote broker, and a
+small polling loop for same-project changes committed by other Neovim
+sessions.
 
 The extmark anchors the comment and tints the line number via
 `ManiculeLineNr` (default-linked to `DiagnosticSignInfo`). All other UI
@@ -58,7 +63,8 @@ knob and defaults to viewport-driven.
           ▼                       ▼                       ▼
    ┌────────────┐          ┌────────────┐          ┌─────────────┐
    │ anchor.lua │          │  store.lua │          │   ui.lua    │
-   │ (extmarks) │          │ (mpack I/O)│          │ (facade)    │
+   │ (extmarks) │          │ (SQLite +  │          │ (facade)    │
+   │            │          │  session)  │          │             │
    └────────────┘          └────────────┘          └──────┬──────┘
                                  ▲                        │
                                  │                        ▼
@@ -254,12 +260,13 @@ entry naturally.
 ## 6. Persistence
 
 The store lives under `stdpath("state") .. "/manicule/"` (overridable
-via `store.dir`), one file per project root. The root is resolved with
+via `store.dir`). The root is resolved with
 `vim.fs.root(bufnr, store.root_markers)` — defaults to `{".git", ".hg",
-"package.json"}`. The filename is the root path with `[\\/:]+` collapsed
-to `%%` (same trick persistence.nvim uses), so `/Users/me/src/foo` →
-`%Users%me%src%foo.mpack`. Keying by the git root rather than
-`getcwd()` means comments survive `cd`'ing into subdirs.
+"package.json"}`. Store filenames use the root path with `[\\/:]+`
+collapsed to `%%` (same trick persistence.nvim uses), so
+`/Users/me/src/foo` becomes a flat filename under the state directory.
+Keying by the git root rather than `getcwd()` means comments survive
+`cd`'ing into subdirs.
 
 ### Record schema
 
@@ -290,30 +297,54 @@ store can key off the same field directly.
 
 ```
 ~/.local/state/nvim/manicule/
-  ├─ <escaped-root>[%%<branch>].<format>   ← project-scope stores
-  │   (one per project root)
+  ├─ <escaped-root>[%%<branch>].sqlite3    ← project-scope store
+  │   (records projection + events log, WAL mode)
   └─ session.<format>                      ← session-scope store
       (single file, shared across all unrooted / special buffers)
 ```
 
-### On-disk layout
+### Project SQLite layout
 
-The on-disk payload is a versioned envelope:
+Project stores use two main tables:
+
+```sql
+records(root, id, data, deleted_at, updated_at)
+events(id, root, record_id, kind, payload, client_id, created_at)
+```
+
+`records.data` is the current JSON-encoded record projection. `events`
+is append-only and records `comment_created`, `comment_body_updated`,
+`comment_range_updated`, `comment_resolved`, `comment_reopened`,
+`comment_uri_updated`, `comment_meta_updated`, `comment_author_updated`,
+`comment_deleted`, and `comment_imported`.
+
+Each store client keeps a base snapshot from its last load. On save, it
+diffs the local record against that base and writes only fields that
+changed locally. If another Neovim session changed a different field in
+the meantime, the save reads the current SQLite projection inside the
+same `BEGIN IMMEDIATE` transaction and applies only the local field
+patches. This avoids whole-record last-writer-wins for ordinary body vs
+range vs resolved edits. Deletes are tombstones and take precedence over
+stale local updates.
+
+Clean caches poll `events.MAX(id)` and reload the projection when a
+newer event appears. Dirty caches are left alone until their field-level
+save completes.
+
+### Session and legacy file layout
+
+Session stores and legacy project imports use a versioned envelope:
 
 ```lua
 { version = 1, records = { ... } }
 ```
 
 It is encoded with `vim.mpack.encode` by default; `store.format =
-"json"` switches to `vim.json.encode` for users who want a
-human-readable file. mpack is the default because nothing human reads
-these files anymore (they live under `stdpath('state')`, not the repo),
-and mpack is smaller, faster, and handles Lua `nil`/array cases without
-JSON's coercion quirks. Legacy bare record arrays still load and are
-rewritten as the current envelope on the next save. If the decoded
-payload is neither a list nor a supported envelope the loader logs a
-`WARN` notification and starts from an empty record list rather than
-crashing.
+"json"` switches to `vim.json.encode`. Legacy bare record arrays still
+load and are rewritten as the current envelope on the next save. If the
+decoded payload is neither a list nor a supported envelope the loader
+logs a `WARN` notification and starts from an empty record list rather
+than crashing.
 
 Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
 `<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash
@@ -476,7 +507,7 @@ only when the sink declares that policy.
 
 - Multi-user / real-time sync.
 - Threading, replies, or reactions.
-- SQLite or any structured-storage backend.
+- Remote brokers, hosted storage, or network sync.
 - A pluggable display-handler system. Rendering lives in
   `ui/render.lua` and is opinionated around floating popups.
 - (Done — see UI layer above.) The floating-window comment editor has

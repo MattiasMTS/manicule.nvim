@@ -38,6 +38,10 @@ local function wait_for_popup_count(text, expected)
   end, 10)
 end
 
+local function new_store_client()
+  return dofile(vim.fn.getcwd() .. "/lua/manicule/store.lua")
+end
+
 describe("manicule headless workflow", function()
   before_each(setup_env)
   after_each(teardown_env)
@@ -216,6 +220,97 @@ describe("manicule headless workflow", function()
       local qf = vim.fn.getqflist()
       return #qf == 1 and qf[1].text:find("edit from qf after", 1, true) ~= nil
     end, 10))
+  end)
+
+  it("keeps existing popups visible while the add editor is open", function()
+    require("manicule").add({
+      body = "visible while adding",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("visible while adding", 1))
+
+    require("manicule").add({
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+    assert.is_true(vim.wait(1000, function()
+      return require("manicule.ui.editor").is_active()
+    end, 10))
+
+    vim.wait(50, function()
+      return false
+    end, 10)
+    assert.is_true(wait_for_popup_count("visible while adding", 1))
+
+    require("manicule.ui.editor").close_active()
+    assert.is_true(vim.wait(1000, function()
+      return not require("manicule.ui.editor").is_active()
+    end, 10))
+  end)
+
+  it("keeps other visible popups rendered after deleting one comment", function()
+    require("manicule").add({
+      body = "delete only this popup",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    require("manicule").add({
+      body = "keep this popup visible",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("delete only this popup", 1))
+    assert.is_true(wait_for_popup_count("keep this popup visible", 1))
+
+    local records = require("manicule").list({ _quiet = true })
+    local delete_id
+    for _, record in ipairs(records) do
+      if record.body == "delete only this popup" then
+        delete_id = record.id
+      end
+    end
+    assert.is_truthy(delete_id)
+
+    require("manicule").delete(delete_id)
+
+    assert.is_true(wait_for_popup_count("delete only this popup", 0))
+    assert.is_true(wait_for_popup_count("keep this popup visible", 1))
+  end)
+
+  it("polls the SQLite WAL store and renders comments from another client", function()
+    require("manicule").setup({
+      store = {
+        dir = ctx.state .. "/",
+        backend = "sqlite",
+        format = "json",
+        canonicalize_symlinks = false,
+        poll_interval_ms = 20,
+      },
+      sinks = {
+        clipboard = false,
+        cmux = false,
+      },
+    })
+    local store_a = require("manicule.store")
+    local store_b = new_store_client()
+    local uri = require("manicule.uri").for_bufnr(0)
+
+    assert.are.equal(0, #store_a.load(ctx.root))
+    store_b.put(ctx.root, {
+      id = "external-1",
+      uri = uri,
+      scope = "project",
+      project_root = ctx.root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "from another nvim",
+      author = "",
+      created_at = 1,
+      updated_at = 1,
+      resolved = false,
+      meta = {},
+    })
+    assert.is_true(store_b.save(ctx.root))
+
+    assert.is_true(wait_for_popup_count("from another nvim", 1))
+    assert.are.equal(1, #store_a.all(ctx.root))
   end)
 
   it("persists extmark movement on write", function()

@@ -16,6 +16,7 @@ local function setup_env(opts)
       dir = tmp_state .. "/",
       format = "json",
       canonicalize_symlinks = false,
+      poll_interval_ms = 0,
     },
     sinks = {
       clipboard = false,

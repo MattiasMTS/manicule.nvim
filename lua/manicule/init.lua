@@ -17,6 +17,7 @@
 --   ManiculeDeleted   { id, record }
 --   ManiculeResolved  record (with resolved=true)
 --   ManiculeSent      { sink, count, ok, err }
+--   ManiculeSynced    { roots }
 --   ManiculeOrphaned  { id, record }
 --   ManiculeRenamed   { bufnr, old_uri, new_uri, record_count }
 --
@@ -25,6 +26,9 @@
 -- delegates to `render.reconcile(bufnr, records)`, which is idempotent.
 
 local M = {}
+
+local uv = vim.uv or vim.loop
+local sync_timer
 
 ---@class manicule.Config
 ---@field store? table
@@ -150,6 +154,8 @@ local function records_for_buffer(bufnr)
   return store.all_for_uri(identity.uri, identity.project_root)
 end
 
+local refresh_viewport
+
 ---Run reconcile for every buffer that already has an entry in `buffer_to_path`
 ---or is loaded and visible. Returns the records passed in.
 ---@param bufnr integer
@@ -203,10 +209,77 @@ local function reconcile_all_loaded()
   end
 end
 
+local function refresh_all_loaded_viewports()
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      refresh_viewport(bufnr)
+    end
+  end
+end
+
+local function hide_popups_on_leave(bufnr)
+  local ok_editor, editor = pcall(require, "manicule.ui.editor")
+  if ok_editor and editor.is_opening() then
+    return
+  end
+  require("manicule.ui.render").hide_all_popups(bufnr)
+end
+
+local function refresh_external_store_changes(roots)
+  if type(roots) ~= "table" or #roots == 0 then
+    return
+  end
+  reconcile_all_loaded()
+  refresh_all_loaded_viewports()
+  local quickfix = require("manicule.ui.quickfix")
+  if quickfix.is_manicule_qf_open() then
+    quickfix.refresh()
+  end
+  emit("ManiculeSynced", { roots = roots })
+end
+
+local function start_sync_timer(group)
+  local cfg = require("manicule.config").get()
+  local interval = tonumber((cfg.store or {}).poll_interval_ms) or 0
+  if sync_timer then
+    sync_timer:stop()
+    sync_timer:close()
+    sync_timer = nil
+  end
+  if interval <= 0 or ((cfg.store or {}).backend == "file") then
+    return
+  end
+
+  local store = require("manicule.store")
+  sync_timer = uv.new_timer()
+  if not sync_timer then
+    return
+  end
+  sync_timer:start(
+    interval,
+    interval,
+    vim.schedule_wrap(function()
+      local roots = store.sync_all()
+      refresh_external_store_changes(roots)
+    end)
+  )
+
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = group,
+    callback = function()
+      if sync_timer then
+        sync_timer:stop()
+        sync_timer:close()
+        sync_timer = nil
+      end
+    end,
+  })
+end
+
 ---Run the non-sticky viewport refresh for `bufnr`. Cheap enough to fire
 ---from scroll / resize / cursor-moved autocmds.
 ---@param bufnr integer
-local function refresh_viewport(bufnr)
+function refresh_viewport(bufnr)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
@@ -449,6 +522,7 @@ function M.setup(opts)
   -- Idempotent augroup: clear = true means a second setup() wins cleanly.
   local group = vim.api.nvim_create_augroup("manicule", { clear = true })
   local store = require("manicule.store")
+  start_sync_timer(group)
 
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufWinEnter" }, {
     group = group,
@@ -462,7 +536,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
     group = group,
     callback = function(ev)
-      require("manicule.ui.render").hide_all_popups(ev.buf)
+      hide_popups_on_leave(ev.buf)
     end,
   })
 
@@ -582,6 +656,7 @@ function M.setup(opts)
       "ManiculeResolved",
       "ManiculeOrphaned",
       "ManiculeRenamed",
+      "ManiculeSynced",
     },
     callback = function()
       -- Defer so a burst of events coalesces and we don't mutate the
@@ -839,6 +914,7 @@ function M.delete(id, opts)
     return
   end
   reconcile_all_loaded()
+  refresh_all_loaded_viewports()
   emit("ManiculeDeleted", { id = id, record = record })
 end
 
@@ -1044,6 +1120,14 @@ function M._buffer_marks()
     end
   end
   return out
+end
+
+function M._stop_sync_timer_for_tests()
+  if sync_timer then
+    sync_timer:stop()
+    sync_timer:close()
+    sync_timer = nil
+  end
 end
 
 return M

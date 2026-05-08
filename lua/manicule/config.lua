@@ -16,11 +16,13 @@ local M = {}
 
 ---@class manicule.StoreConfig
 ---@field dir string Directory where per-root store files live.
+---@field backend "sqlite"|"file" Project-scope persistence backend.
 ---@field format "mpack"|"json" On-disk format.
 ---@field branch boolean Scope the filename by the current git branch (main/master skipped).
 ---@field persist_unrooted boolean When true (default), unrooted file buffers route into the session store.
 ---@field canonicalize_symlinks boolean Resolve symlinks via `fs_realpath` before encoding URIs.
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
+---@field poll_interval_ms integer Milliseconds between local SQLite sync polls. Set <= 0 to disable.
 
 ---@class manicule.SinksConfig
 ---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
@@ -31,8 +33,12 @@ M.defaults = {
   store = {
     -- Per-user state dir — out of the project tree, dedicated subdir.
     dir = vim.fn.stdpath("state") .. "/manicule/",
+    -- Project comments use a local SQLite event store by default.
+    -- `file` keeps the legacy mpack/json whole-file backend for
+    -- compatibility and tests.
+    backend = "sqlite",
     -- "mpack" | "json". mpack is smaller/faster and tolerates Lua
-    -- nil/array quirks; nothing human-inspects these files anyway.
+    -- nil/array quirks. Used by the session store and legacy imports.
     format = "mpack",
     -- Annotations should stay visible across branches by default; manicule
     -- stores notes the user wants anchored, not editing state.
@@ -49,6 +55,9 @@ M.defaults = {
     canonicalize_symlinks = true,
     -- Markers passed to `vim.fs.root` when resolving the project key.
     root_markers = { ".git", ".hg", "package.json" },
+    -- SQLite-backed project stores are polled for external events from
+    -- other Neovim sessions. Polling is intentionally boring and local.
+    poll_interval_ms = 750,
   },
   sinks = {
     -- `clipboard = false` disables the generic clipboard sink.
@@ -91,12 +100,17 @@ function M.setup(opts)
   if opts.store then
     vim.validate({
       ["store.dir"] = { opts.store.dir, "string", true },
+      ["store.backend"] = { opts.store.backend, "string", true },
       ["store.format"] = { opts.store.format, "string", true },
       ["store.branch"] = { opts.store.branch, "boolean", true },
       ["store.persist_unrooted"] = { opts.store.persist_unrooted, "boolean", true },
       ["store.canonicalize_symlinks"] = { opts.store.canonicalize_symlinks, "boolean", true },
       ["store.root_markers"] = { opts.store.root_markers, "table", true },
+      ["store.poll_interval_ms"] = { opts.store.poll_interval_ms, "number", true },
     })
+    if opts.store.backend ~= nil and opts.store.backend ~= "sqlite" and opts.store.backend ~= "file" then
+      error(('manicule: store.backend must be "sqlite" or "file", got %q'):format(tostring(opts.store.backend)))
+    end
     if opts.store.format ~= nil and opts.store.format ~= "mpack" and opts.store.format ~= "json" then
       error(('manicule: store.format must be "mpack" or "json", got %q'):format(tostring(opts.store.format)))
     end

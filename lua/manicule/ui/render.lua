@@ -446,19 +446,34 @@ local function render_comment_popup(record, handle, records)
   end
 
   local my_line = record_start_line(record)
-  local tab = handles[handle.bufnr] or {}
   local my_id = tostring(record.id or "")
 
-  -- Same-line records with a lower id stack above us.
-  local stack_offset = 0
-  for _, other in ipairs(records) do
-    local other_id = tostring(other.id or "")
-    if other_id ~= my_id and other.uri == record.uri and record_start_line(other) == my_line and other_id < my_id then
-      if tab[other_id] then
-        stack_offset = stack_offset + 1
-      end
+  local stack = {}
+  for _, other in ipairs(records or {}) do
+    if other.uri == record.uri and record_start_line(other) == my_line then
+      table.insert(stack, other)
     end
   end
+  table.sort(stack, function(a, b)
+    local ac = tonumber(a.created_at) or 0
+    local bc = tonumber(b.created_at) or 0
+    if ac ~= bc then
+      return ac < bc
+    end
+    return tostring(a.id or "") < tostring(b.id or "")
+  end)
+
+  local stack_offset = 0
+  local stack_index = 1
+  for index, other in ipairs(stack) do
+    local other_id = tostring(other.id or "")
+    if other_id == my_id then
+      stack_index = index
+      break
+    end
+    stack_offset = stack_offset + math.max(1, #split_lines(other.body)) + 2
+  end
+  local stack_count = #stack
 
   local popup_bufnr = handle.popup_bufnr
   if not popup_bufnr or not vim.api.nvim_buf_is_valid(popup_bufnr) then
@@ -471,7 +486,7 @@ local function render_comment_popup(record, handle, records)
     win = anchor_win,
     bufpos = { my_line - 1, 0 },
     row = stack_offset,
-    col = math.max(2, win_width - content_width - 6),
+    col = math.max(2, win_width - content_width - 6 - math.min((stack_index - 1) * 2, 12)),
     width = content_width,
     height = math.max(1, #display_lines),
     style = "minimal",
@@ -486,7 +501,8 @@ local function render_comment_popup(record, handle, records)
   float.apply_title_footer(
     win_config,
     border,
-    string.format(" c%s ", short_id(record.id)),
+    stack_count > 1 and string.format(" c%s %d/%d ", short_id(record.id), stack_index, stack_count)
+      or string.format(" c%s ", short_id(record.id)),
     "left",
     footer or nil,
     "left"

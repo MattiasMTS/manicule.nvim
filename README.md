@@ -30,8 +30,12 @@ event payloads.
 
 Neovim >= 0.10.
 
-Run `:checkhealth manicule` after setup to verify the store directory, Neovim
-API support, clipboard support, and registered sinks.
+The default project store uses the local SQLite library through LuaJIT FFI.
+Most Neovim builds on macOS and Linux can load `libsqlite3` already; run
+`:checkhealth manicule` to confirm.
+
+Run `:checkhealth manicule` after setup to verify the store directory, SQLite
+support, Neovim API support, clipboard support, and registered sinks.
 
 ## Install
 
@@ -101,11 +105,13 @@ All keys are optional.
 require("manicule").setup({
   store = {
     dir = vim.fn.stdpath("state") .. "/manicule/",
-    format = "mpack", -- "mpack" or "json"
+    backend = "sqlite", -- "sqlite" or "file"
+    format = "mpack", -- session store + legacy import: "mpack" or "json"
     branch = false,
     persist_unrooted = true,
     canonicalize_symlinks = true,
     root_markers = { ".git", ".hg", "package.json" },
+    poll_interval_ms = 750,
   },
   sinks = {
     clipboard = true,
@@ -129,15 +135,22 @@ Legacy 0-100 winblend values above `1` are still accepted.
 
 ## Storage
 
-Project comments are stored in one file per project root. Session comments
-share a `session.<format>` file for unrooted or special buffers. Files live
-under `store.dir`; by default that is:
+Project comments are stored in one SQLite database per project root. The
+database uses WAL mode and keeps both a current `records` projection and an
+append-only `events` log, so separate Neovim sessions in the same project can
+observe each other's changes without rewriting one whole store file.
+
+Session comments share a `session.<format>` file for unrooted or special
+buffers. Stores live under `store.dir`; by default that is:
 
 ```vim
 :echo stdpath("state") . "/manicule/"
 ```
 
-The current on-disk schema is:
+Legacy project files are imported into SQLite on first load. Set
+`store.backend = "file"` to keep the old whole-file project store.
+
+The session and legacy file schema is:
 
 ```lua
 { version = 1, records = { ... } }
@@ -193,8 +206,8 @@ vim.api.nvim_create_autocmd("User", {
 ```
 
 Events: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
-`ManiculeResolved`, `ManiculeSent`, `ManiculeOrphaned`, `ManiculeRenamed`, and
-`ManiculeVisibility`.
+`ManiculeResolved`, `ManiculeSent`, `ManiculeSynced`, `ManiculeOrphaned`,
+`ManiculeRenamed`, and `ManiculeVisibility`.
 
 ## Notes
 

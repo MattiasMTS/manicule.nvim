@@ -104,4 +104,27 @@ describe("manicule render lifecycle", function()
 
     stop_capture()
   end)
+
+  it("stacks same-line popups by popup height", function()
+    require("manicule").add({
+      body = "stack top\nwith another line",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    require("manicule").add({
+      body = "stack second",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("stack top", 1))
+    assert.is_true(wait_for_popup_count("stack second", 1))
+
+    local first = floating_windows_containing("stack top")[1]
+    local second = floating_windows_containing("stack second")[1]
+    assert.is_truthy(first)
+    assert.is_truthy(second)
+
+    local first_row = tonumber(vim.api.nvim_win_get_config(first).row) or 0
+    local second_row = tonumber(vim.api.nvim_win_get_config(second).row) or 0
+    assert.is_true(math.abs(first_row - second_row) >= 3)
+  end)
 end)

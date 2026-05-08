@@ -25,6 +25,7 @@ local function setup_env()
       -- racing `fs_realpath` through the `/private/...` symlink macOS
       -- inserts in `$TMPDIR`.
       canonicalize_symlinks = false,
+      poll_interval_ms = 0,
     },
   })
   vim.cmd.edit(tmp_root .. "/a.lua")

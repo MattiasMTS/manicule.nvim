@@ -15,10 +15,16 @@ local function setup_env()
   require("manicule").setup({
     store = {
       dir = tmp_state .. "/",
+      backend = "sqlite",
       format = "json",
       canonicalize_symlinks = false,
+      poll_interval_ms = 0,
     },
   })
+end
+
+local function new_store_client()
+  return dofile(vim.fn.getcwd() .. "/lua/manicule/store.lua")
 end
 
 local function teardown_env()
@@ -209,6 +215,91 @@ describe("manicule.store session scope", function()
     store.flush_all()
     assert.is_truthy(uv.fs_stat(store.path(tmp_root)))
     assert.is_truthy(uv.fs_stat(store.session_path()))
+  end)
+
+  it("uses WAL for the SQLite project store", function()
+    local store = require("manicule.store")
+    store.load(tmp_root)
+
+    local info = store.backend_info(tmp_root)
+    assert.are.equal("sqlite", info.backend)
+    assert.is_true(info.available)
+    assert.are.equal("wal", info.journal_mode)
+    assert.is_truthy((vim.uv or vim.loop).fs_stat(store.path(tmp_root)))
+  end)
+
+  it("syncs project records written by another store client", function()
+    local store_a = require("manicule.store")
+    local store_b = new_store_client()
+    local record = {
+      id = "from-b",
+      uri = "file://" .. tmp_root .. "/peer.lua",
+      scope = "project",
+      project_root = tmp_root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "peer note",
+      author = "",
+      created_at = 1,
+      updated_at = 1,
+      resolved = false,
+      meta = {},
+    }
+
+    assert.are.equal(0, #store_a.load(tmp_root))
+    store_b.put(tmp_root, record)
+    assert.is_true(store_b.save(tmp_root))
+
+    local synced = store_a.all(tmp_root)
+    assert.are.equal(1, #synced)
+    assert.are.equal("from-b", synced[1].id)
+    assert.are.equal("peer note", synced[1].body)
+  end)
+
+  it("merges stale clients at field granularity instead of record last-writer-wins", function()
+    local store_a = require("manicule.store")
+    local initial = {
+      id = "merge-me",
+      uri = "file://" .. tmp_root .. "/merge.lua",
+      scope = "project",
+      project_root = tmp_root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "original",
+      author = "",
+      created_at = 1,
+      updated_at = 1,
+      resolved = false,
+      meta = {},
+    }
+
+    store_a.put(tmp_root, initial)
+    assert.is_true(store_a.save(tmp_root))
+
+    local store_stale_body_editor = new_store_client()
+    local store_range_editor = new_store_client()
+    local stale = store_stale_body_editor.load(tmp_root)[1]
+    local ranged = store_range_editor.load(tmp_root)[1]
+
+    ranged.range = { start = { 4, 0 }, end_ = { 5, 0 } }
+    ranged.updated_at = 2
+    store_range_editor.mark_dirty(tmp_root)
+    assert.is_true(store_range_editor.save(tmp_root))
+
+    stale.body = "body from stale client"
+    stale.updated_at = 3
+    store_stale_body_editor.mark_dirty(tmp_root)
+    assert.is_true(store_stale_body_editor.save(tmp_root))
+
+    local fresh = new_store_client()
+    local merged = fresh.load(tmp_root)[1]
+    assert.are.equal("body from stale client", merged.body)
+    assert.are.same({ start = { 4, 0 }, end_ = { 5, 0 } }, merged.range)
+
+    local events = fresh.events(tmp_root)
+    local kinds = {}
+    for _, event in ipairs(events) do
+      table.insert(kinds, event.kind)
+    end
+    assert.are.same({ "comment_created", "comment_range_updated", "comment_body_updated" }, kinds)
   end)
 
   it("all_for_uri merges project + session records keyed on same URI", function()

@@ -24,6 +24,7 @@ local float = require("manicule.ui.float")
 
 ---@type manicule.ui.editor.Active?
 local active_editor = nil
+local opening_editor = false
 
 ---@param text string?
 ---@return string[]
@@ -169,6 +170,10 @@ function M.is_active()
   return active_editor ~= nil
 end
 
+function M.is_opening()
+  return opening_editor
+end
+
 --- Open a floating comment editor popup.
 ---
 --- `opts.cfg` must be the `manicule.config.get().ui` table. When
@@ -231,7 +236,13 @@ function M.open(opts, cb)
   -- popups pick up the same border/meta colours.
   local winhighlight = require("manicule.ui.render").winhighlight()
 
-  local winid = vim.api.nvim_open_win(bufnr, true, win_config)
+  opening_editor = true
+  local open_ok, winid_or_err = pcall(vim.api.nvim_open_win, bufnr, true, win_config)
+  opening_editor = false
+  if not open_ok then
+    error(winid_or_err)
+  end
+  local winid = winid_or_err
   apply_editor_win_options(winid, winhighlight)
   float.set_float_transparency(winid, cfg.opacity)
 

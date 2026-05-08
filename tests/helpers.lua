@@ -39,6 +39,7 @@ function H.setup(opts)
       dir = ctx.state .. "/",
       format = "json",
       canonicalize_symlinks = false,
+      poll_interval_ms = 0,
     },
     sinks = {
       clipboard = false,
@@ -52,6 +53,9 @@ end
 function H.teardown(ctx)
   pcall(vim.cmd, "silent! only")
   pcall(vim.cmd, "silent! %bwipeout!")
+  pcall(function()
+    require("manicule")._stop_sync_timer_for_tests()
+  end)
   require("manicule.store")._reset()
   require("manicule.sinks")._reset()
   pcall(function()
