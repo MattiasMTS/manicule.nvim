@@ -113,7 +113,7 @@ model.
   the popup renderer: `create_scratch_buf`, `open_or_reconfigure`,
   `apply_title_footer`, `set_float_win_options`.
 - `ui/editor.lua` — scratch-buffer floating window with a title,
-  footer hint, configurable submit/cancel keys, and winblend. Entry
+  footer hint, configurable submit/cancel keys, and opacity. Entry
   point is `editor.open({ title, default, anchor_pos, cfg }, cb)`.
   Only one editor is live at a time.
 - `ui/render.lua` — per-comment floating popups anchored to each

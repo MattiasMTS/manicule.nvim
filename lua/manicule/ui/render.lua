@@ -46,27 +46,50 @@ local hidden = false
 
 local DEFAULT_BORDER_FG = 0xA6ADC8
 
+---@param name string
+---@return table
+local function get_highlight(name)
+  local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  if ok and type(hl) == "table" then
+    return hl
+  end
+  return {}
+end
+
 local function setup_comment_highlights()
   local border_fg = DEFAULT_BORDER_FG
-  local border_bg = "NONE"
-  local ok_hl, normal_hl = pcall(vim.api.nvim_get_hl, 0, { name = "Normal", link = false })
-  if ok_hl and normal_hl then
-    if type(normal_hl.fg) == "number" then
-      border_fg = normal_hl.fg
-    end
-    if type(normal_hl.bg) == "number" then
-      border_bg = normal_hl.bg
-    end
+  local normal_hl = get_highlight("Normal")
+  local normal_float_hl = get_highlight("NormalFloat")
+  local float_border_hl = get_highlight("FloatBorder")
+
+  if type(float_border_hl.fg) == "number" then
+    border_fg = float_border_hl.fg
+  elseif type(normal_float_hl.fg) == "number" then
+    border_fg = normal_float_hl.fg
+  elseif type(normal_hl.fg) == "number" then
+    border_fg = normal_hl.fg
+  end
+
+  local float_bg = normal_float_hl.bg
+  if type(float_bg) ~= "number" and type(normal_hl.bg) == "number" then
+    float_bg = normal_hl.bg
   end
 
   local meta_fg = border_fg
-  local ok_comment_hl, comment_hl = pcall(vim.api.nvim_get_hl, 0, { name = "Comment", link = false })
-  if ok_comment_hl and comment_hl and type(comment_hl.fg) == "number" then
+  local comment_hl = get_highlight("Comment")
+  if type(comment_hl.fg) == "number" then
     meta_fg = comment_hl.fg
   end
 
-  vim.api.nvim_set_hl(0, "ManiculeCommentBorder", { fg = border_fg, bg = border_bg })
-  vim.api.nvim_set_hl(0, "ManiculeCommentMeta", { fg = meta_fg, bg = border_bg })
+  local border_hl = { fg = border_fg }
+  local meta_hl = { fg = meta_fg }
+  if type(float_bg) == "number" then
+    border_hl.bg = float_bg
+    meta_hl.bg = float_bg
+  end
+
+  vim.api.nvim_set_hl(0, "ManiculeCommentBorder", border_hl)
+  vim.api.nvim_set_hl(0, "ManiculeCommentMeta", meta_hl)
   vim.api.nvim_set_hl(0, "ManiculeLineNr", { link = "DiagnosticSignInfo", default = true })
 end
 
@@ -479,10 +502,7 @@ local function render_comment_popup(record, handle, records)
   float.set_float_win_options(popup_winid, comment_winhighlight())
 
   local opacity = ((config.get() or {}).ui or {}).opacity or 0
-  if type(opacity) ~= "number" then
-    opacity = 0
-  end
-  vim.wo[popup_winid].winblend = math.max(0, math.min(100, opacity))
+  float.set_float_transparency(popup_winid, opacity)
 
   return true
 end

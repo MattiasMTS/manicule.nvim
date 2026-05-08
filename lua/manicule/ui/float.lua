@@ -53,6 +53,49 @@ function M.set_float_win_options(winid, winhighlight)
   vim.wo[winid].winhighlight = winhighlight
 end
 
+---@param value number
+---@param min integer
+---@param max integer
+---@return integer
+local function clamp(value, min, max)
+  return math.max(min, math.min(max, value))
+end
+
+---Convert manicule's fractional float transparency to Neovim winblend.
+---
+---Preferred config is a float from 0.0 to 1.0, where 0.0 is opaque and
+---1.0 is fully transparent. Values above 1 are treated as legacy
+---winblend-style percentages for existing configs.
+---@param opacity any
+---@return integer winblend
+function M.opacity_to_winblend(opacity)
+  local value = tonumber(opacity)
+  if not value or value ~= value then
+    return 0
+  end
+  if value == math.huge then
+    return 100
+  end
+  if value == -math.huge then
+    return 0
+  end
+
+  if value <= 1 then
+    return clamp(math.floor((value * 100) + 0.5), 0, 100)
+  end
+  return clamp(math.floor(value + 0.5), 0, 100)
+end
+
+---Apply float transparency in the plugin config format.
+---@param winid integer
+---@param opacity any
+function M.set_float_transparency(winid, opacity)
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  vim.wo[winid].winblend = M.opacity_to_winblend(opacity)
+end
+
 ---Attach title/footer to a win_config table, respecting Neovim's version
 ---constraints. Does nothing for the "none" border or on Neovim < 0.9.
 ---@param win_config table

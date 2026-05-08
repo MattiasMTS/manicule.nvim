@@ -141,11 +141,15 @@ All keys are optional.
         editor_mode = "insert",
         submit_keys = { "<CR>" },
         cancel_keys = { "q" },
-        opacity = 0,
+        opacity = 0.0, -- float transparency: 0.0 opaque, 1.0 fully transparent
         sticky = false,
       },
     })
 <
+
+`ui.opacity` is fractional float transparency: `0` is opaque, `0.5` is
+half transparent, `0.99` is 99% transparent, and `1` is fully transparent.
+Legacy 0-100 winblend values above `1` are still accepted.
 
 
 STORAGE                                       *manicule-manicule.nvim-storage*

@@ -9,7 +9,7 @@
 -- `ui/render.lua` via `ui/float.lua`. The editor also reuses the render
 -- layer's `winhighlight` so popups and the editor look identical.
 --
--- Submit/cancel keys, initial mode, size, and winblend all come from
+-- Submit/cancel keys, initial mode, size, and opacity all come from
 -- `manicule.config.get().ui` (see `config.lua`).
 
 local M = {}
@@ -233,7 +233,7 @@ function M.open(opts, cb)
 
   local winid = vim.api.nvim_open_win(bufnr, true, win_config)
   apply_editor_win_options(winid, winhighlight)
-  vim.wo[winid].winblend = cfg.opacity or 0
+  float.set_float_transparency(winid, cfg.opacity)
 
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, split_lines(opts.default))
   local has_default = type(opts.default) == "string" and opts.default ~= ""

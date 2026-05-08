@@ -10,7 +10,7 @@ local M = {}
 ---@field editor_mode "insert"|"normal" Initial editor mode
 ---@field submit_keys string[] Keys that submit the editor
 ---@field cancel_keys string[] Keys that cancel the editor
----@field opacity integer winblend (0 = opaque, 100 = fully transparent)
+---@field opacity number Floating-window transparency (0.0 = opaque, 1.0 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
 ---@field sink_picker? manicule.SinkPicker Custom picker for choosing a send sink
 
@@ -62,7 +62,7 @@ M.defaults = {
     editor_mode = "insert",
     submit_keys = { "<CR>" },
     cancel_keys = { "q" },
-    opacity = 0,
+    opacity = 0.0,
     sticky = false, -- true = always show popups for visible records; false = only when in viewport
   },
 }
