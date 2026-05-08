@@ -63,9 +63,8 @@ end
 
 ---Convert manicule's fractional float transparency to Neovim winblend.
 ---
----Preferred config is a float from 0.0 to 1.0, where 0.0 is opaque and
----1.0 is fully transparent. Values above 1 are treated as legacy
----winblend-style percentages for existing configs.
+---Config is a float from 0.0 to 1.0, where 0.0 is opaque and 1.0 is
+---fully transparent.
 ---@param opacity any
 ---@return integer winblend
 function M.opacity_to_winblend(opacity)
@@ -73,17 +72,8 @@ function M.opacity_to_winblend(opacity)
   if not value or value ~= value then
     return 0
   end
-  if value == math.huge then
-    return 100
-  end
-  if value == -math.huge then
-    return 0
-  end
-
-  if value <= 1 then
-    return clamp(math.floor((value * 100) + 0.5), 0, 100)
-  end
-  return clamp(math.floor(value + 0.5), 0, 100)
+  value = clamp(value, 0, 1)
+  return math.floor((value * 100) + 0.5)
 end
 
 ---Apply float transparency in the plugin config format.

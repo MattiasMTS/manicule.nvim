@@ -15,7 +15,6 @@ local function setup_env()
   require("manicule").setup({
     store = {
       dir = tmp_state .. "/",
-      backend = "sqlite",
       format = "json",
       canonicalize_symlinks = false,
       poll_interval_ms = 0,
@@ -77,37 +76,26 @@ describe("manicule.store session scope", function()
     assert.are.same({}, store.session_for_uri("file:///nope"))
   end)
 
-  it("writes versioned envelopes and reads legacy bare arrays", function()
+  it("writes versioned session envelopes", function()
     local store = require("manicule.store")
-    local legacy = {
-      {
-        id = "legacy",
-        uri = "term://legacy/1",
-        scope = "session",
-        range = { start = { 0, 0 }, end_ = { 0, 0 } },
-        body = "from old store",
-        author = "",
-        created_at = 0,
-        updated_at = 0,
-        resolved = false,
-        meta = {},
-      },
-    }
-
-    vim.fn.writefile({ vim.json.encode(legacy) }, store.session_path())
-    store._reset()
-
-    local reloaded = store.session_all()
-    assert.are.equal(1, #reloaded)
-    assert.are.equal("legacy", reloaded[1].id)
-
-    store.session_mark_dirty()
+    store.session_put({
+      id = "enveloped",
+      uri = "term://enveloped/1",
+      scope = "session",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "stored in envelope",
+      author = "",
+      created_at = 0,
+      updated_at = 0,
+      resolved = false,
+      meta = {},
+    })
     assert.is_true(store.session_save())
 
     local encoded = table.concat(vim.fn.readfile(store.session_path()), "\n")
     local payload = vim.json.decode(encoded)
     assert.are.equal(store.schema_version(), payload.version)
-    assert.are.equal("legacy", payload.records[1].id)
+    assert.are.equal("enveloped", payload.records[1].id)
   end)
 
   it("session_remove drops the record and survives save/reload", function()
@@ -221,8 +209,7 @@ describe("manicule.store session scope", function()
     local store = require("manicule.store")
     store.load(tmp_root)
 
-    local info = store.backend_info(tmp_root)
-    assert.are.equal("sqlite", info.backend)
+    local info = store.sqlite_info(tmp_root)
     assert.is_true(info.available)
     assert.are.equal("wal", info.journal_mode)
     assert.is_truthy((vim.uv or vim.loop).fs_stat(store.path(tmp_root)))

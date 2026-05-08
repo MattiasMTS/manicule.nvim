@@ -45,7 +45,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 {
   "MattiasMTS/manicule.nvim",
   event = { "BufReadPost", "BufNewFile" },
-  cmd = { "ManiculeAdd", "ManiculeList", "ManiculeSend" },
+  cmd = { "ManiculeAdd", "ManiculeList", "ManiculeNext", "ManiculePrev", "ManiculeSend" },
   keys = {
     { "<leader>ma", "<Plug>(manicule-add)", mode = { "n", "x" }, desc = "Manicule: add comment" },
     { "<leader>ml", "<Plug>(manicule-list)", desc = "Manicule: list comments" },
@@ -66,24 +66,30 @@ records to loaded buffers.
 :ManiculeDelete        " pick a comment to delete, or pass a list position
 :ManiculeResolve       " pick a comment to mark resolved
 :ManiculeToggle        " hide or restore all comment visuals
+:ManiculeNext [count]  " jump to the next comment in the current buffer
+:ManiculePrev [count]  " jump to the previous comment in the current buffer
 :ManiculeSend [sink]   " send comments to a sink
 ```
 
 `:ManiculeAdd` opens a small markdown buffer. Write the comment, press `<CR>` in
 normal mode to submit, or `q` to cancel.
 
-Default at-cursor keymaps:
+Default keymaps:
 
 - `gca` edits the comment at or covering the cursor.
 - `gcd` deletes the comment at or covering the cursor.
+- `]m` jumps to the next comment in the current buffer.
+- `[m` jumps to the previous comment in the current buffer.
 
 Set `vim.g.manicule_no_default_keymaps = 1` before loading the plugin to opt
-out. Add/list are exposed only as `<Plug>` maps so you can choose your own
+out. Core actions are exposed as `<Plug>` maps so you can choose your own
 leader bindings:
 
 ```lua
 vim.keymap.set({ "n", "x" }, "<leader>ca", "<Plug>(manicule-add)")
 vim.keymap.set("n", "<leader>cl", "<Plug>(manicule-list)")
+vim.keymap.set("n", "]c", "<Plug>(manicule-next)")
+vim.keymap.set("n", "[c", "<Plug>(manicule-prev)")
 ```
 
 ## Quickfix
@@ -105,8 +111,7 @@ All keys are optional.
 require("manicule").setup({
   store = {
     dir = vim.fn.stdpath("state") .. "/manicule/",
-    backend = "sqlite", -- "sqlite" or "file"
-    format = "mpack", -- session store + legacy import: "mpack" or "json"
+    format = "mpack", -- session store: "mpack" or "json"
     branch = false,
     persist_unrooted = true,
     canonicalize_symlinks = true,
@@ -131,7 +136,6 @@ require("manicule").setup({
 
 `ui.opacity` is fractional float transparency: `0` is opaque, `0.5` is
 half transparent, `0.99` is 99% transparent, and `1` is fully transparent.
-Legacy 0-100 winblend values above `1` are still accepted.
 
 ## Storage
 
@@ -147,17 +151,12 @@ buffers. Stores live under `store.dir`; by default that is:
 :echo stdpath("state") . "/manicule/"
 ```
 
-Legacy project files are imported into SQLite on first load. Set
-`store.backend = "file"` to keep the old whole-file project store.
-
-The session and legacy file schema is:
+The session file schema is:
 
 ```lua
 { version = 1, records = { ... } }
 ```
 
-Legacy bare record arrays are still readable and are rewritten into the current
-schema on the next save.
 
 ## Sinks
 

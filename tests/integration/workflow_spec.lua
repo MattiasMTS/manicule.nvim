@@ -143,6 +143,46 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
+  it("jumps between current-buffer comments with commands and default maps", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    H.edit_project_file(ctx, "src/navigation.lua", {
+      "local one = 1",
+      "local two = 2",
+      "local three = 3",
+      "return one + two + three",
+    })
+
+    local manicule = require("manicule")
+    manicule.add({
+      body = "first jump target",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    manicule.add({
+      body = "second jump target",
+      range = { start = { 2, 0 }, end_ = { 2, 0 } },
+    })
+    manicule.add({
+      body = "third jump target",
+      range = { start = { 3, 0 }, end_ = { 3, 0 } },
+    })
+
+    assert.are.equal("Manicule: next comment", vim.fn.maparg("]m", "n", false, true).desc)
+    assert.are.equal("Manicule: previous comment", vim.fn.maparg("[m", "n", false, true).desc)
+
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    assert.is_true(manicule.jump("next"))
+    assert.are.same({ 3, 0 }, vim.api.nvim_win_get_cursor(0))
+
+    assert.is_true(manicule.jump("prev"))
+    assert.are.same({ 1, 0 }, vim.api.nvim_win_get_cursor(0))
+
+    vim.cmd("ManiculeNext 2")
+    assert.are.same({ 4, 0 }, vim.api.nvim_win_get_cursor(0))
+
+    vim.cmd("ManiculePrev")
+    assert.are.same({ 3, 0 }, vim.api.nvim_win_get_cursor(0))
+  end)
+
   it("deletes a project record through the real manicule quickfix window", function()
     vim.cmd("runtime plugin/manicule.lua")
     local events, stop_capture = H.capture_events({ "ManiculeDeleted" })
@@ -279,7 +319,6 @@ describe("manicule headless workflow", function()
     require("manicule").setup({
       store = {
         dir = ctx.state .. "/",
-        backend = "sqlite",
         format = "json",
         canonicalize_symlinks = false,
         poll_interval_ms = 20,

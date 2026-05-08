@@ -246,7 +246,7 @@ local function start_sync_timer(group)
     sync_timer:close()
     sync_timer = nil
   end
-  if interval <= 0 or ((cfg.store or {}).backend == "file") then
+  if interval <= 0 then
     return
   end
 
@@ -775,6 +775,160 @@ function M.add(opts)
       finalize_add(body, bufnr, range)
     end
   end)
+end
+
+---@param bufnr integer
+---@param row integer
+---@param col integer
+---@return integer row, integer col
+local function clamp_buffer_position(bufnr, row, col)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  row = math.max(0, math.min(row or 0, math.max(0, line_count - 1)))
+  local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
+  col = math.max(0, math.min(col or 0, #line))
+  return row, col
+end
+
+---@param bufnr integer
+---@param record table
+---@param mark_ids table<string, integer>
+---@return table?
+local function comment_position(bufnr, record, mark_ids)
+  local id = tostring(record.id or "")
+  local mark_id = mark_ids[id]
+  if mark_id then
+    local resolved = require("manicule.anchor").resolve(bufnr, mark_id)
+    if resolved and resolved.invalid then
+      return nil
+    end
+    if resolved and resolved.range and resolved.range.start then
+      local row, col = clamp_buffer_position(bufnr, resolved.range.start[1], resolved.range.start[2] or 0)
+      return { id = id, row = row, col = col, record = record }
+    end
+  end
+
+  if record.range and record.range.start then
+    local row, col = clamp_buffer_position(bufnr, record.range.start[1] or 0, record.range.start[2] or 0)
+    return { id = id, row = row, col = col, record = record }
+  end
+  return nil
+end
+
+---@param bufnr integer
+---@param records table[]
+---@return table[]
+local function comment_positions_for_buffer(bufnr, records)
+  local render = require("manicule.ui.render")
+  local mark_ids = render.mark_ids_for_buffer(bufnr)
+  local positions = {}
+  for _, record in ipairs(records or {}) do
+    local pos = comment_position(bufnr, record, mark_ids)
+    if pos then
+      table.insert(positions, pos)
+    end
+  end
+  table.sort(positions, function(a, b)
+    if a.row ~= b.row then
+      return a.row < b.row
+    end
+    if a.col ~= b.col then
+      return a.col < b.col
+    end
+    return a.id < b.id
+  end)
+  return positions
+end
+
+---@param count any
+---@return integer
+local function normalized_count(count)
+  count = tonumber(count) or 1
+  if count ~= count or count < 1 then
+    return 1
+  end
+  return math.floor(count)
+end
+
+---Jump to the nearest next/previous comment in the current buffer.
+---@param direction "next"|"prev"|"previous"
+---@param opts? { count?: integer }
+---@return boolean ok
+function M.jump(direction, opts)
+  opts = opts or {}
+  local forward
+  if direction == "next" then
+    forward = true
+  elseif direction == "prev" or direction == "previous" then
+    forward = false
+  else
+    vim.notify(("manicule: unknown jump direction %q"):format(tostring(direction)), vim.log.levels.ERROR)
+    return false
+  end
+
+  local bufnr = vim.api.nvim_get_current_buf()
+  attach_buffer(bufnr)
+
+  local records = records_for_buffer(bufnr)
+  if #records == 0 then
+    vim.notify("manicule: no comments in this buffer", vim.log.levels.WARN)
+    return false
+  end
+
+  local positions = comment_positions_for_buffer(bufnr, records)
+  if #positions == 0 then
+    vim.notify("manicule: no jumpable comments in this buffer", vim.log.levels.WARN)
+    return false
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local cur_row, cur_col = cursor[1] - 1, cursor[2]
+  local count = normalized_count(opts.count)
+  local target
+
+  if forward then
+    for _, pos in ipairs(positions) do
+      if pos.row > cur_row or (pos.row == cur_row and pos.col > cur_col) then
+        target = pos
+        count = count - 1
+        if count == 0 then
+          break
+        end
+      end
+    end
+  else
+    for i = #positions, 1, -1 do
+      local pos = positions[i]
+      if pos.row < cur_row or (pos.row == cur_row and pos.col < cur_col) then
+        target = pos
+        count = count - 1
+        if count == 0 then
+          break
+        end
+      end
+    end
+  end
+
+  if count > 0 or not target then
+    vim.notify(("manicule: no %s comment"):format(forward and "next" or "previous"), vim.log.levels.WARN)
+    return false
+  end
+
+  vim.api.nvim_win_set_cursor(0, { target.row + 1, target.col })
+  pcall(vim.cmd, "normal! zv")
+  refresh_viewport(bufnr)
+  return true
+end
+
+---@param opts? { count?: integer }
+---@return boolean
+function M.next(opts)
+  return M.jump("next", opts)
+end
+
+---@param opts? { count?: integer }
+---@return boolean
+function M.prev(opts)
+  return M.jump("prev", opts)
 end
 
 ---Find a record by id across both project + session scopes.

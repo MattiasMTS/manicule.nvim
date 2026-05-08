@@ -61,10 +61,19 @@ describe("manicule float transparency", function()
     assert.are.equal(99, float.opacity_to_winblend(0.99))
     assert.are.equal(100, float.opacity_to_winblend(1))
 
-    -- Legacy 0-100 values still behave like winblend percentages.
-    assert.are.equal(50, float.opacity_to_winblend(50))
+    assert.are.equal(100, float.opacity_to_winblend(50))
     assert.are.equal(100, float.opacity_to_winblend(150))
     assert.are.equal(0, float.opacity_to_winblend(-10))
+  end)
+
+  it("rejects opacity values outside the fractional range", function()
+    local ok, err = pcall(require("manicule.config").setup, {
+      ui = {
+        opacity = 1.5,
+      },
+    })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("ui.opacity", 1, true))
   end)
 
   it("applies fractional opacity to the comment editor float", function()

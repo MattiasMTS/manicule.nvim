@@ -16,8 +16,7 @@ local M = {}
 
 ---@class manicule.StoreConfig
 ---@field dir string Directory where per-root store files live.
----@field backend "sqlite"|"file" Project-scope persistence backend.
----@field format "mpack"|"json" On-disk format.
+---@field format "mpack"|"json" Session store format.
 ---@field branch boolean Scope the filename by the current git branch (main/master skipped).
 ---@field persist_unrooted boolean When true (default), unrooted file buffers route into the session store.
 ---@field canonicalize_symlinks boolean Resolve symlinks via `fs_realpath` before encoding URIs.
@@ -33,12 +32,8 @@ M.defaults = {
   store = {
     -- Per-user state dir — out of the project tree, dedicated subdir.
     dir = vim.fn.stdpath("state") .. "/manicule/",
-    -- Project comments use a local SQLite event store by default.
-    -- `file` keeps the legacy mpack/json whole-file backend for
-    -- compatibility and tests.
-    backend = "sqlite",
     -- "mpack" | "json". mpack is smaller/faster and tolerates Lua
-    -- nil/array quirks. Used by the session store and legacy imports.
+    -- nil/array quirks. Used by the session store.
     format = "mpack",
     -- Annotations should stay visible across branches by default; manicule
     -- stores notes the user wants anchored, not editing state.
@@ -100,7 +95,6 @@ function M.setup(opts)
   if opts.store then
     vim.validate({
       ["store.dir"] = { opts.store.dir, "string", true },
-      ["store.backend"] = { opts.store.backend, "string", true },
       ["store.format"] = { opts.store.format, "string", true },
       ["store.branch"] = { opts.store.branch, "boolean", true },
       ["store.persist_unrooted"] = { opts.store.persist_unrooted, "boolean", true },
@@ -108,9 +102,6 @@ function M.setup(opts)
       ["store.root_markers"] = { opts.store.root_markers, "table", true },
       ["store.poll_interval_ms"] = { opts.store.poll_interval_ms, "number", true },
     })
-    if opts.store.backend ~= nil and opts.store.backend ~= "sqlite" and opts.store.backend ~= "file" then
-      error(('manicule: store.backend must be "sqlite" or "file", got %q'):format(tostring(opts.store.backend)))
-    end
     if opts.store.format ~= nil and opts.store.format ~= "mpack" and opts.store.format ~= "json" then
       error(('manicule: store.format must be "mpack" or "json", got %q'):format(tostring(opts.store.format)))
     end
@@ -126,6 +117,10 @@ function M.setup(opts)
       ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
       ["ui.sink_picker"] = { opts.ui.sink_picker, "function", true },
     })
+    local opacity = opts.ui.opacity
+    if opacity ~= nil and (opacity ~= opacity or opacity < 0 or opacity > 1) then
+      error(("manicule: ui.opacity must be between 0.0 and 1.0, got %s"):format(tostring(opacity)))
+    end
   end
   M.current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   -- tbl_deep_extend merges tables but we want user key-lists to *replace*,

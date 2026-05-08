@@ -7,26 +7,23 @@
 --     The database uses WAL mode and stores both the current projection
 --     and an append-only event log, so multiple Neovim sessions can
 --     merge field-level updates without rewriting a whole store file.
---     `config.store.backend = "file"` keeps the legacy whole-file
---     mpack/json backend.
 --
 --   * Session scope: one file, `session.<format>`, shared across every
 --     unrooted / special-buftype buffer (terminal, help, scratch, etc).
 --     Records in this store key purely off `uri`; they carry
 --     `project_root = nil`.
 --
--- Session stores and legacy project files use a versioned envelope:
+-- Session stores use a versioned envelope:
 --
 --   { version = 1, records = { ... } }
 --
 -- encoded with `vim.mpack.encode` (or `vim.json.encode` when
--- `config.store.format == "json"`). Legacy bare arrays are still
--- accepted and rewritten as the current envelope on the next save.
--- File-backend saves write to `<path>.tmp` then rename so a mid-write
--- crash never truncates the prior file. SQLite saves use
--- `BEGIN IMMEDIATE` transactions. State is kept per-root in a
--- module-local `cache` (plus a single-slot session cache); writes flip
--- a dirty flag and `save()` is a no-op when the flag is clean.
+-- `config.store.format == "json"`). Session saves write to
+-- `<path>.tmp` then rename so a mid-write crash never truncates the
+-- prior file. Project saves use SQLite `BEGIN IMMEDIATE` transactions.
+-- State is kept per-root in a module-local `cache` (plus a single-slot
+-- session cache); writes flip a dirty flag and `save()` is a no-op
+-- when the flag is clean.
 
 local M = {}
 
@@ -105,16 +102,6 @@ end
 
 ---@param root string|nil
 ---@return string|nil
-local function file_path(root)
-  if not root or root == "" then
-    return nil
-  end
-  local cfg = config.current.store
-  return cfg.dir .. store_name(root) .. "." .. cfg.format
-end
-
----@param root string|nil
----@return string|nil
 local function sqlite_path(root)
   if not root or root == "" then
     return nil
@@ -123,25 +110,11 @@ local function sqlite_path(root)
   return cfg.dir .. store_name(root) .. ".sqlite3"
 end
 
-local function use_sqlite()
-  return config.current.store.backend ~= "file"
-end
-
 ---Absolute path to the project store for the given root, or nil if root is nil.
 ---@param root string|nil
 ---@return string|nil
 function M.path(root)
-  if use_sqlite() then
-    return sqlite_path(root)
-  end
-  return file_path(root)
-end
-
----Absolute path to the legacy whole-file project store.
----@param root string|nil
----@return string|nil
-function M.legacy_path(root)
-  return file_path(root)
+  return sqlite_path(root)
 end
 
 ---Resolve the current project root using `store.root_markers`. Returns
@@ -246,9 +219,9 @@ local function encode(records)
   return encoded
 end
 
----Decode `data` using the configured format. Expects a bare array of
----records (legacy) or the current versioned envelope. Anything else is
----treated as corrupt and produces an empty list plus a WARN notify.
+---Decode `data` using the configured format. Expects the current
+---versioned envelope. Anything else is treated as corrupt and produces
+---an empty list plus a WARN notify.
 ---@param data string
 ---@param path string used purely for diagnostics
 ---@return table[] records
@@ -259,10 +232,6 @@ local function decode(data, path)
   if not ok or type(decoded) ~= "table" then
     vim.notify(("manicule: failed to decode store %s; starting fresh"):format(path), vim.log.levels.WARN)
     return {}
-  end
-
-  if is_list(decoded) then
-    return decoded
   end
 
   local version = decoded.version
@@ -341,10 +310,6 @@ local function ensure_sqlite_schema(db)
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
     "PRAGMA busy_timeout=1000",
-    [[CREATE TABLE IF NOT EXISTS metadata (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    )]],
     [[CREATE TABLE IF NOT EXISTS records (
       root TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -498,41 +463,6 @@ local function is_ephemeral_record(record)
   return type(record) == "table" and type(record.meta) == "table" and record.meta.ephemeral == true
 end
 
-local function sqlite_import_legacy(root, db)
-  local marker = db:row("SELECT value FROM metadata WHERE key = ?", { "legacy_imported" })
-  if marker then
-    return true
-  end
-
-  local legacy = file_path(root)
-  local records = {}
-  if legacy then
-    local data = read_file(legacy)
-    if data and #data > 0 then
-      records = decode(data, legacy)
-    end
-  end
-
-  return db:transaction(function()
-    local now = os.time()
-    for _, record in ipairs(records) do
-      if type(record) == "table" and record.id ~= nil and not is_ephemeral_record(record) then
-        record.scope = record.scope or "project"
-        record.project_root = record.project_root or root
-        local ok, err = sqlite_upsert_record(db, root, record)
-        if not ok then
-          return false, err
-        end
-        ok, err = sqlite_insert_event(db, root, record.id, "comment_imported", { record = record }, now)
-        if not ok then
-          return false, err
-        end
-      end
-    end
-    return db:execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", { "legacy_imported", "1" })
-  end)
-end
-
 local RECORD_FIELDS = { "body", "range", "resolved", "uri", "meta", "author" }
 
 ---@param base table
@@ -581,50 +511,26 @@ function M.load(root)
   end
 
   local records = {}
-  if use_sqlite() then
-    local db, err = sqlite_db(root)
-    if not db then
-      vim.notify(("manicule: failed to open sqlite store for %s: %s"):format(root, tostring(err)), vim.log.levels.ERROR)
-      cache[root] = {
-        records = records,
-        dirty = false,
-        base_by_id = {},
-        removed = {},
-        last_seen_event_id = 0,
-      }
-      return records
-    end
-    local imported, import_err = sqlite_import_legacy(root, db)
-    if not imported then
-      vim.notify(
-        ("manicule: failed to import legacy store for %s: %s"):format(root, tostring(import_err)),
-        vim.log.levels.WARN
-      )
-    end
-    records = sqlite_read_records(db, root)
+  local db, err = sqlite_db(root)
+  if not db then
+    vim.notify(("manicule: failed to open sqlite store for %s: %s"):format(root, tostring(err)), vim.log.levels.ERROR)
     cache[root] = {
       records = records,
       dirty = false,
-      base_by_id = by_id(records),
+      base_by_id = {},
       removed = {},
-      last_seen_event_id = sqlite_last_event_id(db, root),
+      last_seen_event_id = 0,
     }
     return records
   end
-
-  local path = file_path(root)
-  if path then
-    -- Ensure the state dir exists before reading/writing. `mkdir -p` is
-    -- idempotent and cheap. (setup() also mkdirs once, but this guards
-    -- against `setup()` never being called.)
-    vim.fn.mkdir(config.current.store.dir, "p")
-
-    local data = read_file(path)
-    if data and #data > 0 then
-      records = decode(data, path)
-    end
-  end
-  cache[root] = { records = records, dirty = false }
+  records = sqlite_read_records(db, root)
+  cache[root] = {
+    records = records,
+    dirty = false,
+    base_by_id = by_id(records),
+    removed = {},
+    last_seen_event_id = sqlite_last_event_id(db, root),
+  }
   return records
 end
 
@@ -640,114 +546,93 @@ function M.save(root)
     return true
   end
 
-  if use_sqlite() then
-    local db, db_err = sqlite_db(root)
-    if not db then
-      return false, db_err
-    end
-    local ok, err = db:transaction(function()
-      local now = os.time()
+  local db, db_err = sqlite_db(root)
+  if not db then
+    return false, db_err
+  end
+  local ok, err = db:transaction(function()
+    local now = os.time()
 
-      for id, removed in pairs(entry.removed or {}) do
-        local _, deleted_at = sqlite_get_record(db, root, id, true)
-        if not deleted_at then
-          local event_ok, event_err =
-            sqlite_insert_event(db, root, id, "comment_deleted", { deleted_at = now, previous = removed }, now)
-          if not event_ok then
-            return false, event_err
-          end
-          local tombstone = vim.deepcopy(removed or {})
-          tombstone.id = tombstone.id or id
-          tombstone.deleted_at = now
-          tombstone.updated_at = now
-          local upsert_ok, upsert_err = sqlite_upsert_record(db, root, tombstone, now)
-          if not upsert_ok then
-            return false, upsert_err
-          end
+    for id, removed in pairs(entry.removed or {}) do
+      local _, deleted_at = sqlite_get_record(db, root, id, true)
+      if not deleted_at then
+        local event_ok, event_err =
+          sqlite_insert_event(db, root, id, "comment_deleted", { deleted_at = now, previous = removed }, now)
+        if not event_ok then
+          return false, event_err
+        end
+        local tombstone = vim.deepcopy(removed or {})
+        tombstone.id = tombstone.id or id
+        tombstone.deleted_at = now
+        tombstone.updated_at = now
+        local upsert_ok, upsert_err = sqlite_upsert_record(db, root, tombstone, now)
+        if not upsert_ok then
+          return false, upsert_err
         end
       end
+    end
 
-      for _, record in ipairs(entry.records or {}) do
-        if type(record) == "table" and record.id ~= nil and not is_ephemeral_record(record) then
-          record.scope = record.scope or "project"
-          record.project_root = record.project_root or root
-          local id = tostring(record.id)
-          local base = entry.base_by_id and entry.base_by_id[id] or nil
-          if not base then
-            local current = sqlite_get_record(db, root, id, true)
-            if not current then
-              local event_ok, event_err = sqlite_insert_event(db, root, id, "comment_created", { record = record }, now)
-              if not event_ok then
-                return false, event_err
+    for _, record in ipairs(entry.records or {}) do
+      if type(record) == "table" and record.id ~= nil and not is_ephemeral_record(record) then
+        record.scope = record.scope or "project"
+        record.project_root = record.project_root or root
+        local id = tostring(record.id)
+        local base = entry.base_by_id and entry.base_by_id[id] or nil
+        if not base then
+          local current = sqlite_get_record(db, root, id, true)
+          if not current then
+            local event_ok, event_err = sqlite_insert_event(db, root, id, "comment_created", { record = record }, now)
+            if not event_ok then
+              return false, event_err
+            end
+            local upsert_ok, upsert_err = sqlite_upsert_record(db, root, record)
+            if not upsert_ok then
+              return false, upsert_err
+            end
+          end
+        else
+          local fields = changed_fields(base, record)
+          if has_changes(fields) then
+            local projected, deleted_at = sqlite_get_record(db, root, id, true)
+            if not deleted_at then
+              projected = projected or vim.deepcopy(base)
+              for _, field in ipairs(RECORD_FIELDS) do
+                if fields[field] then
+                  projected[field] = vim.deepcopy(record[field])
+                  projected.updated_at = record.updated_at or now
+                  local event_ok, event_err =
+                    sqlite_insert_event(db, root, id, event_kind_for_field(field, record[field]), {
+                      field = field,
+                      value = record[field],
+                      updated_at = projected.updated_at,
+                    }, now)
+                  if not event_ok then
+                    return false, event_err
+                  end
+                end
               end
-              local upsert_ok, upsert_err = sqlite_upsert_record(db, root, record)
+              local upsert_ok, upsert_err = sqlite_upsert_record(db, root, projected)
               if not upsert_ok then
                 return false, upsert_err
               end
             end
-          else
-            local fields = changed_fields(base, record)
-            if has_changes(fields) then
-              local projected, deleted_at = sqlite_get_record(db, root, id, true)
-              if not deleted_at then
-                projected = projected or vim.deepcopy(base)
-                for _, field in ipairs(RECORD_FIELDS) do
-                  if fields[field] then
-                    projected[field] = vim.deepcopy(record[field])
-                    projected.updated_at = record.updated_at or now
-                    local event_ok, event_err =
-                      sqlite_insert_event(db, root, id, event_kind_for_field(field, record[field]), {
-                        field = field,
-                        value = record[field],
-                        updated_at = projected.updated_at,
-                      }, now)
-                    if not event_ok then
-                      return false, event_err
-                    end
-                  end
-                end
-                local upsert_ok, upsert_err = sqlite_upsert_record(db, root, projected)
-                if not upsert_ok then
-                  return false, upsert_err
-                end
-              end
-            end
           end
         end
       end
-      return true
-    end)
-    if not ok then
-      return false, err
     end
-    local records, read_err = sqlite_read_records(db, root)
-    if read_err then
-      return false, read_err
-    end
-    entry.records = records
-    entry.base_by_id = by_id(records)
-    entry.removed = {}
-    entry.last_seen_event_id = sqlite_last_event_id(db, root)
-    entry.dirty = false
     return true
+  end)
+  if not ok then
+    return false, err
   end
-
-  local path = file_path(root)
-  if not path then
-    return false, "no store path for root"
+  local fresh_records, read_err = sqlite_read_records(db, root)
+  if read_err then
+    return false, read_err
   end
-  -- Make sure the dir exists every time — cheap enough and guards against
-  -- the user nuking ~/.local/state/nvim/manicule between sessions.
-  vim.fn.mkdir(config.current.store.dir, "p")
-
-  local encoded, err = encode(entry.records)
-  if not encoded then
-    return false, "failed to encode records: " .. tostring(err)
-  end
-  local write_ok, write_err = write_atomic(path, encoded)
-  if not write_ok then
-    return false, write_err
-  end
+  entry.records = fresh_records
+  entry.base_by_id = by_id(fresh_records)
+  entry.removed = {}
+  entry.last_seen_event_id = sqlite_last_event_id(db, root)
   entry.dirty = false
   return true
 end
@@ -773,7 +658,7 @@ end
 ---@param root string|nil
 ---@return boolean changed
 function M.sync(root)
-  if not root or not use_sqlite() then
+  if not root then
     return false
   end
   local entry = cache[root]
@@ -869,12 +754,10 @@ function M.remove(root, id)
     if r.id == id then
       table.remove(records, i)
       entry.dirty = true
-      if use_sqlite() then
-        local base = (entry.base_by_id or {})[tostring(id)]
-        entry.removed = entry.removed or {}
-        if base then
-          entry.removed[tostring(id)] = vim.deepcopy(base)
-        end
+      local base = (entry.base_by_id or {})[tostring(id)]
+      entry.removed = entry.removed or {}
+      if base then
+        entry.removed[tostring(id)] = vim.deepcopy(base)
       end
       return r
     end
@@ -1116,14 +999,10 @@ end
 
 ---@param root string|nil
 ---@return table
-function M.backend_info(root)
+function M.sqlite_info(root)
   local info = {
-    backend = use_sqlite() and "sqlite" or "file",
     path = M.path(root),
   }
-  if not use_sqlite() then
-    return info
-  end
   local available, available_err = sqlite_available()
   info.available = available
   info.available_error = available_err
@@ -1143,7 +1022,7 @@ end
 ---@param root string
 ---@return table[]
 function M.events(root)
-  if not use_sqlite() or not root then
+  if not root then
     return {}
   end
   local db = sqlite_db(root)

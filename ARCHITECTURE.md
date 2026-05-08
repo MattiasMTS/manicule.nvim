@@ -1,309 +1,133 @@
 # Architecture
 
-## 0. Phased roadmap
+manicule.nvim stores persistent review comments for Neovim buffers. A
+comment is anchored by URI and range, rendered with extmarks and floating
+popups, listed through quickfix, and optionally sent to an external sink.
 
-manicule is being rewired around a URI-based record identity to unblock
-cross-scope storage. The phases land incrementally so each drop keeps
-the plugin usable end-to-end.
+The plugin is local-first. There is no hosted service or network broker.
+Project comments use a local SQLite database in WAL mode; session comments
+for unrooted and special buffers use a small file store under Neovim state.
 
-- **Phase 1 (complete).** Records key off `(scope, project_root, uri)`
-  instead of `(project_root, project-relative-path)`. `scope` is always
-  `"project"`; `BufFilePost` rewrites URIs when files are renamed via
-  `:saveas` / `:file` and fires a `User ManiculeRenamed` autocmd.
-- **Phase 2 (complete).** A diff-mode adapter (`lua/manicule/adapter.lua`)
-  recognises `nvim -d` / `git difftool -t nvimdiff` pairs by matching
-  buffer paths against a temp-prefix list (`/tmp`, `/var/folders/...`,
-  `/private/...`). Comments anchor to the working-tree URI and `M.add`
-  rejects the reference side with a notify. Plain `nvim -d a.lua b.lua`
-  with two real paths leaves each buffer as its own identity.
-- **Phase 3 (complete).** A session-scoped store (`session.<format>`
-  under `stdpath('state')/manicule/`) for unrooted buffers and special
-  buftypes (`term://`, scratch, `nofile`, `acwrite`, `help`, …).
-  `persist_unrooted` defaults to `true`. Adds on quickfix, prompt, and
-  cmdwin buffers still reject with a notify. Project and session
-  records merge transparently in `store.all_for_uri` / `M.list`; the
-  caller never branches on scope.
-- **Phase 4 (complete).** Project-scoped records moved to a local
-  SQLite event store in WAL mode. The projection still looks like a
-  list of records to callers, but writes append field-level events and
-  merge clean changes from other Neovim sessions.
+## Design Principles
 
-## 1. Overview
+- URI identity is the source of truth. Buffers, quickfix entries, and sinks
+  all resolve back to records keyed by `uri`.
+- Rendering is disposable. Extmarks and popups are rebuilt from persisted
+  records whenever needed.
+- Storage is local and durable. Project records are transactionally written
+  to SQLite; same-project Neovim sessions discover changes by polling the
+  event log.
+- External systems are sinks, not dependencies. Clipboard and cmux are
+  integrations layered on top of the core record model.
 
-manicule.nvim pins free-form comments to arbitrary buffer ranges via
-Neovim extmarks, persists project comments to a local SQLite WAL store
-under Neovim's state directory, and dispatches them to pluggable
-**sinks** (clipboard, agent surfaces, chat webhooks, …). The core is
-intentionally local-first: no network service, no remote broker, and a
-small polling loop for same-project changes committed by other Neovim
-sessions.
+## Module Map
 
-The extmark anchors the comment and tints the line number via
-`ManiculeLineNr` (default-linked to `DiagnosticSignInfo`). All other UI
-(per-comment floating popups, the editor) lives in `lua/manicule/ui/`.
-Popups are rendered either **sticky** (always shown for every record in
-the buffer) or **viewport-driven** (only shown for records whose line is
-currently on screen). The behaviour is selected by the `ui.sticky` config
-knob and defaults to viewport-driven.
-
-## 2. Module map
-
-```
-                        ┌──────────────────┐
-                        │ plugin/manicule  │  ← commands + <Plug> maps
-                        └────────┬─────────┘
-                                 │
-                                 ▼
-   ┌───────────┐          ┌──────────────┐          ┌───────────┐
-   │ config.lua│◄─────────┤  init.lua    ├─────────►│  id.lua   │
-   └───────────┘          │ (public API) │          └───────────┘
-                          └──┬────┬────┬─┘
-                             │    │    │
-          ┌──────────────────┘    │    └──────────────────┐
-          ▼                       ▼                       ▼
-   ┌────────────┐          ┌────────────┐          ┌─────────────┐
-   │ anchor.lua │          │  store.lua │          │   ui.lua    │
-   │ (extmarks) │          │ (SQLite +  │          │ (facade)    │
-   │            │          │  session)  │          │             │
-   └────────────┘          └────────────┘          └──────┬──────┘
-                                 ▲                        │
-                                 │                        ▼
-                          ┌──────┴───────┐       ┌────────────────┐
-                          │ adapter.lua  │       │ ui/ submodules │
-                          │  (identity)  │       │  editor.lua    │
-                          └──────────────┘       │  render.lua    │
-                                 ▲               │  quickfix.lua  │
-                                 │               └────────────────┘
-                          ┌──────┴───────┐
-                          │  sinks/init  │
-                          │  (registry)  │
-                          │      │       │
-                          │      ▼       │
-                          │ clipboard.lua│
-                          │ cmux.lua     │
-                          │ helpers.lua  │
-                          └──────────────┘
-
+```text
+plugin/manicule.lua          commands and <Plug> maps
+lua/manicule/init.lua        public API, autocmd wiring, lifecycle events
+lua/manicule/config.lua      defaults and validation
+lua/manicule/adapter.lua     buffer identity and diff/staged-buffer handling
+lua/manicule/uri.lua         canonical URI helpers
+lua/manicule/store.lua       project/session persistence facade
+lua/manicule/sqlite.lua      minimal LuaJIT FFI SQLite wrapper
+lua/manicule/anchor.lua      shared extmark namespace
+lua/manicule/ui.lua          prompt and sink picker facade
+lua/manicule/ui/editor.lua   floating comment editor
+lua/manicule/ui/render.lua   extmarks, popups, viewport rendering
+lua/manicule/ui/quickfix.lua quickfix formatting and refresh
+lua/manicule/sinks/          sink registry and bundled sinks
 ```
 
-Identity flow (phase 2):
+`init.lua` lazy-requires most modules so command/key based lazy-loading has
+minimal startup cost. Setup still needs to run early enough to register buffer
+autocmds; README recommends `BufReadPost` / `BufNewFile`.
 
-```
-  bufnr ──► adapter.identify()
-              │
-              ├─ uri_mod.for_bufnr(bufnr)
-              ├─ in_cmdwin()?        → reject (session, not writable)
-              ├─ buftype == ""?      → resolve_diff_pair(bufnr)
-              │     │
-              │     ├─ reference side: return working URI,
-              │     │                  is_writable=false, diff_side="reference"
-              │     └─ working side / no pair: continue
-              │
-              ├─ vim.fs.root(bufnr, markers) matches? → scope="project", writable
-              └─ fall through           → scope="session"
-                                          (writable iff buftype policy allows)
-```
+## Record Identity
 
-`init.lua` lazy-requires everything it needs; users with a `cmd = {...}`
-lazy spec pay no startup cost.
+The persisted record shape is:
 
-### UI layer
-
-The `ui/` submodule hosts the floating-window comment editor, the
-per-comment popup renderer, the quickfix formatter, and a small shared
-float primitives module. The UI is intentionally buffer-agnostic: every
-surface works from record identity and buffer URI rather than a diff-only
-model.
-
-- `ui/float.lua` — shared float primitives used by both the editor and
-  the popup renderer: `create_scratch_buf`, `open_or_reconfigure`,
-  `apply_title_footer`, `set_float_win_options`.
-- `ui/editor.lua` — scratch-buffer floating window with a title,
-  footer hint, configurable submit/cancel keys, and opacity. Entry
-  point is `editor.open({ title, default, anchor_pos, cfg }, cb)`.
-  Only one editor is live at a time.
-- `ui/render.lua` — per-comment floating popups anchored to each
-  commented line. `reconcile(bufnr, records)` is idempotent: it
-  creates / updates / tears down an anchor extmark + popup per record,
-  stack-offsetting multiple comments on the same line. Sticky mode
-  (`ui.sticky = true`) keeps popups up for every record; viewport mode
-  (`ui.sticky = false`, the default) shows popups only for records
-  whose line is currently visible, via `update_viewport_popups`.
-  Public API: `setup`, `refresh_highlights`, `reconcile`,
-  `update_viewport_popups`, `hide_all_popups`,
-  `capture_position_patches`, `clear_buffer`, `clear_all`,
-  `winhighlight`, `mark_ids_for_buffer`.
-- `ui/quickfix.lua` — formats records into quickfix items
-  (`[ ]`/`[x]` + line range + truncated first line of the body) and
-  delegates to `setqflist` + `copen`. Replaces the raw quickfix call
-  that lived in `init.list`. Tags each item with its record id via
-  `user_data`, caches the filter used so `refresh()` can regenerate
-  the list in place, and exposes `record_id_at_cursor()` +
-  `is_manicule_qf_open()` for the keymap and event wiring.
-- `ui/quickfix_keymaps.lua` — buffer-local `dd` / `ce` for manicule
-  quickfix buffers only. Attached by a `FileType qf` autocmd (and
-  re-attached on every `:copen` to honour runtime flag toggles).
-  Opt-out via `vim.g.manicule_no_default_keymaps = 1`.
-- `ui/picker.lua` — `vim.ui.select` picker backing no-arg invocations
-  of `:ManiculeEdit` / `:ManiculeDelete` / `:ManiculeResolve`. Formats
-  each record as `<n> │ <path>:<line> │ <body…>`, consumes the same
-  sorted output from `init.list` that `ui/quickfix` does so positional
-  completion numbers and picker rows stay 1:1.
-
-`lua/manicule/ui.lua` stays as a thin facade: `prompt` hands off to
-`ui/editor`, and `select_sink` auto-selects a single sink or delegates
-multiple choices to `ui.sink_picker` / `vim.ui.select`.
-
-## 3. Data flow: add comment
-
-```
-  user
-   │  :ManiculeAdd   (or <Plug>(manicule-add))
-   ▼
-plugin/manicule ──► init.add(opts)
-                      │
-                      ├─ resolve_range() ──────► {start, end_}
-                      │
-                      ├─ ui.prompt() ──► ui.editor.open(cfg) ──► body (async cb)
-                      │
-                      ▼
-                    finalize_add(body, bufnr, range)
-                      │
-                      ├─ id.new() ─────────────────────► record.id
-                      ├─ store.put(root, record)
-                      ├─ store.save(root)  (atomic tmp+rename)
-                      ├─ ui.render.reconcile(bufnr, records) ──► extmark + popup
-                      │
-                      └─ nvim_exec_autocmds("User",
-                           { pattern = "ManiculeAdded", data = record })
-```
-
-## 4. Data flow: reload
-
-```
-  BufReadPost / BufWinEnter
-         │
-         ▼
-   init.reconcile_buffer(bufnr)
-         │
-        ├─ adapter.identify(bufnr)       (URI + target-buffer project root)
-        ├─ store.load(root)              (fills module-local cache[root])
-        ├─ manicule.uri.for_bufnr(bufnr) (fs_realpath, passthrough, or ephemeral URI)
-        │
-        ├─ records = store.all_for_uri(uri, root)
-         ├─ ui.render.reconcile(bufnr, records)
-         │     └─ for each record: create/refresh anchor extmark and
-         │        (sticky) popup, prune handles that no longer appear
-         │        in `records`.
-         │
-         └─ for any extmark that came back invalid:
-              nvim_exec_autocmds("User",
-                { pattern = "ManiculeOrphaned",
-                  data = { id, record } })
-```
-
-Viewport / scroll / resize events fan out to
-`render.update_viewport_popups(bufnr, records)` when `ui.sticky` is
-false. `BufLeave` / `WinLeave` call `render.hide_all_popups(bufnr)` so
-stale popups don't leak across windows. `BufFilePost` triggers
-`init.on_bufname_changed(bufnr)`, which rewrites every record anchored
-in the buffer to the buffer's new URI, marks the store dirty, saves,
-and fires a single `User ManiculeRenamed` autocmd (`{ bufnr, old_uri,
-new_uri, record_count, ids }`). Every handler is wrapped in
-`vim.schedule` so a burst of autocmds coalesces into one render pass.
-
-Setup must run before the first `BufReadPost` you want rendered, so
-users lazy-loading via `cmd`/`keys` alone will miss the initial attach
-sweep; use `event = { "BufReadPost", "BufNewFile" }` as the trigger.
-
-## 5. Data flow: send
-
-```
-  :ManiculeSend [clipboard]
-         │
-         ▼
-   init.send(sink_name, filter, ctx)
-         │
-         ├─ no sink? ui.select_sink(cb)
-         │     ├─ one sink       → cb(name)
-         │     └─ multiple sinks → ui.sink_picker? / vim.ui.select
-         │
-         ├─ list(filter)  (vim.iter over store.all(root); _quiet = true)
-         │
-         ├─ sinks.dispatch(sink_name, records, ctx, cb)
-         │     └─ sinks[name].validate?(ctx)
-         │     └─ sinks[name].send(records, ctx, cb)
-         │            └─ (e.g. clipboard.send → vim.fn.setreg("+", ...))
-         │
-         └─ cb(ok, err)
-              └─ nvim_exec_autocmds("User",
-                   { pattern = "ManiculeSent",
-                     data = { sink, count, ok, err } })
-```
-
-## 5a. Data flow: quickfix live refresh
-
-The quickfix formatter does not drive any autocmds of its own. Instead
-`init.setup` wires one `User Manicule*` autocmd that fires on add /
-edit / delete / resolve / orphan, and a `FileType qf` autocmd that
-attaches the buffer-local `dd` / `ce` keymaps. The refresh callback
-checks whether a manicule-titled quickfix window is visible, and if so
-calls `ui.quickfix.refresh`, which re-runs the cached filter through
-`manicule.list(filter, _quiet=true)` and replaces the current list
-with `setqflist({}, "r", ...)`. The title-prefix check (`"manicule"`)
-runs again inside `refresh` so a user who swapped the qf to grep
-results between event and refresh never gets their list clobbered.
-The cursor row is captured before the replace and restored after
-(clamped to the new list length) so `dd` lands the cursor on the next
-entry naturally.
-
-## 6. Persistence
-
-The store lives under `stdpath("state") .. "/manicule/"` (overridable
-via `store.dir`). The root is resolved with
-`vim.fs.root(bufnr, store.root_markers)` — defaults to `{".git", ".hg",
-"package.json"}`. Store filenames use the root path with `[\\/:]+`
-collapsed to `%%` (same trick persistence.nvim uses), so
-`/Users/me/src/foo` becomes a flat filename under the state directory.
-Keying by the git root rather than `getcwd()` means comments survive
-`cd`'ing into subdirs.
-
-### Record schema
-
-```
+```lua
 {
-  id           = "unique",                            -- id.new()
-  uri          = "file:///abs/path.lua",              -- canonical URI
-  scope        = "project",                           -- or "session"
-  project_root = "/abs/path/to/root",                 -- nil for session records
-  range        = { start = {row,col}, end_ = {row,col} },
-  body         = "text",
-  author       = "user@example.com",
-  created_at   = 1731000000,
-  updated_at   = 1731000000,
-  resolved     = false,
-  meta         = {},                                  -- free-form
+  id = "unique",
+  uri = "file:///abs/path.lua",
+  scope = "project", -- or "session"
+  project_root = "/abs/path/to/root", -- nil for session records
+  range = { start = { row, col }, end_ = { row, col } },
+  body = "text",
+  author = "user@example.com",
+  created_at = 1731000000,
+  updated_at = 1731000000,
+  resolved = false,
+  meta = {},
 }
 ```
 
-`uri` is the canonical identity. `manicule.uri.for_bufnr` runs file
-paths through `vim.uv.fs_realpath` before encoding so opening a file
-via a symlink still matches records saved against the real path; set
-`store.canonicalize_symlinks = false` to disable. Non-file URIs
-(`term://`, `man://`, …) pass through untouched so the session-scoped
-store can key off the same field directly.
+`adapter.identify(bufnr)` owns the question "where should comments on this
+buffer live?". It returns a URI, scope, project root, writability, and optional
+diff-side metadata.
 
-### File layout
+Important identity cases:
 
+- Normal file in a project: `scope = "project"`, `project_root` from
+  `vim.fs.root(bufnr, store.root_markers)`.
+- Unrooted file or allowed special buffer: `scope = "session"`.
+- Quickfix, prompt, and command-line-window buffers: rejected for adds.
+- Diff views: comments are accepted only on the writable side when the pair can
+  be identified.
+- Runtime-staged paths under `stdpath("run")`: reverse-mapped back to the real
+  project file when possible, otherwise rejected with a diagnostic notify.
+
+`M.add` re-runs `adapter.identify` immediately before persisting and refuses to
+write if the URI changed. That catches regressions where add-time and
+reload-time identities would diverge.
+
+## Rendering
+
+`ui/render.lua` is the only module that owns visual state. For each visible
+record it keeps one handle containing:
+
+- a primary extmark for anchoring and line-number highlighting
+- additional decoration extmarks for multi-line ranges
+- an optional popup buffer/window
+
+`render.reconcile(bufnr, records)` is idempotent. It creates or updates handles
+for live records and clears handles whose record disappeared. Viewport mode
+then calls `render.update_viewport_popups(bufnr, records)` to show popups only
+for currently visible lines. Sticky mode renders every popup.
+
+Popups are intentionally transient. `BufLeave` and `WinLeave` hide them to
+avoid leaking floats across windows. The comment editor is a special case:
+opening it moves focus into a manicule float, so the leave handler skips that
+single transition to keep existing comment popups visible while typing.
+
+Same-line comments stack vertically by popup height and show their stack
+position in the title, for example `cabc 2/3`.
+
+## Storage
+
+All persistent files live under:
+
+```text
+stdpath("state")/manicule/
 ```
-~/.local/state/nvim/manicule/
-  ├─ <escaped-root>[%%<branch>].sqlite3    ← project-scope store
-  │   (records projection + events log, WAL mode)
-  └─ session.<format>                      ← session-scope store
-      (single file, shared across all unrooted / special buffers)
+
+Project stores are named from the escaped project root:
+
+```text
+<escaped-root>[%%<branch>].sqlite3
 ```
 
-### Project SQLite layout
+Session stores use:
+
+```text
+session.<format>
+```
+
+`store.branch = true` appends the current git branch to the project store name
+except for `main` and `master`. The default is `false` because comments are
+treated as content annotations rather than branch-local editor state.
+
+### Project SQLite
 
 Project stores use two main tables:
 
@@ -312,208 +136,129 @@ records(root, id, data, deleted_at, updated_at)
 events(id, root, record_id, kind, payload, client_id, created_at)
 ```
 
-`records.data` is the current JSON-encoded record projection. `events`
-is append-only and records `comment_created`, `comment_body_updated`,
-`comment_range_updated`, `comment_resolved`, `comment_reopened`,
-`comment_uri_updated`, `comment_meta_updated`, `comment_author_updated`,
-`comment_deleted`, and `comment_imported`.
+`records` is the current projection. `events` is an append-only local event log.
+Writes run in `BEGIN IMMEDIATE` transactions with WAL enabled.
 
-Each store client keeps a base snapshot from its last load. On save, it
-diffs the local record against that base and writes only fields that
-changed locally. If another Neovim session changed a different field in
-the meantime, the save reads the current SQLite projection inside the
-same `BEGIN IMMEDIATE` transaction and applies only the local field
-patches. This avoids whole-record last-writer-wins for ordinary body vs
-range vs resolved edits. Deletes are tombstones and take precedence over
-stale local updates.
+Each store client keeps a base snapshot from its last load. On save it diffs the
+local record against that base and writes only locally changed fields. If
+another Neovim session changed a different field first, the save reads the
+current projection and applies only the local field patch. Deletes are
+tombstones and take precedence over stale updates.
 
-Clean caches poll `events.MAX(id)` and reload the projection when a
-newer event appears. Dirty caches are left alone until their field-level
-save completes.
+Clean caches poll `MAX(events.id)` and reload the projection when a newer event
+appears. Dirty caches wait until their local save completes.
 
-### Session and legacy file layout
+### Session Files
 
-Session stores and legacy project imports use a versioned envelope:
+Session records use:
 
 ```lua
 { version = 1, records = { ... } }
 ```
 
-It is encoded with `vim.mpack.encode` by default; `store.format =
-"json"` switches to `vim.json.encode`. Legacy bare record arrays still
-load and are rewritten as the current envelope on the next save. If the
-decoded payload is neither a list nor a supported envelope the loader
-logs a `WARN` notification and starts from an empty record list rather
-than crashing.
+The payload is encoded as `mpack` by default or JSON when
+`store.format = "json"`.
 
-Writes go through a tmp-then-rename dance — `vim.uv.fs_write` to
-`<path>.tmp`, then `vim.uv.fs_rename` into place — so a mid-write crash
-never truncates the existing store. If the on-disk file is corrupt the
-loader `pcall`s the decode, logs a `WARN` notification, and starts from
-an empty record list rather than crashing.
+## Main Flows
 
-**Unrooted buffers + special buftypes.** When `vim.fs.root` returns
-nil (e.g. `/tmp/foo.txt` with no git ancestor) or the buffer has a
-special buftype (`terminal`, `help`, `nofile`, `acwrite`, `nowrite`),
-records route to the session store instead. `persist_unrooted`
-defaults to `true`; setting it to `false` makes unrooted *file*
-buffers reject adds with a notify — special buftypes still route to
-session regardless. Quickfix, prompt, and cmdwin buffers reject
-unconditionally.
-Unnamed buffers get a current-session-only `manicule://buffer/...` URI.
-Those records remain available for list/send while the buffer exists,
-but are omitted from `session.<format>` until `:file` / `:saveas`
-rewrites them to a stable URI.
+### Add
 
-**Runtime-staged buffers.** Plugins (a `:DiffTool` command, a stash-
-blob viewer, a review buffer, …) sometimes write content to
-`<stdpath('run')>/<N>/<project-relative-path>` via `vim.fn.tempname()`
-so the buffer has a unique file-backed identity. That directory's
-`<run-id>` rotates every nvim launch, so the URI is useless the moment
-the user restarts — the record can never re-anchor. `adapter.identify`
-detects the path shape (anything containing
-`/nvim.<user>/<run-id>/<N>/<suffix>`) before project resolution and
-*reverse-maps* it:
+```text
+M.add
+  -> resolve range
+  -> ui.prompt / ui.editor.open
+  -> adapter.identify
+  -> build record
+  -> store.put_record + save
+  -> render reconcile + viewport refresh
+  -> User ManiculeAdded
+```
 
-1. Peel the `/nvim.<user>/<run-id>/<N>/` triplet from the path.
-2. Resolve the remaining `<suffix>` against, in order:
-   - `vim.fs.root(0, store.root_markers)` — the current project root /
-     cwd fallback used by the reverse-map heuristic.
-   - `vim.fn.getcwd()`.
-   - `$HOME`, only when the suffix starts with `.` (dotfile/config).
-3. Zero candidates that exist on disk → reject with
-   `buffer is a nvim-runtime-staged path (<abs>); could not map to a
-   real file`. Multiple candidates → reject with `ambiguous reverse-map;
-   open the real file directly`. Exactly one → use
-   `vim.uri_from_fname(fs_realpath(candidate))` as the identity URI.
+### Reload / Attach
 
-Reverse-map runs on any buffer whose path looks nvim-runtime-staged,
-including diff-mode ones: DiffToolGit-style commands stage BOTH sides
-of a diff under `stdpath('run')`, leaving the diff-pair heuristic
-unable to pick a working side (it needs exactly one "real" buffer),
-so each buffer's URI has to be resolved independently. Reverse-map
-operates on URIs while diff-pair keys off bufnrs + raw paths, so the
-two code paths don't interfere. The root for reverse-mapped records
-is resolved from the mapped path, not the staged buffer, so they land
-in the correct project store.
+```text
+BufReadPost / BufWinEnter
+  -> adapter.identify
+  -> store.load / store.session_load
+  -> store.all_for_uri
+  -> render.reconcile
+  -> render.update_viewport_popups
+```
 
-One acceptable limitation: comments added from a DiffToolGit view
-anchor to the real file's URI using the line numbers shown in the
-view — which represent the *staged* file's content. For plain "old
-vs new" diffs the newer side's line numbers approximate the working
-tree well enough; for three-way or unusual diff setups lines may
-drift. The alternative is refusing all diff-view comments, which is
-worse UX.
+### Edit / Delete / Resolve
 
-Reads route through `adapter.identify` so staged buffers (e.g.
-DiffToolGit) find the real project store; writes use the record's
-stored `project_root` directly.
+Mutations find the record by explicit locator, current buffer project, loaded
+project caches, then session store. After persistence, loaded buffers reconcile
+from the store. Delete also refreshes viewports immediately so remaining popups
+do not wait for cursor movement.
 
-**`M.add` invariant canary.** After building a record, `M.add` re-runs
-`adapter.identify(bufnr)` and refuses to persist when the returned URI
-doesn't match the record's URI. Any divergence triggers an ERROR
-notify (`manicule: URI invariant violated (expected <a>, got <b>:
-<err>)`) and leaves the store untouched. Catches future regressions
-where build-time and reload-time URIs drift apart.
+### Jump
 
-**Branch scoping (opt-in).** `store.branch = true` appends the current
-git branch to the filename (`<escaped-root>%%<escaped-branch>.mpack`) so
-notes are scoped per-branch. `main` and `master` collapse back to the
-unsuffixed filename — the common case doesn't fragment and branch
-creation doesn't suddenly hide existing notes. Branch lookup runs
-`git -C <root> branch --show-current`, guarded by `uv.fs_stat(root ..
-"/.git")`. The default is `false` because annotations are content
-anchors, not editing state; users who want them to follow branches can
-opt in.
+`M.jump("next"|"prev")` is current-buffer scoped. It attaches the buffer,
+collects records for the buffer URI, resolves live extmark positions when
+available, and moves the cursor to the nearest matching comment without using
+quickfix.
 
-## 7. Anchoring strategy
+### Send
 
-Each record owns exactly one extmark in the shared namespace
-`manicule`, created with `invalidate = true` and `undo_restore = false`.
-When the anchor line(s) are deleted, Neovim flags the extmark as
-`invalid` for us for free — we do not maintain a parallel liveness
-table. On buffer reload, records for the buffer's project-relative path
-are re-anchored to their stored `range` by `ui/render.lua`; if the
-re-attached mark comes back `invalid` immediately (e.g. the file has
-been truncated below the stored row), a `User ManiculeOrphaned` autocmd
-is fired with the record.
+```text
+M.send
+  -> M.list(filter)
+  -> sinks.dispatch(name, records, ctx, cb)
+  -> User ManiculeSent
+  -> optional clear_on_success deletes sent records
+```
 
-The extmark tints the line number via `ManiculeLineNr` so commented
-lines are visually distinct; everything else is drawn by `ui/render.lua`.
-Each extmark is paired with a floating popup positioned against the
-anchor window, titled `c<short-id>` and footered with the edit/delete
-hint. Multiple popups on the same line stack vertically, ordered by
-record id. `number_hl_group` only tints the start line; additional decoration
-extmarks tint the rest of a multi-line range.
+## Events
 
-## 8. Event catalog
+Events are native `User` autocmds.
 
-All events are native `User` autocmds — subscribe with
-`nvim_create_autocmd`, inspect `ev.data`.
+| Pattern              | Data shape |
+| -------------------- | ---------- |
+| `ManiculeAdded`      | record |
+| `ManiculeEdited`     | record |
+| `ManiculeDeleted`    | `{ id, record }` |
+| `ManiculeResolved`   | record with `resolved = true` |
+| `ManiculeSent`       | `{ sink, count, ok, err }` |
+| `ManiculeSynced`     | `{ roots }` |
+| `ManiculeOrphaned`   | `{ id, record }` |
+| `ManiculeRenamed`    | `{ bufnr, old_uri, new_uri, record_count, ids }` |
+| `ManiculeVisibility` | `{ hidden = boolean }` |
 
-| Pattern              | Fired when                                 | `ev.data` shape                     |
-| -------------------- | ------------------------------------------ | ----------------------------------- |
-| `ManiculeAdded`      | `M.add` finishes persisting a new record   | full record                         |
-| `ManiculeEdited`     | `M.edit` updates a body                    | full updated record                 |
-| `ManiculeDeleted`    | `M.delete` removes a record                | `{ id, record }`                    |
-| `ManiculeResolved`   | `M.resolve` marks a record resolved        | record (with `resolved = true`)     |
-| `ManiculeSent`       | `M.send` sink dispatch settles             | `{ sink, count, ok, err }`          |
-| `ManiculeOrphaned`   | reload detects an extmark is invalid       | `{ id, record }`                    |
-| `ManiculeRenamed`    | `BufFilePost` rewrote record URIs for a buffer | `{ bufnr, old_uri, new_uri, record_count, ids }` |
-| `ManiculeVisibility` | `:ManiculeToggle` flips the visibility flag | `{ hidden = <bool> }`              |
+## Extension Points
 
-## 9. Extension points
+Sinks are the stable extension point:
 
-- **Sinks** (primary, stable): register via `require("manicule").register_sink(spec)`.
-  A spec is `{ name, type?, label?, description?, send(comments, ctx, cb), format?, validate?, health?, clear_on_success? }`.
-  Opt in with `clear_on_success = true` to have the core auto-delete
-  every record in the batch after the sink's callback returns `ok = true`
-  (`ManiculeSent` fires first, then one `ManiculeDeleted` per record).
-  Built-ins are loaded by `manicule.sinks.setup`: `clipboard` is the
-  generic sink, and `cmux` is an auto-enabled integration when the user
-  is inside cmux. Community integrations should expose `setup(opts)`
-  and use `lua/manicule/sinks/helpers.lua` for shared formatting so
-  tests can exercise dispatch without real external services.
+```lua
+require("manicule").register_sink({
+  name = "tool",
+  label = "Tool",
+  clear_on_success = false,
+  validate = function(ctx) return true end,
+  send = function(comments, ctx, cb) cb(true) end,
+})
+```
 
-## 10. Test strategy
+Sinks should use `lua/manicule/sinks/helpers.lua` for shared formatting where
+possible. Tests should exercise sinks with local fakes, not real network calls.
 
-`make test` is the publishing gate. It runs `tests/minit.lua`, a direct
-`mini.test` harness that bootstraps `mini.test` into `.tests/`, collects
-all `tests/**/*_spec.lua` files, and executes them synchronously in
-headless Neovim. The runner does not load the user's config, does not
-depend on manual UI, and does not replace core Neovim APIs such as
-`vim.fs.root`, `vim.fs.normalize`, or `vim.system`.
+## Tests
 
-- Unit specs under `tests/manicule/` exercise module-level behavior:
-  adapter identity, URI reverse-map, store persistence, picker routing,
-  and sink selection.
-- Integration specs under `tests/integration/` exercise user workflows:
-  add → list → send, command dispatch, fake prompt input, fake sinks,
-  sink `clear_on_success`, render visibility, real floating-window
-  lifecycle, and `User Manicule*` events.
-- `make test-unit` and `make test-integration` keep the two layers
-  runnable independently when debugging failures.
+`make test` runs the headless `mini.test` harness. The suite uses ephemeral
+state directories and throwaway project roots with `.git` markers.
 
-Each helper setup creates one OS-temp artifact root containing both the
-state dir and a throwaway project with a `.git` marker, then deletes the
-whole tree during teardown. External integrations such as cmux should
-stay behind local sink specs or ephemeral fake CLIs in tests; the suite
-should not make network calls or depend on real external services. The
-core contract to validate is that manicule selects the right comments,
-passes the right context, emits the right events, and clears comments
-only when the sink declares that policy.
+- `tests/manicule/`: module-level behavior, store persistence, adapter identity,
+  picker routing, sink selection.
+- `tests/integration/`: real workflows with buffers, floating windows, quickfix,
+  render lifecycle, fake prompts, fake sinks, and lifecycle events.
 
-## 11. Non-goals (for now)
+The test policy is integration-first when behavior crosses Neovim surfaces.
+Mocks are avoided except for costly or external systems.
 
-- Multi-user / real-time sync.
-- Threading, replies, or reactions.
-- Remote brokers, hosted storage, or network sync.
-- A pluggable display-handler system. Rendering lives in
-  `ui/render.lua` and is opinionated around floating popups.
-- (Done — see UI layer above.) The floating-window comment editor has
-  replaced the v0 single-line `vim.ui.input` prompt.
-- Matching saved records by line text. v1 re-anchors by saved
-  row/col and lets `invalidate` flag orphans.
-- Multi-line comment prompts are now available via the floating
-  editor at `lua/manicule/ui/editor.lua` — the old note about
-  single-line-only has been resolved.
+## Non-Goals
+
+- Hosted storage or network sync.
+- Multi-user realtime collaboration.
+- Threads, replies, or reactions.
+- A pluggable render backend.
+- Fuzzy re-anchoring by line text.

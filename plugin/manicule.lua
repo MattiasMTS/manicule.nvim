@@ -74,6 +74,26 @@ vim.api.nvim_create_user_command("ManiculeToggle", function()
   require("manicule.ui.render").toggle()
 end, {})
 
+local function dispatch_jump(direction, opts)
+  local count = 1
+  if opts.args ~= nil and opts.args ~= "" then
+    count = tonumber(opts.args)
+    if not count or count ~= math.floor(count) or count < 1 then
+      vim.notify(("manicule: jump count must be a positive integer, got %q"):format(opts.args), vim.log.levels.ERROR)
+      return
+    end
+  end
+  require("manicule").jump(direction, { count = count })
+end
+
+vim.api.nvim_create_user_command("ManiculeNext", function(opts)
+  dispatch_jump("next", opts)
+end, { nargs = "?" })
+
+vim.api.nvim_create_user_command("ManiculePrev", function(opts)
+  dispatch_jump("prev", opts)
+end, { nargs = "?" })
+
 vim.keymap.set({ "n", "x" }, "<Plug>(manicule-add)", function()
   require("manicule").add()
 end, { silent = true })
@@ -81,6 +101,18 @@ end, { silent = true })
 vim.keymap.set("n", "<Plug>(manicule-list)", function()
   require("manicule").list()
 end, { silent = true })
+
+local function jump_next()
+  require("manicule").jump("next", { count = vim.v.count1 })
+end
+
+local function jump_prev()
+  require("manicule").jump("prev", { count = vim.v.count1 })
+end
+
+vim.keymap.set("n", "<Plug>(manicule-next)", jump_next, { silent = true })
+
+vim.keymap.set("n", "<Plug>(manicule-prev)", jump_prev, { silent = true })
 
 -- Edit the first comment at/covering the cursor.
 -- Manicule is buffer-agnostic, so we resolve the target record via the
@@ -122,5 +154,11 @@ if vim.g.manicule_no_default_keymaps ~= 1 then
   })
   vim.keymap.set("n", "gcd", "<Plug>(manicule-delete)", {
     desc = "Manicule: delete comment at cursor",
+  })
+  vim.keymap.set("n", "]m", jump_next, {
+    desc = "Manicule: next comment",
+  })
+  vim.keymap.set("n", "[m", jump_prev, {
+    desc = "Manicule: previous comment",
   })
 end

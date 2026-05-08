@@ -51,11 +51,11 @@ function M._collect()
   local store_dir = store_cfg.dir or ""
   local store_stat = store_dir ~= "" and uv.fs_stat(store_dir) or nil
   local store_writable, store_write_err = can_write_dir(store_dir)
-  local legacy_store_files = store_dir ~= ""
-      and glob_count(store_dir:gsub("/$", "") .. "/*." .. tostring(store_cfg.format))
+  local session_store_files = store_dir ~= ""
+      and glob_count(store_dir:gsub("/$", "") .. "/session." .. tostring(store_cfg.format))
     or 0
   local sqlite_store_files = store_dir ~= "" and glob_count(store_dir:gsub("/$", "") .. "/*.sqlite3") or 0
-  local backend_info = store.backend_info(store.root())
+  local sqlite_info = store.sqlite_info(store.root())
 
   local sink_names = sinks.list()
   local sink_health = {}
@@ -82,17 +82,16 @@ function M._collect()
       exists = store_stat ~= nil and store_stat.type == "directory",
       writable = store_writable,
       write_error = store_write_err,
-      backend = store_cfg.backend,
       format = store_cfg.format,
       poll_interval_ms = store_cfg.poll_interval_ms,
       schema_version = store.schema_version(),
       root_markers = store_cfg.root_markers or {},
       current_root = store.root(),
-      file_count = legacy_store_files,
+      session_file_count = session_store_files,
       sqlite_file_count = sqlite_store_files,
-      sqlite_available = backend_info.available,
-      sqlite_available_error = backend_info.available_error,
-      sqlite_journal_mode = backend_info.journal_mode,
+      sqlite_available = sqlite_info.available,
+      sqlite_available_error = sqlite_info.available_error,
+      sqlite_journal_mode = sqlite_info.journal_mode,
     },
     sinks = {
       names = sink_names,
@@ -141,7 +140,6 @@ function M.check()
 
   health.start("manicule store")
   health.info("store.dir: " .. tostring(snapshot.store.dir))
-  health.info("store.backend: " .. tostring(snapshot.store.backend))
   health.info("store.format: " .. tostring(snapshot.store.format))
   health.info("store.poll_interval_ms: " .. tostring(snapshot.store.poll_interval_ms))
   health.info("store.schema_version: " .. tostring(snapshot.store.schema_version))
@@ -167,23 +165,20 @@ function M.check()
   else
     health.info("current buffer has no project root")
   end
-  if snapshot.store.backend == "sqlite" then
-    if snapshot.store.sqlite_available then
-      health.ok("SQLite library is available")
-    else
-      health.error("SQLite library is unavailable: " .. tostring(snapshot.store.sqlite_available_error))
-    end
-    if snapshot.store.sqlite_journal_mode then
-      if snapshot.store.sqlite_journal_mode == "wal" then
-        health.ok("SQLite journal_mode: wal")
-      else
-        health.warn("SQLite journal_mode: " .. tostring(snapshot.store.sqlite_journal_mode))
-      end
-    end
-    health.info("SQLite project stores: " .. tostring(snapshot.store.sqlite_file_count))
+  if snapshot.store.sqlite_available then
+    health.ok("SQLite library is available")
   else
-    health.info("legacy project store files for current format: " .. tostring(snapshot.store.file_count))
+    health.error("SQLite library is unavailable: " .. tostring(snapshot.store.sqlite_available_error))
   end
+  if snapshot.store.sqlite_journal_mode then
+    if snapshot.store.sqlite_journal_mode == "wal" then
+      health.ok("SQLite journal_mode: wal")
+    else
+      health.warn("SQLite journal_mode: " .. tostring(snapshot.store.sqlite_journal_mode))
+    end
+  end
+  health.info("SQLite project stores: " .. tostring(snapshot.store.sqlite_file_count))
+  health.info("session store files: " .. tostring(snapshot.store.session_file_count))
 
   health.start("manicule sinks")
   health.info("registered sinks: " .. list_join(snapshot.sinks.names))
