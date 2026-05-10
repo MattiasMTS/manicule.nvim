@@ -42,6 +42,25 @@ local function wait_for_popup(text)
   return wins[1]
 end
 
+local function float_footer(winid)
+  local footer = vim.api.nvim_win_get_config(winid).footer
+  if type(footer) == "string" then
+    return footer
+  end
+  if type(footer) == "table" then
+    local parts = {}
+    for _, item in ipairs(footer) do
+      if type(item) == "string" then
+        table.insert(parts, item)
+      elseif type(item) == "table" and type(item[1]) == "string" then
+        table.insert(parts, item[1])
+      end
+    end
+    return table.concat(parts, "")
+  end
+  return ""
+end
+
 describe("manicule float transparency", function()
   before_each(function()
     setup_env({
@@ -88,6 +107,29 @@ describe("manicule float transparency", function()
     assert.is_true(editor.is_active())
     local winid = vim.api.nvim_get_current_win()
     assert.are.equal(50, vim.wo[winid].winblend)
+    assert.is_true(vim.wo[winid].wrap)
+    assert.is_false(vim.wo[winid].linebreak)
+    assert.are.equal("enter newline | normal enter submit | q close", float_footer(winid))
+
+    editor.close_active()
+    assert.is_true(vim.wait(1000, function()
+      return not editor.is_active()
+    end, 10))
+  end)
+
+  it("renders the editor footer from configured keys", function()
+    local editor = require("manicule.ui.editor")
+    local cfg = vim.tbl_deep_extend("force", vim.deepcopy(require("manicule.config").get().ui), {
+      submit_keys = { "<C-g>" },
+      cancel_keys = { "<Esc>" },
+    })
+
+    assert.is_true(editor.open({
+      title = "Comment",
+      cfg = cfg,
+    }, function() end))
+
+    assert.are.equal("ctrl+g submit | esc close", float_footer(vim.api.nvim_get_current_win()))
 
     editor.close_active()
     assert.is_true(vim.wait(1000, function()

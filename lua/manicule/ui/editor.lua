@@ -57,6 +57,30 @@ local function key_label(key)
   return tostring(key)
 end
 
+---@param key string?
+---@return boolean
+local function is_enter_key(key)
+  return key == "<CR>" or key == "<Enter>" or key == "<Return>"
+end
+
+---@param keys string[]?
+---@param fallback string
+---@return string
+local function first_key(keys, fallback)
+  return type(keys) == "table" and keys[1] or fallback
+end
+
+---@param cfg manicule.UIConfig
+---@return string
+local function footer_text(cfg)
+  local submit_hint = first_key(cfg.submit_keys, "<CR>")
+  local cancel_hint = first_key(cfg.cancel_keys, "<Esc>")
+  if cfg.editor_mode == "insert" and is_enter_key(submit_hint) then
+    return string.format("enter newline | normal %s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
+  end
+  return string.format("%s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
+end
+
 ---@param cfg manicule.UIConfig
 ---@param anchor_winid integer
 ---@return { width: integer, height: integer }
@@ -76,16 +100,16 @@ local function force_normal_mode()
   end
 end
 
----Editor wants wrap/linebreak on, which differs from the popup renderer
----defaults. We apply the shared options first, then flip the two knobs
----the editor cares about.
+---Apply editor window options. The editor hard-wraps at the float edge, but
+---keeps `linebreak` off so visual wrapping does not jump early to a word
+---boundary and make soft wraps look like manual newlines.
 ---@param winid integer
 ---@param winhighlight string
 local function apply_editor_win_options(winid, winhighlight)
   float.set_float_win_options(winid, winhighlight)
   if winid and vim.api.nvim_win_is_valid(winid) then
     vim.wo[winid].wrap = true
-    vim.wo[winid].linebreak = true
+    vim.wo[winid].linebreak = false
   end
 end
 
@@ -108,10 +132,6 @@ local function apply_editor_keymaps(bufnr, submit_keys, cancel_keys, submit_comm
       silent = true,
       nowait = true,
     })
-  end
-
-  local function is_enter_key(key)
-    return key == "<CR>" or key == "<Enter>" or key == "<Return>"
   end
 
   -- Insert-mode <CR> is intentionally left alone so multi-line editing uses
@@ -207,13 +227,8 @@ function M.open(opts, cb)
   end
   local layout = get_editor_layout(cfg, anchor_winid)
 
-  local submit_hint = cfg.submit_keys[1] or "<CR>"
-  local cancel_hint = cfg.cancel_keys[1] or "<Esc>"
   local title = string.format(" %s ", opts.title or "Comment")
-  local footer = cfg.editor_mode == "insert"
-      and submit_hint == "<CR>"
-      and string.format("enter newline | esc %s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
-    or string.format("%s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
+  local footer = footer_text(cfg)
 
   local previous_win = vim.api.nvim_get_current_win()
   local bufnr = float.create_scratch_buf({ filetype = "markdown" })
