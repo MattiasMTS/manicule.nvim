@@ -1,4 +1,4 @@
-*manicule.txt*          For Neovim >= 0.10.0          Last change: 2026 May 08
+*manicule.txt*          For Neovim >= 0.10.0          Last change: 2026 May 10
 
 ==============================================================================
 Table of Contents                                 *manicule-table-of-contents*
@@ -182,7 +182,6 @@ The session file schema is:
 >lua
     { version = 1, records = { ... } }
 <
-
 
 
 SINKS                                           *manicule-manicule.nvim-sinks*
