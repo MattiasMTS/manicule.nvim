@@ -125,7 +125,7 @@ function M.setup(opts)
   M.current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   -- tbl_deep_extend merges tables but we want user key-lists to *replace*,
   -- not merge, the defaults. Otherwise a user-supplied `submit_keys = {"<C-s>"}`
-  -- would stack on top of the default `{"<CR>"}`.
+  -- would stack on top of the default key aliases.
   if opts.ui then
     if opts.ui.submit_keys ~= nil then
       M.current.ui.submit_keys = opts.ui.submit_keys

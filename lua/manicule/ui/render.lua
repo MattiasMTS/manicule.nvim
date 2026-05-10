@@ -218,6 +218,74 @@ local function record_end_line(record)
   return nil
 end
 
+---@param a table
+---@param b table
+---@return boolean
+local function record_layout_less(a, b)
+  local al = record_start_line(a)
+  local bl = record_start_line(b)
+  if al ~= bl then
+    return al < bl
+  end
+  local ac = a.range and a.range.start and a.range.start[2] or 0
+  local bc = b.range and b.range.start and b.range.start[2] or 0
+  if ac ~= bc then
+    return ac < bc
+  end
+  local at = tonumber(a.created_at) or 0
+  local bt = tonumber(b.created_at) or 0
+  if at ~= bt then
+    return at < bt
+  end
+  return tostring(a.id or "") < tostring(b.id or "")
+end
+
+---@param a table
+---@param b table
+---@return boolean
+local function record_counter_less(a, b)
+  local au = tostring(a.uri or "")
+  local bu = tostring(b.uri or "")
+  if au ~= bu then
+    return au < bu
+  end
+  return record_layout_less(a, b)
+end
+
+---@param record table
+---@param candidate table
+---@return boolean
+local function same_counter_scope(record, candidate)
+  if record.scope == "project" or record.project_root then
+    return candidate.scope ~= "session"
+      and tostring(candidate.project_root or "") == tostring(record.project_root or "")
+  end
+  if record.scope == "session" then
+    return candidate.scope == "session"
+  end
+  return candidate.uri == record.uri
+end
+
+---@param record table
+---@param records table[]
+---@return integer index, integer total
+local function record_display_position(record, records)
+  local id = tostring(record.id or "")
+  local ordered = {}
+  for _, other in ipairs(records or {}) do
+    if same_counter_scope(record, other) then
+      table.insert(ordered, other)
+    end
+  end
+  table.sort(ordered, record_counter_less)
+  for index, other in ipairs(ordered) do
+    if tostring(other.id or "") == id then
+      return index, #ordered
+    end
+  end
+  return 1, math.max(1, #ordered)
+end
+
 -- ---------------------------------------------------------------------------
 -- Handle lifecycle
 -- ---------------------------------------------------------------------------
@@ -412,13 +480,19 @@ end
 ---@param record table
 ---@param handle manicule.ui.render.Handle
 ---@param records table[] Current record snapshot (used for stack offset)
+---@param counter_records? table[] Current project/session snapshot (used for title count)
+---@param layout? {winid?: integer, row?: integer, col_shift?: integer, index?: integer, total?: integer}
 ---@return boolean
-local function render_comment_popup(record, handle, records)
+local function render_comment_popup(record, handle, records, counter_records, layout)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
     return false
   end
+  layout = layout or {}
 
-  local anchor_win = find_window_for_buffer(handle.bufnr)
+  local anchor_win = layout.winid
+  if not anchor_win or not vim.api.nvim_win_is_valid(anchor_win) then
+    anchor_win = find_window_for_buffer(handle.bufnr)
+  end
   if not anchor_win then
     hide_popup(handle)
     return true
@@ -473,8 +547,7 @@ local function render_comment_popup(record, handle, records)
     end
     stack_offset = stack_offset + math.max(1, #split_lines(other.body)) + 2
   end
-  local stack_count = #stack
-
+  local display_index, display_total = record_display_position(record, counter_records or records)
   local popup_bufnr = handle.popup_bufnr
   if not popup_bufnr or not vim.api.nvim_buf_is_valid(popup_bufnr) then
     popup_bufnr = float.create_scratch_buf()
@@ -485,8 +558,8 @@ local function render_comment_popup(record, handle, records)
     relative = "win",
     win = anchor_win,
     bufpos = { my_line - 1, 0 },
-    row = stack_offset,
-    col = math.max(2, win_width - content_width - 6 - math.min((stack_index - 1) * 2, 12)),
+    row = layout.row or stack_offset,
+    col = math.max(2, win_width - content_width - 6 - (layout.col_shift or math.min((stack_index - 1) * 2, 12))),
     width = content_width,
     height = math.max(1, #display_lines),
     style = "minimal",
@@ -501,8 +574,7 @@ local function render_comment_popup(record, handle, records)
   float.apply_title_footer(
     win_config,
     border,
-    stack_count > 1 and string.format(" c%s %d/%d ", short_id(record.id), stack_index, stack_count)
-      or string.format(" c%s ", short_id(record.id)),
+    string.format(" c%s %d/%d ", short_id(record.id), display_index, display_total),
     "left",
     footer or nil,
     "left"
@@ -569,8 +641,9 @@ end
 ---@param bufnr integer
 ---@param record table
 ---@param records table[]
+---@param counter_records? table[]
 ---@param tab table<string, manicule.ui.render.Handle>
-local function reconcile_record(bufnr, record, records, tab)
+local function reconcile_record(bufnr, record, records, counter_records, tab)
   local id = tostring(record.id or "")
   if id == "" then
     return
@@ -615,11 +688,12 @@ local function reconcile_record(bufnr, record, records, tab)
     local rec = record
     local hdl = handle
     local snapshot = records
+    local counter_snapshot = counter_records
     vim.schedule(function()
       if not hdl.extmark_id or hdl.extmark_id == 0 then
         return
       end
-      render_comment_popup(rec, hdl, snapshot)
+      render_comment_popup(rec, hdl, snapshot, counter_snapshot)
     end)
   end
 end
@@ -654,7 +728,8 @@ end
 --- everything from the store snapshot.
 ---@param bufnr integer
 ---@param records table[]
-function M.reconcile(bufnr, records)
+---@param counter_records? table[]
+function M.reconcile(bufnr, records, counter_records)
   if hidden then
     return
   end
@@ -669,7 +744,7 @@ function M.reconcile(bufnr, records)
     local id = tostring(record.id or "")
     if id ~= "" then
       live[id] = true
-      reconcile_record(bufnr, record, records, tab)
+      reconcile_record(bufnr, record, records, counter_records, tab)
     end
   end
 
@@ -688,7 +763,8 @@ end
 --- autocmds that fire while visuals are suppressed don't re-paint.
 ---@param bufnr integer
 ---@param records table[]
-function M.update_viewport_popups(bufnr, records)
+---@param counter_records? table[]
+function M.update_viewport_popups(bufnr, records, counter_records)
   if hidden then
     return
   end
@@ -701,13 +777,54 @@ function M.update_viewport_popups(bufnr, records)
     return
   end
 
-  -- Collect visible ranges from every window currently showing this buffer.
+  -- Pick the window that should own this buffer's transient popups. The
+  -- renderer currently has one popup handle per record, so when a buffer is
+  -- visible in multiple windows we prefer the current window and otherwise
+  -- fall back to the first matching window.
   local ranges = {}
   for _, winid in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
       local top = vim.fn.line("w0", winid)
       local bot = vim.fn.line("w$", winid)
-      table.insert(ranges, { top = top, bot = bot })
+      table.insert(ranges, { winid = winid, top = top, bot = bot })
+    end
+  end
+  local active_range = ranges[1]
+  local current_win = vim.api.nvim_get_current_win()
+  for _, range in ipairs(ranges) do
+    if range.winid == current_win then
+      active_range = range
+      break
+    end
+  end
+
+  local layouts = {}
+  if active_range then
+    local visible = {}
+    for _, record in ipairs(records or {}) do
+      local line = record_start_line(record)
+      if line >= active_range.top and line <= active_range.bot then
+        table.insert(visible, record)
+      end
+    end
+    table.sort(visible, record_layout_less)
+
+    local next_top
+    for index, record in ipairs(visible) do
+      local body_height = math.max(1, #split_lines(record.body))
+      local popup_height = body_height + 2
+      local natural_top = record_start_line(record) - active_range.top
+      local row = 0
+      if next_top and natural_top < next_top then
+        row = next_top - natural_top
+      end
+      local top = natural_top + row
+      next_top = top + popup_height
+      layouts[tostring(record.id or "")] = {
+        winid = active_range.winid,
+        row = row,
+        col_shift = math.min((index - 1) * 2, 12),
+      }
     end
   end
 
@@ -715,19 +832,9 @@ function M.update_viewport_popups(bufnr, records)
     local id = tostring(record.id or "")
     local handle = tab[id]
     if handle then
-      local line = record_start_line(record)
-      local in_view = false
-      for _, r in ipairs(ranges) do
-        if line >= r.top and line <= r.bot then
-          in_view = true
-          break
-        end
-      end
-
-      if in_view then
-        if not handle.popup_winid or not vim.api.nvim_win_is_valid(handle.popup_winid) then
-          render_comment_popup(record, handle, records)
-        end
+      local layout = layouts[id]
+      if layout then
+        render_comment_popup(record, handle, records, counter_records, layout)
       else
         hide_popup(handle)
       end
@@ -918,8 +1025,9 @@ function M.show()
           store.load(identity.project_root)
         end
         local records = store.all_for_uri(identity.uri, identity.project_root)
-        M.reconcile(bufnr, records)
-        M.update_viewport_popups(bufnr, records)
+        local counter_records = identity.project_root and store.all(identity.project_root) or store.session_all()
+        M.reconcile(bufnr, records, counter_records)
+        M.update_viewport_popups(bufnr, records, counter_records)
       end
     end
   end

@@ -244,6 +244,7 @@ describe("manicule headless workflow", function()
     vim.bo[editor_bufnr].modifiable = true
     vim.api.nvim_buf_set_lines(editor_bufnr, 0, -1, false, { "edit from qf after" })
     vim.bo[editor_bufnr].modifiable = false
+    vim.cmd.stopinsert()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
 
     assert.is_true(vim.wait(1000, function()
@@ -260,6 +261,74 @@ describe("manicule headless workflow", function()
       local qf = vim.fn.getqflist()
       return #qf == 1 and qf[1].text:find("edit from qf after", 1, true) ~= nil
     end, 10))
+  end)
+
+  it("uses insert enter for newlines and normal enter for submitting the comment editor", function()
+    vim.cmd("runtime plugin/manicule.lua")
+
+    vim.cmd("ManiculeAdd")
+    assert.is_true(vim.wait(1000, function()
+      return require("manicule.ui.editor").is_active()
+    end, 10))
+    vim.cmd.stopinsert()
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("iline one<CR>line two", true, false, true), "mx", false)
+    assert.is_true(vim.wait(1000, function()
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, -1, false)
+      return lines[1] == "line one" and lines[2] == "line two"
+    end, 10))
+    assert.is_true(require("manicule.ui.editor").is_active())
+
+    vim.cmd.stopinsert()
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+    assert.is_true(vim.wait(1000, function()
+      return not require("manicule.ui.editor").is_active()
+    end, 10))
+
+    assert.is_true(vim.wait(1000, function()
+      return #require("manicule").list({ _quiet = true }) == 1
+    end, 10))
+    local records = require("manicule").list({ _quiet = true })
+    assert.are.equal(1, #records)
+    assert.are.equal("line one\nline two", records[1].body)
+  end)
+
+  it("keeps insert enter as newline when other plugins map enter", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local augroup = vim.api.nvim_create_augroup("ManiculeTestEditorEnterConflict", { clear = true })
+    vim.api.nvim_create_autocmd("InsertEnter", {
+      group = augroup,
+      once = true,
+      callback = function(args)
+        vim.keymap.set("i", "<CR>", function()
+          vim.g.manicule_test_conflicting_cr = true
+        end, { buffer = args.buf })
+      end,
+    })
+
+    vim.cmd("ManiculeAdd")
+    assert.is_true(vim.wait(1000, function()
+      local map = vim.fn.maparg("<CR>", "i", false, true)
+      return type(map) == "table" and map.rhs == "<CR>"
+    end, 10))
+    vim.cmd.stopinsert()
+    vim.api.nvim_feedkeys(
+      vim.api.nvim_replace_termcodes("iconflict first<CR>conflict second", true, false, true),
+      "mx",
+      false
+    )
+    assert.is_true(vim.wait(1000, function()
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, -1, false)
+      return lines[1] == "conflict first" and lines[2] == "conflict second"
+    end, 10))
+    assert.is_nil(vim.g.manicule_test_conflicting_cr)
+
+    vim.cmd.stopinsert()
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+    assert.is_true(vim.wait(1000, function()
+      return #require("manicule").list({ _quiet = true }) == 1
+    end, 10))
+    local records = require("manicule").list({ _quiet = true })
+    assert.are.equal("conflict first\nconflict second", records[1].body)
   end)
 
   it("keeps existing popups visible while the add editor is open", function()

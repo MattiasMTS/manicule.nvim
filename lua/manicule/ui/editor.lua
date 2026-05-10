@@ -96,23 +96,28 @@ end
 ---@param close_editor fun()
 local function apply_editor_keymaps(bufnr, submit_keys, cancel_keys, submit_comment, close_editor)
   local seen = {}
-  local function map_key(mode, key, cb, group)
+  local function map_key(mode, key, rhs, group)
     local map_id = string.format("%s:%s:%s", group, mode, key)
     if seen[map_id] then
       return
     end
     seen[map_id] = true
-    vim.keymap.set(mode, key, cb, {
+    vim.keymap.set(mode, key, rhs, {
       buffer = bufnr,
       noremap = true,
       silent = true,
       nowait = true,
     })
   end
-  -- Bind both normal and insert mode so submit works regardless of
-  -- editor_mode. Without an insert-mode binding, <CR> in an insert-mode
-  -- editor just inserts a newline — the user's "add flow does nothing"
-  -- report from v0.
+
+  local function is_enter_key(key)
+    return key == "<CR>" or key == "<Enter>" or key == "<Return>"
+  end
+
+  -- Insert-mode <CR> is intentionally left alone so multi-line editing uses
+  -- Neovim's native newline behavior. We still install a buffer-local insert
+  -- mapping for it because buffer-local mappings beat global completion maps.
+  -- The default submit key is normal-mode <CR>: press <Esc>, then <CR>.
   local function insert_submit()
     pcall(vim.cmd, "stopinsert")
     submit_comment()
@@ -124,7 +129,11 @@ local function apply_editor_keymaps(bufnr, submit_keys, cancel_keys, submit_comm
   for _, key in ipairs(submit_keys) do
     if type(key) == "string" and key ~= "" then
       map_key("n", key, submit_comment, "submit")
-      map_key("i", key, insert_submit, "submit")
+      if is_enter_key(key) then
+        map_key("i", key, "<CR>", "newline")
+      else
+        map_key("i", key, insert_submit, "submit")
+      end
     end
   end
   for _, key in ipairs(cancel_keys) do
@@ -201,10 +210,18 @@ function M.open(opts, cb)
   local submit_hint = cfg.submit_keys[1] or "<CR>"
   local cancel_hint = cfg.cancel_keys[1] or "<Esc>"
   local title = string.format(" %s ", opts.title or "Comment")
-  local footer = string.format("%s close | %s submit", key_label(cancel_hint), key_label(submit_hint))
+  local footer = cfg.editor_mode == "insert"
+      and submit_hint == "<CR>"
+      and string.format("enter newline | esc %s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
+    or string.format("%s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
 
   local previous_win = vim.api.nvim_get_current_win()
   local bufnr = float.create_scratch_buf({ filetype = "markdown" })
+  pcall(function()
+    if vim.lsp and vim.lsp.inline_completion then
+      vim.lsp.inline_completion.enable(false, { bufnr = bufnr })
+    end
+  end)
 
   local border = "rounded"
   local win_config = {
@@ -312,7 +329,26 @@ function M.open(opts, cb)
     finish(text)
   end
 
-  apply_editor_keymaps(bufnr, cfg.submit_keys, cfg.cancel_keys, submit_comment, close_editor)
+  local function install_keymaps()
+    apply_editor_keymaps(bufnr, cfg.submit_keys, cfg.cancel_keys, submit_comment, close_editor)
+  end
+
+  local function schedule_install_keymaps()
+    vim.schedule(function()
+      if not closed and vim.api.nvim_buf_is_valid(bufnr) then
+        install_keymaps()
+      end
+    end)
+  end
+
+  install_keymaps()
+  vim.api.nvim_create_autocmd("InsertEnter", {
+    buffer = bufnr,
+    callback = function()
+      install_keymaps()
+      schedule_install_keymaps()
+    end,
+  })
 
   if cfg.editor_mode == "insert" and not has_default then
     vim.cmd("startinsert")
@@ -322,6 +358,8 @@ function M.open(opts, cb)
     vim.cmd("startinsert")
     move_cursor_to_end(winid, opts.default)
   end
+
+  schedule_install_keymaps()
 
   active_editor = {
     id = editor_id,

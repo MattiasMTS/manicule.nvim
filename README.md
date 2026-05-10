@@ -71,8 +71,9 @@ records to loaded buffers.
 :ManiculeSend [sink]   " send comments to a sink
 ```
 
-`:ManiculeAdd` opens a small markdown buffer. Write the comment, press `<CR>` in
-normal mode to submit, or `q` to cancel.
+`:ManiculeAdd` opens a small markdown buffer in insert mode. Press `<CR>` to
+insert a newline, `<Esc>` then `<CR>` to submit, or `q` in normal mode to
+cancel.
 
 Default keymaps:
 

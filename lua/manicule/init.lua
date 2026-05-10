@@ -154,6 +154,28 @@ local function records_for_buffer(bufnr)
   return store.all_for_uri(identity.uri, identity.project_root)
 end
 
+---Return the records used for popup title counters. Project comments are
+---numbered across the whole project, not just the current file; session
+---comments are numbered across the session store.
+---@param bufnr integer
+---@return table[]
+local function counter_records_for_buffer(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return {}
+  end
+  local store = require("manicule.store")
+  local adapter = require("manicule.adapter")
+  local identity = adapter.identify(bufnr)
+  if not identity or not identity.uri or identity.diff_side == "reference" then
+    return {}
+  end
+  if identity.project_root then
+    store.load(identity.project_root)
+    return store.all(identity.project_root)
+  end
+  return store.session_all()
+end
+
 local refresh_viewport
 
 ---Run reconcile for every buffer that already has an entry in `buffer_to_path`
@@ -177,7 +199,7 @@ local function reconcile_buffer(bufnr)
   -- contexts), so we cannot short-circuit on "no root".
   store.session_load()
   local records = records_for_buffer(bufnr)
-  require("manicule.ui.render").reconcile(bufnr, records)
+  require("manicule.ui.render").reconcile(bufnr, records, counter_records_for_buffer(bufnr))
 
   -- For each attached record whose extmark came back invalid, emit a
   -- ManiculeOrphaned event. We resolve via the anchor module so the
@@ -204,7 +226,7 @@ local function reconcile_all_loaded()
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
       local records = records_for_buffer(bufnr)
-      render.reconcile(bufnr, records)
+      render.reconcile(bufnr, records, counter_records_for_buffer(bufnr))
     end
   end
 end
@@ -288,7 +310,7 @@ function refresh_viewport(bufnr)
     return
   end
   local records = records_for_buffer(bufnr)
-  require("manicule.ui.render").update_viewport_popups(bufnr, records)
+  require("manicule.ui.render").update_viewport_popups(bufnr, records, counter_records_for_buffer(bufnr))
 end
 
 ---Copy live extmark positions back into their records. Extmarks are the
