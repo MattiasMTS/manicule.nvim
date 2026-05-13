@@ -15,7 +15,6 @@ local agent_surface_cache = {}
 
 local function defaults()
   return {
-    enabled = "auto",
     command = vim.env.CMUX_BUNDLED_CLI_PATH or "cmux",
     workspace_id = vim.env.CMUX_WORKSPACE_ID,
     current_surface = vim.env.CMUX_SURFACE_ID,
@@ -34,9 +33,7 @@ end
 
 local function normalize_opts(opts)
   opts = vim.tbl_deep_extend("force", defaults(), opts or {})
-  if opts.enabled ~= nil then
-    opts.enabled = nil
-  end
+  opts.enabled = nil
   return opts
 end
 
@@ -544,7 +541,7 @@ function M.list_agent_surfaces(opts)
     end
   end
 
-  if #matches == 0 and opts.screen_fallback ~= false then
+  if #screen_candidates > 0 and opts.screen_fallback ~= false then
     local screens = read_surface_screens(opts, screen_candidates)
     for _, surface in ipairs(screen_candidates) do
       local screen_agent = detect_agent_from_screen(screens[surface])
@@ -572,7 +569,7 @@ function M.list_agent_surfaces(opts)
   return finish(matches, nil)
 end
 
----Whether cmux integration should auto-register.
+---Whether cmux integration can be used in the current environment.
 ---@param opts? table
 ---@return boolean
 function M.is_available(opts)

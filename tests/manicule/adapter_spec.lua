@@ -111,6 +111,34 @@ describe("manicule.adapter temp detection", function()
     assert.are.equal(uri_mod.for_bufnr(bufnr), id.uri)
   end)
 
+  it("maps codediff virtual buffers to the project file identity", function()
+    local rel = "infra/terraform-gcp-core/sherlog.tf"
+    local real = tmp_root .. "/" .. rel
+    vim.fn.mkdir(vim.fn.fnamemodify(real, ":h"), "p")
+    vim.fn.writefile({ "resource x", "resource y" }, real)
+
+    local codediff_url = ("codediff:///%s///fedfddb447cd91e8042810ce517e84c6701f55f0/%s"):format(tmp_root, rel)
+    vim.cmd.enew()
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_name(bufnr, codediff_url)
+    vim.bo[bufnr].buftype = "nowrite"
+
+    local id, err = adapter.identify(bufnr)
+    assert.is_nil(err)
+    assert.is_truthy(id)
+    assert.are.equal("project", id.scope)
+    assert.is_true(id.is_writable)
+    assert.are.equal(vim.fs.normalize(tmp_root), vim.fs.normalize(id.project_root))
+    assert.are.equal(uri_mod.for_path(real), id.uri)
+
+    require("manicule").add({ body = "codediff note", range = { start = { 1, 0 }, end_ = { 1, 0 } } })
+    local records = require("manicule.store").all(vim.fs.normalize(tmp_root))
+    assert.are.equal(1, #records)
+    local text = require("manicule.sinks.helpers").format_markdown_review(records)
+    assert.is_truthy(text:find("## " .. rel .. ":2", 1, true))
+    assert.is_nil(text:find("codediff:", 1, true))
+  end)
+
   it("identify returns writable session identity for an unnamed buffer", function()
     vim.cmd.enew()
     local bufnr = vim.api.nvim_get_current_buf()

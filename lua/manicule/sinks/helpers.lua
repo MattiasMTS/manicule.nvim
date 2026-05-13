@@ -34,30 +34,34 @@ local function relpath(root, path)
   return nil
 end
 
-local function file_uri_to_path(uri)
-  if type(uri) ~= "string" or uri:sub(1, 7) ~= "file://" then
+local function uri_to_path(uri)
+  local ok, uri_mod = pcall(require, "manicule.uri")
+  if not ok then
     return nil
   end
-  local path = uri:sub(8)
-  if path:sub(1, 1) ~= "/" then
-    local slash = path:find("/", 1, true)
-    if not slash then
-      return nil
-    end
-    path = path:sub(slash)
+  return uri_mod.to_path(uri)
+end
+
+local function inferred_root(comment)
+  if comment.project_root then
+    return comment.project_root
   end
-  return (path:gsub("%%(%x%x)", function(hex)
-    return string.char(tonumber(hex, 16))
-  end))
+  local ok, uri_mod = pcall(require, "manicule.uri")
+  if not ok then
+    return nil
+  end
+  local parts = uri_mod.codediff_parts(comment.uri)
+  return parts and parts.git_root or nil
 end
 
 ---Return an absolute or project-relative path for a comment.
 ---@param comment table
 ---@return string
 function M.display_path(comment)
-  local abs = file_uri_to_path(comment.uri)
-  if abs and comment.project_root then
-    local rel = relpath(comment.project_root, abs)
+  local abs = uri_to_path(comment.uri)
+  local root = inferred_root(comment)
+  if abs and root then
+    local rel = relpath(root, abs)
     if rel then
       return rel
     end

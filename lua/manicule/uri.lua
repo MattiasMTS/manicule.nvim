@@ -180,6 +180,49 @@ local function scheme_of(name)
   return name:match("^([a-zA-Z][%w+.-]*):")
 end
 
+---Parse a codediff.nvim virtual file URL.
+---
+---codediff creates buffers named like:
+---  codediff:///<git-root>///<revision>/<project-relative-path>
+---
+---The URL is intentionally fugitive-like but not percent-encoded. We
+---treat it as a view of `<git-root>/<path>` so comments added from a
+---CodeDiff buffer share identity with the working-tree file and sinks
+---do not leak the virtual scheme in review payloads.
+---@param value string?
+---@return {git_root:string, revision:string, path:string}?
+function M.codediff_parts(value)
+  if type(value) ~= "string" or value == "" then
+    return nil
+  end
+  local git_root, revision, path = value:match("^codediff:///(.-)///([^/]+)/(.+)$")
+  if not git_root or git_root == "" or not revision or revision == "" or not path or path == "" then
+    return nil
+  end
+  git_root = vim.fs.normalize((git_root:gsub("\\", "/"):gsub("/+$", "")))
+  path = path:gsub("\\", "/"):gsub("^/+", "")
+  if git_root == "" or path == "" then
+    return nil
+  end
+  return {
+    git_root = git_root,
+    revision = revision,
+    path = path,
+  }
+end
+
+---Resolve a codediff.nvim virtual URL to the project file path it
+---represents, or nil for non-CodeDiff URIs.
+---@param value string?
+---@return string?
+function M.codediff_path(value)
+  local parts = M.codediff_parts(value)
+  if not parts then
+    return nil
+  end
+  return vim.fs.normalize(parts.git_root .. "/" .. parts.path)
+end
+
 ---Return the canonical URI for a buffer, as `manicule` stores it.
 ---For file-backed buffers with a readable path, resolves symlinks via
 ---`vim.uv.fs_realpath` before encoding; non-file URIs (term://, etc.)
@@ -249,12 +292,16 @@ function M.for_path(path)
   return vim.uri_from_fname(abs)
 end
 
----Extract a filesystem path from a URI, or nil if the URI isn't file://.
+---Extract a filesystem path from a file:// or supported virtual-file URI.
 ---@param uri string
 ---@return string?
 function M.to_path(uri)
   if type(uri) ~= "string" or uri == "" then
     return nil
+  end
+  local codediff_path = M.codediff_path(uri)
+  if codediff_path then
+    return codediff_path
   end
   if not M.is_file(uri) then
     return nil

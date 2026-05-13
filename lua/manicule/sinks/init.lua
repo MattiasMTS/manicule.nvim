@@ -14,25 +14,41 @@ local builtin_integrations = {
 }
 
 local builtin_defaults = {
-  clipboard = true,
-  cmux = "auto",
+  clipboard = {
+    enabled = true,
+  },
+  cmux = {
+    enabled = true,
+  },
 }
-
-local function normalize_enabled(value, default)
-  if value == nil then
-    return default
-  end
-  if type(value) == "table" and value.enabled ~= nil then
-    return value.enabled
-  end
-  return value
-end
 
 local function integration_opts(value)
   if type(value) == "table" then
     return value
   end
   return {}
+end
+
+local function normalize_integration(value, default)
+  default = default or {}
+  local opts = integration_opts(value)
+  local enabled = default.enabled
+
+  if value == nil then
+    return enabled, opts
+  end
+  if type(value) == "boolean" then
+    return value, opts
+  end
+
+  if type(value) == "table" then
+    if value.enabled ~= nil then
+      enabled = value.enabled
+    end
+    return enabled, opts
+  end
+
+  return value, opts
 end
 
 local function load_spec(module_name, opts)
@@ -80,9 +96,8 @@ end
 ---Register all bundled sinks/integrations according to config.
 ---
 ---`sinks.clipboard` defaults to true.
----`sinks.cmux` defaults to "auto": register only inside a cmux workspace
----with a usable cmux executable. Set `sinks.cmux = true` or
----`sinks.cmux = { enabled = true }` to force it into the picker.
+---`sinks.cmux` defaults to `{ enabled = true }`: register when a cmux
+---workspace and usable cmux executable are available.
 ---@param cfg table|nil
 function M.setup(cfg)
   cfg = cfg or {}
@@ -90,11 +105,10 @@ function M.setup(cfg)
     sinks[name] = nil
   end
   for name, module_name in pairs(builtin_integrations) do
-    local enabled = normalize_enabled(cfg[name], builtin_defaults[name])
-    local opts = integration_opts(cfg[name])
-    if enabled == "auto" then
-      local mod = require(module_name)
-      enabled = type(mod.is_available) == "function" and mod.is_available(opts) or false
+    local enabled, opts = normalize_integration(cfg[name], builtin_defaults[name])
+    local mod = require(module_name)
+    if enabled and type(mod.is_available) == "function" then
+      enabled = mod.is_available(opts)
     end
     if enabled then
       M.register(load_spec(module_name, opts))

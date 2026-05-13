@@ -77,6 +77,33 @@ local function root_for_bufnr(bufnr, markers)
   return vim.fs.root(abs, markers)
 end
 
+---@param bufnr integer
+---@param markers string[]
+---@return {uri:string, path:string, project_root:string?, revision:string?}?
+local function codediff_identity(bufnr, markers)
+  local uri_mod = require("manicule.uri")
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  local parts = uri_mod.codediff_parts(name)
+  if not parts then
+    return nil
+  end
+
+  local path = uri_mod.codediff_path(name)
+  if not path then
+    return nil
+  end
+  local mapped_uri = uri_mod.for_path(path)
+  local mapped_path = uri_mod.to_path(mapped_uri) or path
+  local root = vim.fs.root(mapped_path, markers) or parts.git_root
+
+  return {
+    uri = mapped_uri,
+    path = mapped_path,
+    project_root = root,
+    revision = parts.revision,
+  }
+end
+
 ---Attempt to reverse-map a buffer path that looks like an
 ---nvim-runtime staged copy back to a real, on-disk file inside the
 ---current project / cwd / HOME.
@@ -164,6 +191,11 @@ end
 ---@return string?
 function M._resolve_uri_for_bufnr(bufnr)
   local uri_mod = require("manicule.uri")
+  local config = require("manicule.config")
+  local codediff = codediff_identity(bufnr, config.current.store.root_markers)
+  if codediff then
+    return codediff.uri
+  end
   local abs = bufname_abs(bufnr)
   if abs and uri_mod.is_nvim_runtime_staged_path(abs) then
     local mapped = reverse_map_temp_path(abs)
@@ -372,6 +404,17 @@ function M.identify(bufnr)
       is_writable = false,
       diff_side = nil,
       reject_reason = "command-line window doesn't accept comments",
+    }
+  end
+
+  local codediff = codediff_identity(bufnr, config.current.store.root_markers)
+  if codediff then
+    return {
+      uri = codediff.uri,
+      scope = codediff.project_root and "project" or "session",
+      project_root = codediff.project_root,
+      is_writable = true,
+      diff_side = nil,
     }
   end
 

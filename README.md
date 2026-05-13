@@ -121,7 +121,9 @@ require("manicule").setup({
   },
   sinks = {
     clipboard = true,
-    cmux = "auto",
+    cmux = {
+      enabled = true,
+    },
   },
   ui = {
     width = 72,
@@ -168,6 +170,9 @@ Built-ins:
 - `clipboard` copies formatted comments to the `+` register.
 - `cmux` sends a markdown review to a cmux coding-agent surface and clears
   comments after a successful handoff.
+
+`cmux.enabled` is boolean. When enabled, the integration registers only when a
+cmux workspace and usable cmux executable are available.
 
 Register a custom sink:
 

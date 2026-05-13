@@ -25,7 +25,7 @@ local M = {}
 
 ---@class manicule.SinksConfig
 ---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
----@field cmux boolean|"auto"|table Enable the bundled cmux integration ("auto" by default).
+---@field cmux boolean|table Enable the bundled cmux integration (defaults to `{ enabled = true }`).
 
 ---@type manicule.Config
 M.defaults = {
@@ -56,8 +56,8 @@ M.defaults = {
   },
   sinks = {
     -- `clipboard = false` disables the generic clipboard sink.
-    -- `cmux = true` forces the cmux integration into the picker.
-    -- `cmux = "auto"` (default) registers it only inside cmux.
+    -- `cmux.enabled = false` disables the bundled cmux integration.
+    -- When enabled, cmux registers only when the integration is available.
   },
   -- Floating editor + popup UI options.
   ui = {
