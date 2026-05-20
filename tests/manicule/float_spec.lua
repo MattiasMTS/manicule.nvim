@@ -117,6 +117,41 @@ describe("manicule float transparency", function()
     end, 10))
   end)
 
+  it("does not hard-wrap inserted editor text from markdown textwidth hooks", function()
+    local editor = require("manicule.ui.editor")
+    local group = vim.api.nvim_create_augroup("ManiculeTestMarkdownTextwidth", { clear = true })
+    vim.api.nvim_create_autocmd("FileType", {
+      group = group,
+      pattern = "markdown",
+      callback = function(args)
+        vim.bo[args.buf].textwidth = 12
+        vim.bo[args.buf].formatoptions = vim.bo[args.buf].formatoptions .. "t"
+      end,
+    })
+
+    assert.is_true(editor.open({
+      title = "Comment",
+      cfg = require("manicule.config").get().ui,
+    }, function() end))
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    assert.are.equal(0, vim.bo[bufnr].textwidth)
+    assert.are.equal(0, vim.bo[bufnr].wrapmargin)
+
+    vim.cmd.stopinsert()
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ione two three four five", true, false, true), "mx", false)
+    assert.is_true(vim.wait(1000, function()
+      local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      return #lines == 1 and lines[1] == "one two three four five"
+    end, 10))
+
+    editor.close_active()
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+    assert.is_true(vim.wait(1000, function()
+      return not editor.is_active()
+    end, 10))
+  end)
+
   it("renders the editor footer from configured keys", function()
     local editor = require("manicule.ui.editor")
     local cfg = vim.tbl_deep_extend("force", vim.deepcopy(require("manicule.config").get().ui), {

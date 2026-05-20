@@ -114,6 +114,19 @@ local function apply_editor_win_options(winid, winhighlight)
 end
 
 ---@param bufnr integer
+local function apply_editor_buf_options(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  -- The editor should visually wrap only. Since it is a markdown buffer,
+  -- user ftplugins can set textwidth/wrapmargin and make insert-mode typing
+  -- hard-wrap into real newlines. Clear those after FileType hooks ran.
+  vim.bo[bufnr].textwidth = 0
+  vim.bo[bufnr].wrapmargin = 0
+end
+
+---@param bufnr integer
 ---@param submit_keys string[]
 ---@param cancel_keys string[]
 ---@param submit_comment fun()
@@ -232,6 +245,7 @@ function M.open(opts, cb)
 
   local previous_win = vim.api.nvim_get_current_win()
   local bufnr = float.create_scratch_buf({ filetype = "markdown" })
+  apply_editor_buf_options(bufnr)
   pcall(function()
     if vim.lsp and vim.lsp.inline_completion then
       vim.lsp.inline_completion.enable(false, { bufnr = bufnr })
