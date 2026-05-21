@@ -582,7 +582,17 @@ local function send_text(opts, surface, text)
   if not ref or ref == "" then
     return false, "cmux target has no surface ref"
   end
-  local result = helpers.system({ cli(opts), "send", "--surface", ref, "--", text })
+  local result
+  if tostring(text or ""):find("\n", 1, true) then
+    local buffer_name = "manicule-" .. tostring((vim.uv or vim.loop).hrtime())
+    local set_result = helpers.system({ cli(opts), "set-buffer", "--name", buffer_name, "--", text })
+    if set_result.code ~= 0 then
+      return false, set_result.stderr:gsub("%s+$", "")
+    end
+    result = helpers.system({ cli(opts), "paste-buffer", "--name", buffer_name, "--surface", ref })
+  else
+    result = helpers.system({ cli(opts), "send", "--surface", ref, "--", text })
+  end
   if result.code ~= 0 then
     return false, result.stderr:gsub("%s+$", "")
   end
