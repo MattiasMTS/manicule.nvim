@@ -135,7 +135,7 @@ describe("manicule.adapter temp detection", function()
     local records = require("manicule.store").all(vim.fs.normalize(tmp_root))
     assert.are.equal(1, #records)
     local text = require("manicule.sinks.helpers").format_markdown_review(records)
-    assert.is_truthy(text:find("## " .. rel .. ":2", 1, true))
+    assert.is_truthy(text:find("## M1 " .. rel .. ":2", 1, true))
     assert.is_nil(text:find("codediff:", 1, true))
   end)
 

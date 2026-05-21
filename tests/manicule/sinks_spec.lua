@@ -27,11 +27,18 @@ describe("manicule sink helpers", function()
       uri = "file://" .. path,
     }
 
-    local text = require("manicule.sinks.helpers").format_markdown_review({ record })
+    local text = require("manicule.sinks.helpers").format_markdown_review({
+      record,
+    }, {
+      pre_text = "Before comments",
+      post_text = "After comments",
+    })
 
     assert.is_truthy(text:find("Manicule review (1 comment):", 1, true))
-    assert.is_truthy(text:find("## src/sinks.lua:1-2", 1, true))
+    assert.is_truthy(text:find("Before comments", 1, true))
+    assert.is_truthy(text:find("## M1 src/sinks.lua:1-2", 1, true))
     assert.is_truthy(text:find("first line\nsecond line", 1, true))
+    assert.is_truthy(text:find("After comments", 1, true))
   end)
 
   it("formats raw codediff URIs as project-relative paths", function()
@@ -45,7 +52,7 @@ describe("manicule sink helpers", function()
 
     local text = require("manicule.sinks.helpers").format_markdown_review({ comment })
 
-    assert.is_truthy(text:find("## infra/terraform-gcp-core/sherlog.tf:2", 1, true))
+    assert.is_truthy(text:find("## M1 infra/terraform-gcp-core/sherlog.tf:2", 1, true))
     assert.is_nil(text:find("codediff:", 1, true))
   end)
 
@@ -53,11 +60,16 @@ describe("manicule sink helpers", function()
     require("manicule.sinks")._reset()
     local bin = H.fake_cmux(ctx)
     require("manicule.sinks").setup({
-      clipboard = true,
+      clipboard = {
+        pre_text = "clipboard header",
+        post_text = "clipboard footer",
+      },
       cmux = {
         enabled = true,
         command = bin,
         workspace_id = "workspace-1",
+        pre_text = "cmux header",
+        post_text = "cmux footer",
       },
     })
 
@@ -65,6 +77,63 @@ describe("manicule sink helpers", function()
     assert.are.same({ "clipboard", "cmux" }, names)
     assert.are.equal("sink", require("manicule.sinks").get("clipboard").type)
     assert.are.equal("integration", require("manicule.sinks").get("cmux").type)
+    assert.is_false(require("manicule.sinks").get("cmux").clear_on_success)
+    assert.are.equal("clipboard header", require("manicule.sinks").get("clipboard").pre_text)
+    assert.are.equal("clipboard footer", require("manicule.sinks").get("clipboard").post_text)
+    assert.are.equal("cmux header", require("manicule.sinks").get("cmux").pre_text)
+    assert.are.equal("cmux footer", require("manicule.sinks").get("cmux").post_text)
+  end)
+
+  it("wraps clipboard sink output with configured pre and post text", function()
+    local path = H.write_project_file(ctx, "src/clip.lua", {
+      "return true",
+    })
+    local record = {
+      body = "clipboard note",
+      project_root = ctx.root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      uri = "file://" .. path,
+    }
+    local sink = require("manicule.sinks.clipboard").setup({
+      pre_text = "Review starts",
+      post_text = "Review ends",
+    })
+
+    sink.send({ record }, {}, function() end)
+
+    assert.are.equal("Review starts\n\nsrc/clip.lua:1: clipboard note\n\nReview ends", vim.fn.getreg("+"))
+  end)
+
+  it("can paste a cmux review without auto-submitting", function()
+    local bin, log = H.fake_cmux(ctx)
+    local path = H.write_project_file(ctx, "src/manual.lua", {
+      "return true",
+    })
+    local comment = {
+      body = "manual submit note",
+      project_root = ctx.root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      uri = "file://" .. path,
+    }
+    local sink = require("manicule.sinks.cmux").setup({
+      command = bin,
+      workspace_id = "workspace-1",
+      auto_submit = false,
+      cache = false,
+      agent_state_dir = ctx.state,
+    })
+
+    local sent
+    sink.send({ comment }, { surface = "surface:2" }, function(ok, err)
+      sent = { ok = ok, err = err }
+    end)
+
+    local log_text = table.concat(vim.fn.readfile(log), "\n")
+    assert.is_true(sent.ok)
+    assert.is_nil(sent.err)
+    assert.is_truthy(log_text:find("paste%-buffer\tsurface:2\tmanicule%-", 1, false))
+    assert.is_truthy(log_text:find("manual submit note", 1, true))
+    assert.is_nil(log_text:find("key\tsurface:2\tenter", 1, true))
   end)
 
   it("keeps enabled cmux disabled when unavailable", function()

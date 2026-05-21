@@ -14,6 +14,32 @@ local function split_lines(text)
   return lines
 end
 
+local function text_block(value)
+  if type(value) ~= "string" then
+    return nil
+  end
+  local text = vim.trim(value)
+  return text ~= "" and text or nil
+end
+
+local function append_block(parts, text)
+  text = text_block(text)
+  if not text then
+    return
+  end
+  for _, line in ipairs(split_lines(text)) do
+    table.insert(parts, line)
+  end
+  table.insert(parts, "")
+end
+
+local function join_blocks(parts)
+  while #parts > 0 and parts[#parts] == "" do
+    table.remove(parts)
+  end
+  return table.concat(parts, "\n")
+end
+
 local function normalize_path(path)
   return tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("/$", "")
 end
@@ -90,7 +116,7 @@ end
 
 ---Format comments as a markdown review payload suitable for agents.
 ---@param comments table[]
----@param opts? {title?: string}
+---@param opts? {title?: string, pre_text?: string, post_text?: string}
 ---@return string
 function M.format_markdown_review(comments, opts)
   opts = opts or {}
@@ -99,14 +125,29 @@ function M.format_markdown_review(comments, opts)
     ("%s (%d comment%s):"):format(title, #comments, #comments == 1 and "" or "s"),
     "",
   }
-  for _, comment in ipairs(comments) do
-    table.insert(parts, ("## %s"):format(M.location(comment)))
+  append_block(parts, opts.pre_text)
+  for index, comment in ipairs(comments) do
+    table.insert(parts, ("## M%d %s"):format(index, M.location(comment)))
     for _, line in ipairs(split_lines(comment.body)) do
       table.insert(parts, line)
     end
     table.insert(parts, "")
   end
-  return table.concat(parts, "\n")
+  append_block(parts, opts.post_text)
+  return join_blocks(parts)
+end
+
+---Wrap an already formatted text payload with optional sink pre/post text.
+---@param text string
+---@param opts? {pre_text?: string, post_text?: string}
+---@return string
+function M.wrap_text(text, opts)
+  opts = opts or {}
+  local parts = {}
+  append_block(parts, opts.pre_text)
+  append_block(parts, text)
+  append_block(parts, opts.post_text)
+  return join_blocks(parts)
 end
 
 ---Format one comment as a compact single line.

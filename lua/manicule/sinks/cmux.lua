@@ -20,7 +20,8 @@ local function defaults()
     current_surface = vim.env.CMUX_SURFACE_ID,
     patterns = DEFAULT_PATTERNS,
     auto_submit = true,
-    clear_on_success = true,
+    submit_delay_ms = 0,
+    clear_on_success = false,
     cache = true,
     cache_ttl_ms = DEFAULT_CACHE_TTL_MS,
     process_fallback = true,
@@ -28,6 +29,8 @@ local function defaults()
     read_screen_lines = 120,
     agent_state_dir = vim.env.TMPDIR or "/tmp",
     picker_prompt = "cmux: send review to",
+    pre_text = nil,
+    post_text = nil,
   }
 end
 
@@ -577,6 +580,16 @@ function M.is_available(opts)
   return opts.workspace_id ~= nil and opts.workspace_id ~= "" and helpers.executable(cli(opts))
 end
 
+local function sleep_ms(ms)
+  ms = tonumber(ms) or 0
+  if ms <= 0 then
+    return
+  end
+  vim.wait(ms, function()
+    return false
+  end, math.max(1, math.min(ms, 50)), false)
+end
+
 local function send_text(opts, surface, text)
   local ref = surface_ref(surface)
   if not ref or ref == "" then
@@ -597,6 +610,7 @@ local function send_text(opts, surface, text)
     return false, result.stderr:gsub("%s+$", "")
   end
   if opts.auto_submit ~= false then
+    sleep_ms(opts.submit_delay_ms)
     local key_result = helpers.system({ cli(opts), "send-key", "--surface", ref, "enter" })
     if key_result.code ~= 0 then
       return false, "text landed but submit failed; press Enter in the cmux pane manually"
@@ -639,6 +653,8 @@ function M.setup(opts)
     label = "cmux agent",
     description = "send review to a running cmux coding agent",
     clear_on_success = opts.clear_on_success ~= false,
+    pre_text = opts.pre_text,
+    post_text = opts.post_text,
     format = helpers.format_line,
     validate = function(ctx)
       if ctx_surface(ctx) then
@@ -662,7 +678,7 @@ function M.setup(opts)
     end,
     send = function(comments, ctx, cb)
       local target = ctx_surface(ctx)
-      local text = helpers.format_markdown_review(comments)
+      local text = helpers.format_markdown_review(comments, opts)
       if target then
         local ok, err = send_text(opts, target, text)
         cb(ok, err)

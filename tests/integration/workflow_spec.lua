@@ -580,6 +580,8 @@ describe("manicule headless workflow", function()
       process_fallback = false,
       agent_state_dir = ctx.state,
       clear_on_success = true,
+      pre_text = "Custom review rules",
+      post_text = "Report back with the M IDs you handled.",
     }))
     local events, stop_capture = H.capture_events({ "ManiculeAdded", "ManiculeSent", "ManiculeDeleted" })
 
@@ -600,8 +602,12 @@ describe("manicule headless workflow", function()
     assert.is_truthy(log_text:find("set%-buffer\tmanicule%-", 1, false))
     assert.is_truthy(log_text:find("paste%-buffer\tsurface:2\tmanicule%-", 1, false))
     assert.is_truthy(log_text:find("Manicule review (1 comment):", 1, true))
+    assert.is_truthy(log_text:find("Custom review rules", 1, true))
+    assert.is_truthy(log_text:find("## M1", 1, true))
     assert.is_truthy(log_text:find("send this to the agent", 1, true))
+    assert.is_truthy(log_text:find("Report back with the M IDs you handled.", 1, true))
     assert.is_nil(log_text:find("send\tsurface:2", 1, true))
+    assert.is_truthy(log_text:find("key\tsurface:2\tenter", 1, true))
 
     assert.are.equal("ManiculeAdded", events[1].pattern)
     assert.are.equal(records[1].id, events[1].data.id)

@@ -233,6 +233,8 @@ Sinks are the stable extension point:
 require("manicule").register_sink({
   name = "tool",
   label = "Tool",
+  pre_text = "Optional text before formatted comments.",
+  post_text = "Optional text after formatted comments.",
   clear_on_success = false,
   validate = function(ctx) return true end,
   send = function(comments, ctx, cb) cb(true) end,
@@ -240,7 +242,8 @@ require("manicule").register_sink({
 ```
 
 Sinks should use `lua/manicule/sinks/helpers.lua` for shared formatting where
-possible. Tests should exercise sinks with local fakes, not real network calls.
+possible, including the optional `pre_text` and `post_text` wrappers for text
+payloads. Tests should exercise sinks with local fakes, not real network calls.
 
 ## Tests
 

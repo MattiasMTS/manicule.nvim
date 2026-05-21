@@ -63,13 +63,15 @@ local function load_spec(module_name, opts)
 end
 
 ---Register a sink adapter.
----@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean}
+---@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, pre_text?: string, post_text?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean}
 ---
 ---Spec fields:
 ---  name              string     unique sink identifier
 ---  type              string?    "sink" (default) or "integration"
 ---  label             string?    display name for pickers / health
 ---  description       string?    picker hint / documentation
+---  pre_text          string?    text prepended to text payloads by bundled sinks
+---  post_text         string?    text appended to text payloads by bundled sinks
 ---  send              function   function(comments, ctx, cb) — cb(ok: boolean, err: string?)
 ---  format            function?  per-record formatter
 ---  validate          function?  gate the dispatch; return false, err to reject
@@ -84,6 +86,8 @@ function M.register(spec)
     type = { spec.type, "string", true },
     label = { spec.label, "string", true },
     description = { spec.description, "string", true },
+    pre_text = { spec.pre_text, "string", true },
+    post_text = { spec.post_text, "string", true },
     format = { spec.format, "function", true },
     validate = { spec.validate, "function", true },
     health = { spec.health, "function", true },

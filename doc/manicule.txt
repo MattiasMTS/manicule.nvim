@@ -147,6 +147,11 @@ All keys are optional.
         clipboard = true,
         cmux = {
           enabled = true,
+          auto_submit = true, -- set false to paste and wait for manual Enter
+          submit_delay_ms = 0, -- increase if large pasted prompts need a beat before Enter
+          clear_on_success = false, -- keep comments until you verify and resolve them
+          pre_text = "Optional instructions inserted before the comments.",
+          post_text = "Optional follow-up instructions inserted after the comments.",
         },
       },
       ui = {
@@ -193,11 +198,23 @@ Sinks receive comment batches from `:ManiculeSend`.
 Built-ins:
 
 - `clipboard` copies formatted comments to the `+` register.
-- `cmux` sends a markdown review to a cmux coding-agent surface and clears
-    comments after a successful handoff.
+- `cmux` sends a markdown review batch to a cmux coding-agent surface and keeps
+    comments in Manicule by default so you can verify fixes before resolving
+    them.
 
 `cmux.enabled` is boolean. When enabled, the integration registers only when a
 cmux workspace and usable cmux executable are available.
+`cmux.auto_submit` controls whether Manicule presses Enter after pasting the
+review into the agent prompt. Set it to `false` if you want to inspect or edit
+the prompt manually before submission. `cmux.submit_delay_ms` adds a delay
+before that Enter key; values around 100-250ms can help large pasted prompts
+settle before submission.
+Set `cmux.clear_on_success = true` if you want a successful cmux handoff to
+delete the sent comments immediately.
+The bundled text sinks, currently `clipboard` and `cmux`, also accept
+`pre_text` and `post_text` strings. These are inserted before and after the
+formatted comments while Manicule still owns comment IDs and file/range
+formatting.
 
 Register a custom sink:
 
@@ -205,6 +222,8 @@ Register a custom sink:
     require("manicule").register_sink({
       name = "mytool",
       label = "My Tool",
+      pre_text = "Optional text before formatted comments.",
+      post_text = "Optional text after formatted comments.",
       clear_on_success = false,
       validate = function(ctx)
         if not ctx.token then

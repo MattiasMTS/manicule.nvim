@@ -25,7 +25,7 @@ local M = {}
 
 ---@class manicule.SinksConfig
 ---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
----@field cmux boolean|table Enable the bundled cmux integration (defaults to `{ enabled = true }`).
+---@field cmux boolean|table Enable the bundled cmux integration (defaults to `{ enabled = true }`). Built-in text sinks accept optional `pre_text` and `post_text` strings. cmux also accepts `auto_submit` and `submit_delay_ms`.
 
 ---@type manicule.Config
 M.defaults = {
