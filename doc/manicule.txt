@@ -1,4 +1,4 @@
-*manicule.txt*          For Neovim >= 0.10.0          Last change: 2026 May 21
+*manicule.txt*          For Neovim >= 0.10.0          Last change: 2026 May 23
 
 ==============================================================================
 Table of Contents                                 *manicule-table-of-contents*
