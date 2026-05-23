@@ -85,6 +85,13 @@ describe("manicule sink helpers", function()
   end)
 
   it("wraps clipboard sink output with configured pre and post text", function()
+    local copied_reg, copied
+    local old_setreg = vim.fn.setreg
+    vim.fn.setreg = function(reg, value, ...)
+      copied_reg = reg
+      copied = value
+      return old_setreg("", value, ...)
+    end
     local path = H.write_project_file(ctx, "src/clip.lua", {
       "return true",
     })
@@ -99,9 +106,15 @@ describe("manicule sink helpers", function()
       post_text = "Review ends",
     })
 
-    sink.send({ record }, {}, function() end)
-
-    assert.are.equal("Review starts\n\nsrc/clip.lua:1: clipboard note\n\nReview ends", vim.fn.getreg("+"))
+    local ok, err = pcall(function()
+      sink.send({ record }, {}, function() end)
+    end)
+    vim.fn.setreg = old_setreg
+    if not ok then
+      error(err)
+    end
+    assert.are.equal("+", copied_reg)
+    assert.are.equal("Review starts\n\nsrc/clip.lua:1: clipboard note\n\nReview ends", copied)
   end)
 
   it("can paste a cmux review without auto-submitting", function()
