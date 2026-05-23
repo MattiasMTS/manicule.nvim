@@ -302,18 +302,19 @@ function M.open(opts, cb)
   local closed = false
   local result_sent = false
 
-  local function finish(body)
+  local function finish(body, restore_focus)
     if result_sent then
       return
     end
     result_sent = true
+    restore_focus = restore_focus ~= false
 
     vim.schedule(function()
       force_normal_mode()
       if vim.api.nvim_win_is_valid(winid) then
         pcall(vim.api.nvim_win_close, winid, true)
       end
-      if vim.api.nvim_win_is_valid(previous_win) then
+      if restore_focus and vim.api.nvim_win_is_valid(previous_win) then
         pcall(vim.api.nvim_set_current_win, previous_win)
       end
       force_normal_mode()
@@ -325,17 +326,18 @@ function M.open(opts, cb)
     end)
   end
 
-  local function close_editor()
+  local function close_editor(opts)
     if closed then
       return
     end
+    opts = type(opts) == "table" and opts or {}
     closed = true
 
     if active_editor and active_editor.id == editor_id then
       active_editor = nil
     end
 
-    finish(nil)
+    finish(nil, opts.restore_focus)
   end
 
   local function submit_comment()
@@ -362,6 +364,13 @@ function M.open(opts, cb)
     apply_editor_keymaps(bufnr, cfg.submit_keys, cfg.cancel_keys, submit_comment, close_editor)
   end
 
+  active_editor = {
+    id = editor_id,
+    winid = winid,
+    bufnr = bufnr,
+    close = close_editor,
+  }
+
   local function schedule_install_keymaps()
     vim.schedule(function()
       if not closed and vim.api.nvim_buf_is_valid(bufnr) then
@@ -378,6 +387,15 @@ function M.open(opts, cb)
       schedule_install_keymaps()
     end,
   })
+  vim.api.nvim_create_autocmd("WinLeave", {
+    buffer = bufnr,
+    once = true,
+    callback = function()
+      if not closed then
+        close_editor({ restore_focus = false })
+      end
+    end,
+  })
 
   if cfg.editor_mode == "insert" and not has_default then
     vim.cmd("startinsert")
@@ -389,13 +407,6 @@ function M.open(opts, cb)
   end
 
   schedule_install_keymaps()
-
-  active_editor = {
-    id = editor_id,
-    winid = winid,
-    bufnr = bufnr,
-    close = close_editor,
-  }
 
   return true
 end

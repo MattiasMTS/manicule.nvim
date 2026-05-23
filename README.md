@@ -73,7 +73,8 @@ records to loaded buffers.
 
 `:ManiculeAdd` opens a small markdown buffer in insert mode. Press `<CR>` to
 insert a newline, `<Esc>` then `<CR>` to submit, or `q` in normal mode to
-cancel.
+cancel. Moving focus out of the floating editor, including clicking back into
+the main buffer, also cancels and discards the draft.
 
 Default keymaps:
 
