@@ -125,7 +125,9 @@ require("manicule").setup({
     cmux = {
       enabled = true,
       auto_submit = true, -- set false to paste and wait for manual Enter
-      submit_delay_ms = 0, -- increase if large pasted prompts need a beat before Enter
+      submit_delay_ms = 120, -- delay before Enter, lets a large paste settle first
+      paste_chunk_bytes = 1024, -- max bytes per paste chunk (large reviews are split to avoid PTY truncation)
+      paste_chunk_delay_ms = 80, -- delay between paste chunks so the agent's terminal can drain
       clear_on_success = false, -- keep comments until you verify and resolve them
       pre_text = "Optional instructions inserted before the comments.",
       post_text = "Optional follow-up instructions inserted after the comments.",
@@ -182,8 +184,12 @@ cmux workspace and usable cmux executable are available.
 `cmux.auto_submit` controls whether Manicule presses Enter after pasting the
 review into the agent prompt. Set it to `false` if you want to inspect or edit
 the prompt manually before submission. `cmux.submit_delay_ms` adds a delay
-before that Enter key; values around 100-250ms can help large pasted prompts
-settle before submission.
+before that Enter key (default 120ms); values around 100-250ms can help large
+pasted prompts settle before submission.
+Large reviews are automatically split into chunks (`cmux.paste_chunk_bytes`,
+default 1024) with a short delay between them (`cmux.paste_chunk_delay_ms`,
+default 80ms) to avoid the receiving terminal dropping the middle of the
+payload.
 Set `cmux.clear_on_success = true` if you want a successful cmux handoff to
 delete the sent comments immediately.
 The bundled text sinks, currently `clipboard` and `cmux`, also accept

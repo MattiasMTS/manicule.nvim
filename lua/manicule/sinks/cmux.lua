@@ -20,7 +20,9 @@ local function defaults()
     current_surface = vim.env.CMUX_SURFACE_ID,
     patterns = DEFAULT_PATTERNS,
     auto_submit = true,
-    submit_delay_ms = 0,
+    submit_delay_ms = 120,
+    paste_chunk_bytes = 1024,
+    paste_chunk_delay_ms = 80,
     clear_on_success = false,
     cache = true,
     cache_ttl_ms = DEFAULT_CACHE_TTL_MS,
@@ -590,6 +592,57 @@ local function sleep_ms(ms)
   end, math.max(1, math.min(ms, 50)), false)
 end
 
+-- Split text into segments that each keep their trailing newline, so the
+-- segments concatenate back to the exact original bytes.
+local function split_keep_newlines(text)
+  local out = {}
+  local pos, n = 1, #text
+  while pos <= n do
+    local nl = text:find("\n", pos, true)
+    if nl then
+      table.insert(out, text:sub(pos, nl)) -- include the newline
+      pos = nl + 1
+    else
+      table.insert(out, text:sub(pos))
+      pos = n + 1
+    end
+  end
+  return out
+end
+
+-- Chunk text into byte-bounded pieces, preferring line boundaries. A single
+-- line longer than max_bytes is split by bytes. Concatenating the returned
+-- chunks in order reproduces the original text byte-for-byte.
+local function chunk_text(text, max_bytes)
+  max_bytes = math.max(1, math.floor(tonumber(max_bytes) or 1024))
+  local chunks, buf, buf_len = {}, {}, 0
+  local function flush()
+    if buf_len > 0 then
+      table.insert(chunks, table.concat(buf))
+      buf, buf_len = {}, 0
+    end
+  end
+  for _, seg in ipairs(split_keep_newlines(text)) do
+    if #seg > max_bytes then
+      flush()
+      local i = 1
+      while i <= #seg do
+        table.insert(chunks, seg:sub(i, i + max_bytes - 1))
+        i = i + max_bytes
+      end
+    elseif buf_len + #seg > max_bytes then
+      flush()
+      table.insert(buf, seg)
+      buf_len = #seg
+    else
+      table.insert(buf, seg)
+      buf_len = buf_len + #seg
+    end
+  end
+  flush()
+  return chunks
+end
+
 local function send_text(opts, surface, text)
   local ref = surface_ref(surface)
   if not ref or ref == "" then
@@ -597,12 +650,23 @@ local function send_text(opts, surface, text)
   end
   local result
   if tostring(text or ""):find("\n", 1, true) then
-    local buffer_name = "manicule-" .. tostring((vim.uv or vim.loop).hrtime())
-    local set_result = helpers.system({ cli(opts), "set-buffer", "--name", buffer_name, "--", text })
-    if set_result.code ~= 0 then
-      return false, set_result.stderr:gsub("%s+$", "")
+    local chunks = chunk_text(text, opts.paste_chunk_bytes)
+    local stamp = string.format("%d", (vim.uv or vim.loop).hrtime())
+    for idx, chunk in ipairs(chunks) do
+      local buffer_name = "manicule-" .. stamp .. "-" .. idx
+      local set_result = helpers.system({ cli(opts), "set-buffer", "--name", buffer_name, "--", chunk })
+      if set_result.code ~= 0 then
+        return false, set_result.stderr:gsub("%s+$", "")
+      end
+      local paste_result = helpers.system({ cli(opts), "paste-buffer", "--name", buffer_name, "--surface", ref })
+      if paste_result.code ~= 0 then
+        return false, paste_result.stderr:gsub("%s+$", "")
+      end
+      if idx < #chunks then
+        sleep_ms(opts.paste_chunk_delay_ms)
+      end
     end
-    result = helpers.system({ cli(opts), "paste-buffer", "--name", buffer_name, "--surface", ref })
+    result = { code = 0, stdout = "", stderr = "" }
   else
     result = helpers.system({ cli(opts), "send", "--surface", ref, "--", text })
   end

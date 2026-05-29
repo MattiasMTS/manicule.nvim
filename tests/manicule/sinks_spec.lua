@@ -149,6 +149,105 @@ describe("manicule sink helpers", function()
     assert.is_nil(log_text:find("key\tsurface:2\tenter", 1, true))
   end)
 
+  it("chunks a large multiline cmux review into byte-exact pieces", function()
+    local bin, log = H.fake_cmux(ctx)
+
+    -- Build a large multi-line payload (> 4KB, many lines) so the sink must
+    -- split it across several paste-buffer chunks.
+    local lines = {}
+    for i = 1, 200 do
+      table.insert(lines, ("M%d some-file.lua:%d: this is review comment number %d"):format(i, i, i))
+    end
+    local payload = table.concat(lines, "\n")
+    assert.is_true(#payload > 4096)
+
+    local chunk_bytes = 1024
+    local sink = require("manicule.sinks.cmux").setup({
+      command = bin,
+      workspace_id = "workspace-1",
+      cache = false,
+      agent_state_dir = ctx.state,
+      paste_chunk_bytes = chunk_bytes,
+      paste_chunk_delay_ms = 0,
+      submit_delay_ms = 0,
+    })
+
+    -- Drive send_text through the public sink by passing a record whose
+    -- formatted markdown body is our large payload, then send directly.
+    local record = {
+      body = payload,
+      project_root = ctx.root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      uri = "file://" .. ctx.root .. "/big.lua",
+    }
+
+    local sent
+    sink.send({ record }, { surface = "surface:2" }, function(ok, err)
+      sent = { ok = ok, err = err }
+    end)
+
+    assert.is_true(sent.ok)
+    assert.is_nil(sent.err)
+
+    -- The exact text the sink formatted and sent to the agent.
+    local expected = require("manicule.sinks.helpers").format_markdown_review({ record }, {})
+    assert.is_truthy(expected:find(payload, 1, true))
+
+    -- Read raw log bytes. The fake-cmux command logs are not safe to split on
+    -- newlines (chunk payloads embed their own newlines), so count CLI
+    -- invocations by scanning the raw bytes for each command token.
+    local function read_bytes(path)
+      local fh = assert(io.open(path, "rb"))
+      local data = fh:read("*a") or ""
+      fh:close()
+      return data
+    end
+    local function count_occurrences(haystack, needle)
+      local count, pos = 0, 1
+      while true do
+        local s = haystack:find(needle, pos, true)
+        if not s then
+          break
+        end
+        count = count + 1
+        pos = s + 1
+      end
+      return count
+    end
+
+    local raw_log = read_bytes(log)
+    local set_count = count_occurrences(raw_log, "set-buffer\t")
+    local paste_count = count_occurrences(raw_log, "paste-buffer\tsurface:2\t")
+
+    -- Chunking happened: multiple set-buffer + paste-buffer pairs.
+    assert.is_true(set_count > 1, "expected more than one chunk, got " .. tostring(set_count))
+    assert.are.equal(set_count, paste_count)
+
+    -- The sink never falls back to `cmux send` for the multiline payload.
+    assert.is_nil(raw_log:find("\nsend\tsurface:2", 1, true))
+    assert.is_nil(raw_log:find("^send\tsurface:2"))
+
+    -- Each chunk is persisted to its own byte-exact buffer file named
+    -- manicule-<stamp>-<idx>. Order by the numeric idx suffix and verify
+    -- byte-exact reassembly + the per-chunk byte bound.
+    local buffer_files = vim.fn.glob(log .. ".buffer.*", false, true)
+    assert.are.equal(set_count, #buffer_files)
+    table.sort(buffer_files, function(a, b)
+      return (tonumber(a:match("%-(%d+)$")) or 0) < (tonumber(b:match("%-(%d+)$")) or 0)
+    end)
+
+    local reassembled = {}
+    for _, file in ipairs(buffer_files) do
+      local chunk = read_bytes(file)
+      assert.is_true(#chunk <= chunk_bytes, ("chunk %s is %d bytes (> %d)"):format(file, #chunk, chunk_bytes))
+      table.insert(reassembled, chunk)
+    end
+    assert.are.equal(expected, table.concat(reassembled))
+
+    -- Exactly one Enter keypress at the end (auto_submit default).
+    assert.are.equal(1, count_occurrences(raw_log, "key\tsurface:2\tenter"))
+  end)
+
   it("keeps enabled cmux disabled when unavailable", function()
     require("manicule.sinks")._reset()
     require("manicule.sinks").setup({
