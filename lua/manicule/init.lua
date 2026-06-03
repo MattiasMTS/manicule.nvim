@@ -15,6 +15,7 @@
 --   ManiculeAdded     record
 --   ManiculeEdited    record
 --   ManiculeDeleted   { id, record }
+--   ManiculeRestored  record (the restored snapshot)
 --   ManiculeResolved  record (with resolved=true)
 --   ManiculeSent      { sink, count, ok, err }
 --   ManiculeSynced    { roots }
@@ -29,6 +30,10 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 local sync_timer
+
+local delete_undo_stack = {} -- LIFO stack of pre-delete record snapshots
+local delete_redo_stack = {} -- LIFO stack of undone deletions (redo branch)
+local DELETE_UNDO_MAX = 100 -- bound both stacks to avoid unbounded memory
 
 -- Per-buffer "a viewport refresh is already scheduled" flag. A single
 -- user action fires several viewport autocmds (WinScrolled + CursorMoved
@@ -798,6 +803,7 @@ function M.setup(opts)
       "ManiculeOrphaned",
       "ManiculeRenamed",
       "ManiculeSynced",
+      "ManiculeRestored",
     },
     callback = function()
       -- Defer so a burst of events coalesces and we don't mutate the
@@ -1203,8 +1209,69 @@ function M.delete(id, opts)
     notify_save_failed("deleted comment", err)
     return
   end
+  -- Push the pre-delete snapshot so `undo_delete` can restore it. The
+  -- stack is LIFO; trim from the front when it exceeds the bound.
+  table.insert(delete_undo_stack, snapshot)
+  if #delete_undo_stack > DELETE_UNDO_MAX then
+    table.remove(delete_undo_stack, 1)
+  end
+  -- A fresh deletion invalidates the redo branch, mirroring Vim's
+  -- undo-tree: a new edit discards any redo history.
+  delete_redo_stack = {}
   refresh_all_loaded()
   emit("ManiculeDeleted", { id = id, record = record })
+end
+
+---Restore the most recently deleted comment. Multi-level: call
+---repeatedly to undo successive deletions in LIFO order.
+function M.undo_delete()
+  local snapshot = table.remove(delete_undo_stack)
+  if not snapshot then
+    vim.notify("manicule: nothing to undo", vim.log.levels.INFO)
+    return
+  end
+  local ok, err = require("manicule.store").restore_record(snapshot)
+  if not ok then
+    table.insert(delete_undo_stack, snapshot) -- keep it for a retry
+    notify_save_failed("restored comment", err)
+    return
+  end
+  -- Restoring moves the snapshot onto the redo branch so `redo_delete`
+  -- can re-apply it. LIFO; trim from the front at the bound.
+  table.insert(delete_redo_stack, snapshot)
+  if #delete_redo_stack > DELETE_UNDO_MAX then
+    table.remove(delete_redo_stack, 1)
+  end
+  refresh_all_loaded()
+  emit("ManiculeRestored", snapshot)
+end
+
+---Re-apply the most recently undone deletion (redo). Multi-level:
+---call repeatedly to redo successive undos in LIFO order. A fresh
+---`M.delete` clears the redo stack, matching Vim's undo-tree behavior.
+function M.redo_delete()
+  local snapshot = table.remove(delete_redo_stack)
+  if not snapshot then
+    vim.notify("manicule: nothing to redo", vim.log.levels.INFO)
+    return
+  end
+  local record, _, remove = find(snapshot.id, { scope = snapshot.scope, project_root = snapshot.project_root })
+  if not record or not remove then
+    vim.notify("manicule: cannot redo deletion (comment not found)", vim.log.levels.WARN)
+    return
+  end
+  local ok, err = remove()
+  if not ok then
+    table.insert(delete_redo_stack, snapshot) -- keep it for a retry
+    notify_save_failed("deleted comment", err)
+    return
+  end
+  table.insert(delete_undo_stack, snapshot)
+  if #delete_undo_stack > DELETE_UNDO_MAX then
+    table.remove(delete_undo_stack, 1)
+  end
+  refresh_all_loaded()
+  emit("ManiculeDeleted", { id = snapshot.id, record = record })
 end
 
 ---Mark a comment as resolved.

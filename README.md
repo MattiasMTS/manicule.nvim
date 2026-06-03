@@ -101,9 +101,11 @@ vim.keymap.set("n", "[c", "<Plug>(manicule-prev)")
 - `<CR>` jumps to the anchored location.
 - `dd` deletes the comment under the cursor.
 - `ce` edits the comment under the cursor.
+- `u` undoes the last comment deletion (multi-level; repeat to undo more).
+- `<C-r>` redoes the last undone deletion (multi-level; a new deletion clears the redo branch).
 
-The list refreshes in place when comments are added, edited, deleted, or
-resolved.
+The list refreshes in place when comments are added, edited, deleted,
+restored, or resolved.
 
 ## Configuration
 
@@ -236,8 +238,8 @@ vim.api.nvim_create_autocmd("User", {
 ```
 
 Events: `ManiculeAdded`, `ManiculeEdited`, `ManiculeDeleted`,
-`ManiculeResolved`, `ManiculeSent`, `ManiculeSynced`, `ManiculeOrphaned`,
-`ManiculeRenamed`, and `ManiculeVisibility`.
+`ManiculeRestored`, `ManiculeResolved`, `ManiculeSent`, `ManiculeSynced`,
+`ManiculeOrphaned`, `ManiculeRenamed`, and `ManiculeVisibility`.
 
 ## Notes
 

@@ -534,6 +534,24 @@ function M.load(root)
   return records
 end
 
+---Refresh a cache entry from the on-disk SQLite state after a write.
+---@param entry table cache[root] entry
+---@param db table
+---@param root string
+---@return boolean ok, string? err
+local function refresh_cache_entry(entry, db, root)
+  local fresh_records, read_err = sqlite_read_records(db, root)
+  if read_err then
+    return false, read_err
+  end
+  entry.records = fresh_records
+  entry.base_by_id = by_id(fresh_records)
+  entry.removed = {}
+  entry.last_seen_event_id = sqlite_last_event_id(db, root)
+  entry.dirty = false
+  return true
+end
+
 ---Persist the cache entry for `root` if dirty.
 ---@param root string|nil
 ---@return boolean ok, string? err
@@ -625,16 +643,7 @@ function M.save(root)
   if not ok then
     return false, err
   end
-  local fresh_records, read_err = sqlite_read_records(db, root)
-  if read_err then
-    return false, read_err
-  end
-  entry.records = fresh_records
-  entry.base_by_id = by_id(fresh_records)
-  entry.removed = {}
-  entry.last_seen_event_id = sqlite_last_event_id(db, root)
-  entry.dirty = false
-  return true
+  return refresh_cache_entry(entry, db, root)
 end
 
 ---Return all cached records for `root` (loads on first access).
@@ -944,6 +953,54 @@ function M.put_record(record)
   end
   -- Default / project: require an explicit root on the record.
   M.put(record.project_root, record)
+end
+
+---Restore a previously-deleted record from a snapshot. Session records
+---are re-inserted into the JSON cache and saved. Project records are
+---soft-deleted via a SQLite tombstone (`deleted_at`), so a plain
+---`put_record` + `save` won't bring them back — `M.save` deliberately
+---refuses to resurrect a tombstoned row. We therefore clear the
+---tombstone directly by upserting the record with `deleted_at = NULL`
+---inside a transaction, alongside a `comment_restored` event for the
+---audit log, then refresh the cache entry from disk.
+---@param record table A previously-deleted record snapshot (must have id; project records must carry project_root).
+---@return boolean ok, string? err
+function M.restore_record(record)
+  if record.scope == "session" then
+    M.session_put(vim.deepcopy(record))
+    return M.session_save()
+  end
+  -- Project scope: clear the SQLite tombstone in place.
+  local root = record.project_root
+  if not root then
+    return false, "restore_record: missing project_root"
+  end
+  -- Ensure a cache entry exists before we refresh it post-transaction.
+  M.all(root)
+  local entry = cache[root]
+  local db, db_err = sqlite_db(root)
+  if not db then
+    return false, db_err
+  end
+  local ok, err = db:transaction(function()
+    local now = os.time()
+    local event_ok, event_err =
+      sqlite_insert_event(db, root, record.id, "comment_restored", { record = record, restored_at = now }, now)
+    if not event_ok then
+      return false, event_err
+    end
+    -- No deleted_at argument → writes deleted_at = NULL, un-tombstoning.
+    local upsert_ok, upsert_err = sqlite_upsert_record(db, root, record)
+    if not upsert_ok then
+      return false, upsert_err
+    end
+    return true
+  end)
+  if not ok then
+    return false, err
+  end
+  -- `M.all(root)` populated `cache[root]`, so `entry` is non-nil here.
+  return refresh_cache_entry(entry, db, root)
 end
 
 ---Dispatch a `remove` by scope. For project-scope, `scope_or_root` may

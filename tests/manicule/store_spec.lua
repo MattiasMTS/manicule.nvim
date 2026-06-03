@@ -393,4 +393,91 @@ describe("manicule.store session scope", function()
     store._reset()
     assert.are.equal(0, #store.session_all())
   end)
+
+  it("restore_record un-tombstones a soft-deleted project record on disk", function()
+    local store = require("manicule.store")
+    local record = {
+      id = "del1",
+      uri = "file://" .. tmp_root .. "/d.lua",
+      scope = "project",
+      project_root = tmp_root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "to delete",
+      author = "",
+      created_at = 1,
+      updated_at = 1,
+      resolved = false,
+      meta = {},
+    }
+    store.put(tmp_root, record)
+    assert.is_true(store.save(tmp_root))
+    assert.are.equal(1, #store.all(tmp_root))
+
+    -- Soft-delete: writes a tombstone row (deleted_at) to SQLite.
+    local snapshot = vim.deepcopy(record)
+    assert.is_truthy(store.remove(tmp_root, "del1"))
+    assert.is_true(store.save(tmp_root))
+    assert.are.equal(0, #store.all(tmp_root))
+
+    -- Restore clears the tombstone in place.
+    local ok, err = store.restore_record(snapshot)
+    assert.is_true(ok)
+    assert.is_nil(err)
+
+    local restored = store.all(tmp_root)
+    assert.are.equal(1, #restored)
+    assert.are.equal("del1", restored[1].id)
+    assert.are.equal("to delete", restored[1].body)
+
+    -- A fresh client reading the same SQLite db must also see it — i.e.
+    -- the tombstone was truly cleared on disk, not just in memory.
+    local fresh = new_store_client()
+    local fresh_records = fresh.load(tmp_root)
+    assert.are.equal(1, #fresh_records)
+    assert.are.equal("del1", fresh_records[1].id)
+  end)
+
+  it("restore_record on a missing project_root returns an error", function()
+    local store = require("manicule.store")
+    local ok, err = store.restore_record({ id = "x", scope = "project" })
+    assert.is_false(ok)
+    assert.is_truthy(err)
+  end)
+
+  it("restore_record brings a removed session record back and survives reload", function()
+    local store = require("manicule.store")
+    local record = {
+      id = "sdel",
+      uri = "term://s/1",
+      scope = "session",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "session to delete",
+      author = "",
+      created_at = 0,
+      updated_at = 0,
+      resolved = false,
+      meta = {},
+    }
+    store.session_put(record)
+    assert.is_true(store.session_save())
+    assert.are.equal(1, #store.session_all())
+
+    local snapshot = vim.deepcopy(record)
+    assert.is_truthy(store.session_remove("sdel"))
+    assert.is_true(store.session_save())
+    assert.are.equal(0, #store.session_all())
+
+    local ok, err = store.restore_record(snapshot)
+    assert.is_true(ok)
+    assert.is_nil(err)
+    assert.are.equal(1, #store.session_all())
+    assert.are.equal("sdel", store.session_all()[1].id)
+
+    -- Survives a reload from disk.
+    store._reset()
+    local reloaded = store.session_all()
+    assert.are.equal(1, #reloaded)
+    assert.are.equal("sdel", reloaded[1].id)
+    assert.are.equal("session to delete", reloaded[1].body)
+  end)
 end)
