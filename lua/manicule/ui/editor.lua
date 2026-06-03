@@ -15,6 +15,7 @@
 local M = {}
 
 local float = require("manicule.ui.float")
+local str = require("manicule.str")
 
 ---@class manicule.ui.editor.Active
 ---@field id string
@@ -26,15 +27,9 @@ local float = require("manicule.ui.float")
 local active_editor = nil
 local opening_editor = false
 
----@param text string?
----@return string[]
-local function split_lines(text)
-  local lines = vim.split(text or "", "\n", { plain = true })
-  if #lines == 0 then
-    return { "" }
-  end
-  return lines
-end
+-- Newline split with an empty-line guard, shared with the renderer and
+-- quickfix formatter via `manicule.str`.
+local split_lines = str.split_lines
 
 ---@param key string
 ---@return string

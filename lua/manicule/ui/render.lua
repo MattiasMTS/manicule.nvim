@@ -21,6 +21,7 @@ local M = {}
 local anchor = require("manicule.anchor")
 local float = require("manicule.ui.float")
 local config = require("manicule.config")
+local str = require("manicule.str")
 
 ---@class manicule.ui.render.Handle
 ---@field bufnr integer Buffer the extmark is placed in
@@ -102,28 +103,11 @@ local function comment_winhighlight()
   return "NormalFloat:NormalFloat,FloatBorder:ManiculeCommentBorder,FloatTitle:ManiculeCommentMeta,FloatFooter:ManiculeCommentMeta"
 end
 
----@param text string?
----@return string[]
-local function split_lines(text)
-  local lines = vim.split(text or "", "\n", { plain = true })
-  if #lines == 0 then
-    return { "" }
-  end
-  return lines
-end
-
----@param text string
----@param max_width integer
----@return string
-local function truncate_text(text, max_width)
-  if #text <= max_width then
-    return text
-  end
-  if max_width <= 3 then
-    return text:sub(1, max_width)
-  end
-  return text:sub(1, max_width - 3) .. "..."
-end
+-- `split_lines` (newline split with empty-line guard) and `truncate_text`
+-- (byte-length ellipsis) are shared with the quickfix formatter and the
+-- floating editor via `manicule.str`.
+local split_lines = str.split_lines
+local truncate_text = str.truncate
 
 ---Short display id from the record's string id (first 6 chars).
 ---@param record_id string
@@ -286,6 +270,59 @@ local function record_display_position(record, records)
   return 1, math.max(1, #ordered)
 end
 
+---Precompute `{ index, total }` display positions for a set of records
+---against `counter_records`, sharing each counter-scope group's sort
+---across every record that belongs to it. `record_display_position`
+---re-scans + re-sorts `counter_records` per call, which makes the
+---per-record popup render O(counter_records) — over a viewport of N
+---records that is O(N · counter_records). This builds the same answer
+---once: one sort per distinct scope group, then O(1) lookups.
+---@param records table[] records that will be rendered
+---@param counter_records table[]
+---@return table<string, {index: integer, total: integer}>
+local function precompute_display_positions(records, counter_records)
+  local pool = counter_records or records
+  -- Cache an ordered scope group by a stable scope key so records that
+  -- share a counter scope reuse the same sorted list + index map.
+  ---@type table<string, table<string, integer>>
+  local group_index = {}
+  ---@type table<string, integer>
+  local group_total = {}
+  local out = {}
+  for _, record in ipairs(records or {}) do
+    local id = tostring(record.id or "")
+    -- Scope key mirrors `same_counter_scope`'s three branches so two
+    -- records land in the same group iff they would for that predicate.
+    local key
+    if record.scope == "project" or record.project_root then
+      key = "p:" .. tostring(record.project_root or "")
+    elseif record.scope == "session" then
+      key = "s:"
+    else
+      key = "u:" .. tostring(record.uri or "")
+    end
+    if not group_index[key] then
+      local ordered = {}
+      for _, other in ipairs(pool) do
+        if same_counter_scope(record, other) then
+          table.insert(ordered, other)
+        end
+      end
+      table.sort(ordered, record_counter_less)
+      local index_map = {}
+      for index, other in ipairs(ordered) do
+        index_map[tostring(other.id or "")] = index
+      end
+      group_index[key] = index_map
+      group_total[key] = #ordered
+    end
+    local index = group_index[key][id] or 1
+    local total = math.max(1, group_total[key])
+    out[id] = { index = index, total = total }
+  end
+  return out
+end
+
 -- ---------------------------------------------------------------------------
 -- Handle lifecycle
 -- ---------------------------------------------------------------------------
@@ -321,6 +358,12 @@ local function close_handle(handle)
   if handle.extmark_id and handle.extmark_id ~= 0 and vim.api.nvim_buf_is_valid(handle.bufnr) then
     pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.extmark_id)
   end
+  -- Zero the id after deletion so a stale scheduled sticky render (whose
+  -- guard checks `extmark_id ~= 0`) becomes a no-op. Every reader
+  -- (`capture_position_patches`, `mark_ids_for_buffer`,
+  -- `sync_handle_position`, `record_at_cursor`) already treats
+  -- `extmark_id == 0` as "no mark", so this is safe across the module.
+  handle.extmark_id = 0
 end
 
 ---@param bufnr integer
@@ -481,7 +524,7 @@ end
 ---@param handle manicule.ui.render.Handle
 ---@param records table[] Current record snapshot (used for stack offset)
 ---@param counter_records? table[] Current project/session snapshot (used for title count)
----@param layout? {winid?: integer, row?: integer, col_shift?: integer, index?: integer, total?: integer}
+---@param layout? {winid?: integer, row?: integer, col_shift?: integer, index?: integer, total?: integer, display?: {index: integer, total: integer}}
 ---@return boolean
 local function render_comment_popup(record, handle, records, counter_records, layout)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
@@ -522,32 +565,47 @@ local function render_comment_popup(record, handle, records, counter_records, la
   local my_line = record_start_line(record)
   local my_id = tostring(record.id or "")
 
-  local stack = {}
-  for _, other in ipairs(records or {}) do
-    if other.uri == record.uri and record_start_line(other) == my_line then
-      table.insert(stack, other)
-    end
-  end
-  table.sort(stack, function(a, b)
-    local ac = tonumber(a.created_at) or 0
-    local bc = tonumber(b.created_at) or 0
-    if ac ~= bc then
-      return ac < bc
-    end
-    return tostring(a.id or "") < tostring(b.id or "")
-  end)
-
+  -- `stack_offset`/`stack_index` only feed the `layout.row` /
+  -- `layout.col_shift` fallbacks. The non-sticky viewport path always
+  -- supplies both (it computes its own stacked layout up front), so skip
+  -- the O(records) stack scan + sort entirely in that case — it was pure
+  -- discarded work. The sticky path (no layout) still computes them.
   local stack_offset = 0
   local stack_index = 1
-  for index, other in ipairs(stack) do
-    local other_id = tostring(other.id or "")
-    if other_id == my_id then
-      stack_index = index
-      break
+  if layout.row == nil or layout.col_shift == nil then
+    local stack = {}
+    for _, other in ipairs(records or {}) do
+      if other.uri == record.uri and record_start_line(other) == my_line then
+        table.insert(stack, other)
+      end
     end
-    stack_offset = stack_offset + math.max(1, #split_lines(other.body)) + 2
+    table.sort(stack, function(a, b)
+      local ac = tonumber(a.created_at) or 0
+      local bc = tonumber(b.created_at) or 0
+      if ac ~= bc then
+        return ac < bc
+      end
+      return tostring(a.id or "") < tostring(b.id or "")
+    end)
+
+    for index, other in ipairs(stack) do
+      local other_id = tostring(other.id or "")
+      if other_id == my_id then
+        stack_index = index
+        break
+      end
+      stack_offset = stack_offset + math.max(1, #split_lines(other.body)) + 2
+    end
   end
-  local display_index, display_total = record_display_position(record, counter_records or records)
+  -- Title counter position: reuse the caller's precomputed value when it
+  -- threaded one through (`update_viewport_popups` builds them once for
+  -- the whole viewport), otherwise compute it for this single record.
+  local display_index, display_total
+  if layout.display then
+    display_index, display_total = layout.display.index, layout.display.total
+  else
+    display_index, display_total = record_display_position(record, counter_records or records)
+  end
   local popup_bufnr = handle.popup_bufnr
   if not popup_bufnr or not vim.api.nvim_buf_is_valid(popup_bufnr) then
     popup_bufnr = float.create_scratch_buf()
@@ -583,6 +641,15 @@ local function render_comment_popup(record, handle, records, counter_records, la
   local popup_winid = float.open_or_reconfigure(handle.popup_winid, popup_bufnr, false, win_config)
   handle.popup_winid = popup_winid
 
+  -- Tag the float so `prune_orphan_popups` can recognize a manicule
+  -- comment popup that no live handle tracks anymore (e.g. a handle whose
+  -- `popup_winid` got overwritten/nil'd, or the whole handle table reset
+  -- on plugin reload) and close it. A window var (not a buffer var) is
+  -- used because the scratch popup buffer can be wiped/reused.
+  if popup_winid and vim.api.nvim_win_is_valid(popup_winid) then
+    pcall(vim.api.nvim_win_set_var, popup_winid, "manicule_popup", true)
+  end
+
   vim.bo[popup_bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, display_lines)
   vim.bo[popup_bufnr].modifiable = false
@@ -593,6 +660,93 @@ local function render_comment_popup(record, handle, records, counter_records, la
   float.set_float_transparency(popup_winid, opacity)
 
   return true
+end
+
+---Close every tagged manicule popup float that no live handle tracks.
+---Builds the set of popup winids owned by a handle (across all buffers),
+---then walks `nvim_list_wins()` and closes any window carrying the
+---`manicule_popup` win-var that isn't in that set. This self-heals
+---orphans: floats whose handle lost track of them (`popup_winid`
+---overwritten/nil'd) or whose handle table was reset on plugin reload,
+---which nothing else would ever close. It can never close a legitimate
+---popup because every tracked float's winid is in `tracked`.
+local function prune_orphan_popups()
+  local tracked = {}
+  for _, tab in pairs(handles) do
+    for _, handle in pairs(tab) do
+      if handle.popup_winid then
+        tracked[handle.popup_winid] = true
+      end
+    end
+  end
+
+  for _, winid in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(winid) and not tracked[winid] then
+      -- Most windows won't carry the var, so pcall + guard on the result.
+      local ok, tagged = pcall(vim.api.nvim_win_get_var, winid, "manicule_popup")
+      if ok and tagged then
+        pcall(vim.api.nvim_win_close, winid, true)
+      end
+    end
+  end
+end
+
+---Collapse duplicate *tracked* popup floats so a given record id shows
+---at most ONE visible popup across every buffer/window. A codediff
+---buffer (`codediff://...`) maps to the SAME working-tree URI as the
+---real file, so the same record id ends up tracked in two buffers'
+---handle tables — each rendering its own float (one per diff side).
+---This keeps one and hides the rest.
+---
+---Complementary to `prune_orphan_popups` (which closes UNtracked tagged
+---floats): this only touches floats that ARE tracked by a live handle.
+---It can never over-close because it only collapses entries that share a
+---record id AND each carry a live tracked popup, always keeping one —
+---the loser's anchor extmark + line tint survive (only `hide_popup`,
+---which nils `popup_winid` and leaves the extmark, runs on them).
+---
+---Winner preference: the entry in the current buffer (so the popup
+---follows focus to the side the user is in); otherwise the entry with
+---the lowest bufnr (deterministic/stable). O(total tracked popups).
+local function dedup_popups()
+  local current_buf = vim.api.nvim_get_current_buf()
+
+  -- by_id[id] = { { bufnr = ..., handle = ... }, ... } for every live
+  -- tracked popup float keyed under that record id.
+  local by_id = {}
+  for bufnr, tab in pairs(handles) do
+    for id, handle in pairs(tab) do
+      if handle.popup_winid and vim.api.nvim_win_is_valid(handle.popup_winid) then
+        local entries = by_id[id]
+        if not entries then
+          entries = {}
+          by_id[id] = entries
+        end
+        table.insert(entries, { bufnr = bufnr, handle = handle })
+      end
+    end
+  end
+
+  for _, entries in pairs(by_id) do
+    if #entries > 1 then
+      -- Pick the winner: current buffer first, else lowest bufnr.
+      local winner = entries[1]
+      for _, entry in ipairs(entries) do
+        if entry.bufnr == current_buf then
+          winner = entry
+          break
+        end
+        if entry.bufnr < winner.bufnr then
+          winner = entry
+        end
+      end
+      for _, entry in ipairs(entries) do
+        if entry ~= winner then
+          hide_popup(entry.handle)
+        end
+      end
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -668,32 +822,47 @@ local function reconcile_record(bufnr, record, records, counter_records, tab)
     hide_popup(handle)
   end
 
-  if handle.extmark_id ~= 0 then
-    local pos = sync_handle_position(handle)
-    if not pos then
-      handle.extmark_id = 0
-      if not render_extmark(record, handle) then
-        clear_handle(bufnr, id)
-        return
-      end
-    end
-  else
-    if not render_extmark(record, handle) then
-      clear_handle(bufnr, id)
-      return
-    end
+  -- (Re)create the anchor extmark unless an existing one is still
+  -- tracking a live position. A stale extmark (sync returns nil) is
+  -- reset so render_extmark places a fresh one.
+  local needs_render = handle.extmark_id == 0
+  if not needs_render and not sync_handle_position(handle) then
+    handle.extmark_id = 0
+    needs_render = true
+  end
+  if needs_render and not render_extmark(record, handle) then
+    clear_handle(bufnr, id)
+    return
   end
 
   if is_sticky() then
-    local rec = record
     local hdl = handle
-    local snapshot = records
-    local counter_snapshot = counter_records
     vim.schedule(function()
+      -- A stale scheduled render must do nothing if, by the time it
+      -- runs, the buffer was unloaded/wiped (BufUnload/BufDelete ->
+      -- clear_buffer) or the handle was cleared/replaced (record deleted
+      -- or re-keyed) between the schedule and the callback. Without these
+      -- guards `render_comment_popup` would open an orphaned float over a
+      -- dead/detached handle that nothing tears down.
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      local live = handles[bufnr]
+      if not live or live[id] ~= hdl then
+        return
+      end
       if not hdl.extmark_id or hdl.extmark_id == 0 then
         return
       end
-      render_comment_popup(rec, hdl, snapshot, counter_snapshot)
+      render_comment_popup(record, hdl, records, counter_records)
+      -- Run AFTER render so `hdl.popup_winid` is assigned and the
+      -- just-created float is in `tracked` (never closed); this sweeps any
+      -- orphan left beside it (e.g. a stale float from before an edit).
+      prune_orphan_popups()
+      -- Collapse any duplicate tracked popup (e.g. a codediff buffer that
+      -- maps to the same URI rendered its own float for this record on
+      -- another diff side); keeps one, following focus to the current buf.
+      dedup_popups()
     end)
   end
 end
@@ -705,6 +874,29 @@ end
 --- Initialize highlights. Call once during setup.
 function M.setup()
   setup_comment_highlights()
+  -- On a plugin reload the Lua module reloads with a fresh empty
+  -- `handles`, but the OLD instance's tagged popup windows are still open
+  -- and now untracked — close them here. On a normal first load there are
+  -- no tagged floats, so this is a no-op.
+  prune_orphan_popups()
+end
+
+--- Close every tagged manicule popup float that no live handle tracks.
+--- Self-heals orphaned/duplicate popups (handle lost track of the float,
+--- or the handle table was reset on plugin reload). Cannot close a
+--- legitimately-tracked popup because tracked floats are always retained.
+function M.prune_orphan_popups()
+  prune_orphan_popups()
+end
+
+--- Collapse duplicate *tracked* popup floats so a record id shows at most
+--- one popup across all buffers/windows. Used when a file is open in two
+--- same-URI buffers (e.g. the working file + a codediff view) so the
+--- comment popup doesn't render once per diff side. Keeps the entry in
+--- the current buffer (follows focus), else the lowest bufnr; the loser's
+--- anchor extmark + line tint are untouched.
+function M.dedup_popups()
+  dedup_popups()
 end
 
 --- Reapply highlights after colorscheme change.
@@ -809,6 +1001,11 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     end
     table.sort(visible, record_layout_less)
 
+    -- Precompute title-counter positions ONCE for the whole viewport
+    -- (sharing each scope group's sort) instead of letting every
+    -- per-record `render_comment_popup` re-scan + re-sort the counter set.
+    local display = precompute_display_positions(visible, counter_records or records)
+
     local next_top
     for index, record in ipairs(visible) do
       local body_height = math.max(1, #split_lines(record.body))
@@ -824,6 +1021,7 @@ function M.update_viewport_popups(bufnr, records, counter_records)
         winid = active_range.winid,
         row = row,
         col_shift = math.min((index - 1) * 2, 12),
+        display = display[tostring(record.id or "")],
       }
     end
   end
@@ -840,6 +1038,16 @@ function M.update_viewport_popups(bufnr, records, counter_records)
       end
     end
   end
+
+  -- Sweep orphans after the render/hide loop so duplicates self-heal on
+  -- the next viewport update. Every popup just rendered above is tracked
+  -- (its winid is on a live handle), so only untracked floats are closed.
+  prune_orphan_popups()
+  -- Then collapse duplicate *tracked* popups: a same-URI sibling buffer
+  -- (e.g. a codediff view) tracks its own float for the same record id, so
+  -- close all but one. This runs on every refresh_viewport (scroll/focus
+  -- change) + refresh_all_loaded, so it self-heals and follows focus.
+  dedup_popups()
 end
 
 --- Hide every popup owned for `bufnr`. Extmarks + handles survive so
@@ -915,6 +1123,13 @@ function M.record_at_cursor(bufnr)
   bufnr = bufnr or 0
   if bufnr == 0 then
     bufnr = vim.api.nvim_get_current_buf()
+  end
+  -- `anchor.resolve` calls `nvim_buf_get_extmark_by_id` without its own
+  -- buffer-validity guard, which throws "Invalid buffer id" if `bufnr`
+  -- has been wiped out from under the `gca`/`gcd`/edit keymap handler.
+  -- Bail to the no-match path before we reach it.
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
   end
   local tab = handles[bufnr]
   if not tab or vim.tbl_isempty(tab) then

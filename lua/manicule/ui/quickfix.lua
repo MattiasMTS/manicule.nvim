@@ -16,6 +16,9 @@
 
 local M = {}
 
+local str = require("manicule.str")
+local range = require("manicule.range")
+
 ---@class manicule.ui.quickfix.State
 ---@field root string|nil
 ---@field filter table|nil
@@ -28,53 +31,14 @@ local state = {
   title_prefix = "manicule",
 }
 
----@param record table
----@return integer
-local function start_line(record)
-  if record and record.range and record.range.start then
-    return (record.range.start[1] or 0) + 1
-  end
-  return 1
-end
-
----@param record table
----@return integer
-local function start_col(record)
-  if record and record.range and record.range.start then
-    return (record.range.start[2] or 0) + 1
-  end
-  return 1
-end
-
----@param record table
----@return integer?
-local function end_line(record)
-  if record and record.range and record.range.end_ then
-    local row = record.range.end_[1]
-    if type(row) == "number" then
-      return row + 1
-    end
-  end
-  return nil
-end
-
+---Sort a copy of `records` by the canonical `uri → start line → id`
+---ordering (see `manicule.range.compare`). Deep-copies first so the
+---caller's list is never mutated.
 ---@param records table[]
 ---@return table[]
 local function sort_records(records)
   local ordered = vim.deepcopy(records)
-  table.sort(ordered, function(a, b)
-    local ap = tostring(a.uri or "")
-    local bp = tostring(b.uri or "")
-    if ap ~= bp then
-      return ap < bp
-    end
-    local al = start_line(a)
-    local bl = start_line(b)
-    if al ~= bl then
-      return al < bl
-    end
-    return tostring(a.id or "") < tostring(b.id or "")
-  end)
+  table.sort(ordered, range.compare)
   return ordered
 end
 
@@ -88,19 +52,6 @@ local function filename_for(record)
   return require("manicule.uri").to_path(record.uri)
 end
 
----@param text string
----@param max_width integer
----@return string
-local function truncate(text, max_width)
-  if #text <= max_width then
-    return text
-  end
-  if max_width <= 3 then
-    return text:sub(1, max_width)
-  end
-  return text:sub(1, max_width - 3) .. "..."
-end
-
 ---@param record table
 ---@return string
 local function format_text(record)
@@ -108,13 +59,13 @@ local function format_text(record)
   local first = vim.split(body, "\n", { plain = true })[1] or ""
   local marker = record.resolved and "[x] " or "[ ] "
   local line_ref
-  local el = end_line(record)
-  if el and el > start_line(record) then
-    line_ref = string.format("L%d-%d", start_line(record), el)
+  local el = range.end_line(record)
+  if el and el > range.start_line(record) then
+    line_ref = string.format("L%d-%d", range.start_line(record), el)
   else
-    line_ref = string.format("L%d", start_line(record))
+    line_ref = string.format("L%d", range.start_line(record))
   end
-  return string.format("%s%s %s", marker, line_ref, truncate(first, 160))
+  return string.format("%s%s %s", marker, line_ref, str.truncate(first, 160))
 end
 
 ---@param records table[]
@@ -123,8 +74,8 @@ local function build_items(records)
   local items = {}
   for _, r in ipairs(sort_records(records or {})) do
     local item = {
-      lnum = start_line(r),
-      col = start_col(r),
+      lnum = range.start_line(r),
+      col = range.start_col(r),
       type = r.resolved and "N" or "I",
       text = format_text(r),
       -- Tag each item with a stable locator so qf-local mutations don't
@@ -193,12 +144,19 @@ end
 function M.is_manicule_qf_open()
   for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local bufnr = vim.api.nvim_win_get_buf(winid)
+    -- Both quickfix and location-list windows report
+    -- `buftype == "quickfix"`. Discriminate via `getwininfo().loclist`:
+    -- a true quickfix window has `loclist == 0`, a location list has
+    -- `loclist == 1`. We only ever own the global quickfix list.
     if vim.bo[bufnr].buftype == "quickfix" then
-      -- `getqflist` is global, but a qf window in the current tab can
-      -- only show the current qflist, so querying without a winid is
-      -- correct here. (Location lists are `loclist`, not `quickfix`.)
-      if is_manicule_title(current_qf_title()) then
-        return winid
+      local wininfo = vim.fn.getwininfo(winid)[1]
+      if wininfo and wininfo.loclist == 0 then
+        -- `getqflist` is global, but a qf window in the current tab can
+        -- only show the current qflist, so querying without a winid is
+        -- correct here.
+        if is_manicule_title(current_qf_title()) then
+          return winid
+        end
       end
     end
   end
@@ -294,10 +252,16 @@ function M.refresh()
   local qf_winid, saved_row
   for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local bufnr = vim.api.nvim_win_get_buf(winid)
+    -- Location-list windows also report `buftype == "quickfix"`; skip
+    -- them via `getwininfo().loclist` so we never capture/restore a
+    -- loclist cursor as if it were ours.
     if vim.bo[bufnr].buftype == "quickfix" then
-      qf_winid = winid
-      saved_row = vim.api.nvim_win_get_cursor(winid)[1]
-      break
+      local wininfo = vim.fn.getwininfo(winid)[1]
+      if wininfo and wininfo.loclist == 0 then
+        qf_winid = winid
+        saved_row = vim.api.nvim_win_get_cursor(winid)[1]
+        break
+      end
     end
   end
 
