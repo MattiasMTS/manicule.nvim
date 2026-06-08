@@ -285,7 +285,7 @@ function M.resolve_diff_pair(bufnr)
     }
   end
 
-  if #real_bufs >= 2 or #temp_bufs >= 2 and #real_bufs == 0 then
+  if #real_bufs >= 2 or (#temp_bufs >= 2 and #real_bufs == 0) then
     -- Both sides real (plain `nvim -d`) → no pairing; or both sides
     -- temp (rare, but nothing useful we can do). Caller treats each
     -- buffer as its own identity.
@@ -346,13 +346,15 @@ function M.identify(bufnr)
   -- buffers are off-limits. Quickfix and prompt buffers typically
   -- carry no bufname, so the URI fallthrough below would drop them.
   if buftype == "quickfix" then
+    local qf_uri = uri_mod.for_bufnr(bufnr) or ""
     return {
-      uri = uri_mod.for_bufnr(bufnr) or "",
+      uri = qf_uri,
       scope = "session",
       project_root = nil,
       is_writable = false,
       diff_side = nil,
       reject_reason = "quickfix buffers don't accept comments",
+      ephemeral = uri_mod.is_ephemeral(qf_uri),
     }
   end
 
@@ -394,6 +396,12 @@ function M.identify(bufnr)
     return nil, "buffer has no identity"
   end
 
+  -- Compute ephemeral once from the URI we settled on and stamp it on
+  -- every identity we return so callers can rely on the field being set
+  -- consistently. `is_ephemeral` is false for file URIs and true for the
+  -- `manicule://buffer/...` scheme used by unnamed scratch buffers.
+  local ephemeral = uri_mod.is_ephemeral(uri)
+
   -- Cmdwin is its own weird thing: we refuse to touch it regardless of
   -- buftype. Detection runs before any other branch.
   if in_cmdwin() then
@@ -404,6 +412,7 @@ function M.identify(bufnr)
       is_writable = false,
       diff_side = nil,
       reject_reason = "command-line window doesn't accept comments",
+      ephemeral = ephemeral,
     }
   end
 
@@ -415,6 +424,7 @@ function M.identify(bufnr)
       project_root = codediff.project_root,
       is_writable = true,
       diff_side = nil,
+      ephemeral = uri_mod.is_ephemeral(codediff.uri),
     }
   end
 
@@ -424,7 +434,25 @@ function M.identify(bufnr)
   if buftype == "" and uri_mod.is_file(uri) then
     local pair = M.resolve_diff_pair(bufnr)
     if pair then
-      if bufnr == pair.reference_bufnr then
+      if bufnr == pair.working_bufnr then
+        local root = root_for_bufnr(bufnr, config.current.store.root_markers)
+        return {
+          uri = uri,
+          scope = root and "project" or "session",
+          project_root = root,
+          is_writable = true,
+          diff_side = "working",
+          ephemeral = ephemeral,
+        }
+      elseif bufnr == pair.reference_bufnr then
+        -- `bufnr` is genuinely the reference participant of this pair —
+        -- a reference/diff blob, never writable. `resolve_diff_pair`
+        -- sets `reference_bufnr = bufnr` for ANY temp buffer passed in
+        -- (incl. the 2nd temp blob of a 3-way diff), so this branch
+        -- covers every reference side. Buffers that are NOT part of this
+        -- diff at all (resolve_diff_pair classifies the tab's diff
+        -- windows regardless of `bufnr`) fall through to normal project
+        -- resolution below, keeping their own writable identity.
         local working_path = bufname_abs(pair.working_bufnr)
         local reject = string.format(
           "this is a reference view of %s; add comments on the working-tree side",
@@ -443,15 +471,7 @@ function M.identify(bufnr)
           is_writable = false,
           diff_side = "reference",
           reject_reason = reject,
-        }
-      elseif bufnr == pair.working_bufnr then
-        local root = root_for_bufnr(bufnr, config.current.store.root_markers)
-        return {
-          uri = uri,
-          scope = root and "project" or "session",
-          project_root = root,
-          is_writable = true,
-          diff_side = "working",
+          ephemeral = uri_mod.is_ephemeral(pair.working_uri),
         }
       end
     end
@@ -478,6 +498,7 @@ function M.identify(bufnr)
         project_root = root,
         is_writable = true,
         diff_side = nil,
+        ephemeral = ephemeral,
       }
     end
     -- Unrooted plain file buffer: route to session if the user allows.
@@ -488,6 +509,7 @@ function M.identify(bufnr)
         project_root = nil,
         is_writable = true,
         diff_side = nil,
+        ephemeral = ephemeral,
       }
     end
     return {
@@ -497,6 +519,7 @@ function M.identify(bufnr)
       is_writable = false,
       diff_side = nil,
       reject_reason = "buffer is not in a project (enable store.persist_unrooted to use the session store)",
+      ephemeral = ephemeral,
     }
   end
 
@@ -509,7 +532,7 @@ function M.identify(bufnr)
     is_writable = writable,
     diff_side = nil,
     reject_reason = (not writable) and reason or nil,
-    ephemeral = uri_mod.is_ephemeral(uri),
+    ephemeral = ephemeral,
   }
 end
 

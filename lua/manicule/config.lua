@@ -106,6 +106,14 @@ function M.setup(opts)
       error(('manicule: store.format must be "mpack" or "json", got %q'):format(tostring(opts.store.format)))
     end
   end
+  if opts.sinks then
+    vim.validate({
+      -- Both sinks may be a boolean (enable/disable) or a table of sink
+      -- options; allow both forms.
+      ["sinks.clipboard"] = { opts.sinks.clipboard, { "boolean", "table" }, true },
+      ["sinks.cmux"] = { opts.sinks.cmux, { "boolean", "table" }, true },
+    })
+  end
   if opts.ui then
     vim.validate({
       ["ui.width"] = { opts.ui.width, "number", true },
@@ -122,21 +130,11 @@ function M.setup(opts)
       error(("manicule: ui.opacity must be between 0.0 and 1.0, got %s"):format(tostring(opacity)))
     end
   end
+  -- `tbl_deep_extend("force", …)` replaces list/array values wholesale
+  -- rather than concatenating them, so a user-supplied `submit_keys`,
+  -- `cancel_keys`, or `root_markers` fully *replaces* the defaults — which
+  -- is the behaviour users expect for key-lists and root markers.
   M.current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
-  -- tbl_deep_extend merges tables but we want user key-lists to *replace*,
-  -- not merge, the defaults. Otherwise a user-supplied `submit_keys = {"<C-s>"}`
-  -- would stack on top of the default key aliases.
-  if opts.ui then
-    if opts.ui.submit_keys ~= nil then
-      M.current.ui.submit_keys = opts.ui.submit_keys
-    end
-    if opts.ui.cancel_keys ~= nil then
-      M.current.ui.cancel_keys = opts.ui.cancel_keys
-    end
-  end
-  if opts.store and opts.store.root_markers ~= nil then
-    M.current.store.root_markers = opts.store.root_markers
-  end
 
   -- Ensure the state dir exists once at setup so later saves don't race
   -- the mkdir and `:echo stdpath('state').'/manicule/'` resolves to a real

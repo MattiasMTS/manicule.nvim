@@ -199,6 +199,52 @@ describe("manicule.adapter temp detection", function()
     pcall(vim.fn.delete, temp_dir, "rf")
   end)
 
+  it("identify leaves an unrelated loaded buffer writable while a diff pair is open", function()
+    -- Regression: resolve_diff_pair classifies the current tab's diff
+    -- windows regardless of which bufnr is passed, so identify() must
+    -- only apply the reference branch when bufnr is genuinely the
+    -- working or reference participant. An ordinary project file buffer
+    -- loaded alongside a difftool view must keep its own writable
+    -- identity and its own URI — not get mislabeled as the reference
+    -- side with the working file's URI.
+    local temp_dir = "/tmp/git-blob-manicule-test3"
+    vim.fn.mkdir(temp_dir, "p")
+    local temp_file = temp_dir .. "/ref.lua"
+    vim.fn.writefile({ "ref" }, temp_file)
+
+    local working = tmp_root .. "/working3.lua"
+    vim.fn.writefile({ "working" }, working)
+
+    -- An unrelated, ordinary project file that is NOT part of the diff.
+    local unrelated = tmp_root .. "/unrelated3.lua"
+    vim.fn.writefile({ "unrelated" }, unrelated)
+    -- Load it as a buffer (the all-loaded render sweeps call identify on
+    -- every loaded buffer), but don't keep it in a diff window.
+    local unrelated_bufnr = vim.fn.bufadd(unrelated)
+    vim.fn.bufload(unrelated_bufnr)
+
+    vim.cmd.edit(working)
+    vim.cmd.diffthis()
+    vim.cmd("vsplit " .. vim.fn.fnameescape(temp_file))
+    vim.cmd.diffthis()
+
+    -- A diff pair IS open in this tab; confirm the heuristic resolves it
+    -- even when asked about the unrelated buffer (the pre-fix trap).
+    local pair = adapter.resolve_diff_pair(unrelated_bufnr)
+    assert.is_truthy(pair)
+
+    local id = adapter.identify(unrelated_bufnr)
+    assert.is_truthy(id)
+    assert.is_true(id.is_writable)
+    assert.are_not.equal("reference", id.diff_side)
+    assert.is_nil(id.diff_side)
+    -- URI must be the unrelated buffer's OWN uri, not the working_uri.
+    assert.are.equal(uri_mod.for_bufnr(unrelated_bufnr), id.uri)
+    assert.are_not.equal(pair.working_uri, id.uri)
+
+    pcall(vim.fn.delete, temp_dir, "rf")
+  end)
+
   it("identify returns session scope on an unrooted file buffer", function()
     -- Plain /tmp file with no project marker. persist_unrooted defaults
     -- to true in phase 3 so the identity is writable session.
