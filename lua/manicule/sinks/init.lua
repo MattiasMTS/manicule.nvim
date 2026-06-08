@@ -196,7 +196,21 @@ function M.dispatch(name, comments, ctx, cb)
       error(err)
     end
   end
-  local ok, err = pcall(sink.send, comments, ctx, cb and finish or function() end)
+  -- When no caller cb is supplied we must still observe async failures: a
+  -- bare no-op only catches sync throws via pcall below, so an async send
+  -- that reports ok == false later (e.g. cmux's vim.ui.select path) would be
+  -- silently dropped. Notify instead so the failure is surfaced.
+  local function finish_no_cb(ok, err)
+    if done then
+      return
+    end
+    done = true
+    if not ok then
+      vim.notify(tostring(err or ("manicule: sink " .. tostring(name) .. " failed")), vim.log.levels.ERROR)
+    end
+  end
+  local sink_cb = cb and finish or finish_no_cb
+  local ok, err = pcall(sink.send, comments, ctx, sink_cb)
   if not ok then
     finish(false, "manicule: sink " .. tostring(name) .. " send failed: " .. tostring(err))
   end

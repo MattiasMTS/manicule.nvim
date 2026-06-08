@@ -69,6 +69,18 @@ function M._collect()
   local cmux_cfg = (config.sinks or {}).cmux
   local cmux_opts = type(cmux_cfg) == "table" and cmux_cfg or {}
 
+  -- Derive cmux availability from a single source so :checkhealth can't
+  -- report inconsistent registered/available states: when the integration is
+  -- registered, trust its health closure (computed from the opts it was
+  -- registered with); only recompute from live config when unregistered.
+  local cmux_registered = sinks.get("cmux") ~= nil
+  local cmux_available
+  if cmux_registered and type(sink_health.cmux) == "table" then
+    cmux_available = sink_health.cmux.available == true
+  else
+    cmux_available = cmux.is_available(cmux_opts)
+  end
+
   return {
     nvim = {
       version = vim.version(),
@@ -98,8 +110,8 @@ function M._collect()
       health = sink_health,
       clipboard_registered = sinks.get("clipboard") ~= nil,
       clipboard_available = vim.fn.has("clipboard") == 1,
-      cmux_registered = sinks.get("cmux") ~= nil,
-      cmux_available = cmux.is_available(cmux_opts),
+      cmux_registered = cmux_registered,
+      cmux_available = cmux_available,
     },
   }
 end
