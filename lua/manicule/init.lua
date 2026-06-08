@@ -35,6 +35,18 @@ local delete_undo_stack = {} -- LIFO stack of pre-delete record snapshots
 local delete_redo_stack = {} -- LIFO stack of undone deletions (redo branch)
 local DELETE_UNDO_MAX = 100 -- bound both stacks to avoid unbounded memory
 
+---Push `item` onto a LIFO stack and trim from the front so it never
+---exceeds `DELETE_UNDO_MAX`. Shared by the delete / undo / redo paths so
+---the bound is enforced identically everywhere.
+---@param stack table
+---@param item table
+local function push_bounded(stack, item)
+  table.insert(stack, item)
+  if #stack > DELETE_UNDO_MAX then
+    table.remove(stack, 1)
+  end
+end
+
 -- Per-buffer "a viewport refresh is already scheduled" flag. A single
 -- user action fires several viewport autocmds (WinScrolled + CursorMoved
 -- [+ WinResized]); this collapses the burst to ONE scheduled refresh per
@@ -230,19 +242,15 @@ local refresh_viewport
 -- further down the file. Without this, the upvalue would bind to a global.
 local attach_buffer
 
----Run reconcile for every buffer that already has an entry in `buffer_to_path`
----or is loaded and visible. Returns the records passed in.
+---Reconcile `bufnr` against already-resolved render inputs and emit
+---`ManiculeOrphaned` for any record whose extmark came back invalid.
+---Split out so callers that already resolved `render_inputs` (the
+---single-pass paint path) don't re-resolve identity + re-read the store.
 ---@param bufnr integer
-local function reconcile_buffer(bufnr)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
-    return
-  end
-  -- Single-pass: one identify + one project/session read derives both
-  -- the per-buffer records and the counter set. `render_inputs` loads
-  -- the relevant stores internally (identity resolution routes staged
-  -- buffers to the real project cache, same as `project_root_for_bufnr`).
+---@param records table[]
+---@param counter_records table[]
+local function reconcile_records(bufnr, records, counter_records)
   local render = require("manicule.ui.render")
-  local records, counter_records = render_inputs(bufnr)
   render.reconcile(bufnr, records, counter_records)
 
   -- For each attached record whose extmark came back invalid, emit a
@@ -261,6 +269,47 @@ local function reconcile_buffer(bufnr)
   end
 end
 
+---Run reconcile for every buffer that already has an entry in `buffer_to_path`
+---or is loaded and visible. Returns the records passed in.
+---@param bufnr integer
+local function reconcile_buffer(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  -- Single-pass: one identify + one project/session read derives both
+  -- the per-buffer records and the counter set. `render_inputs` loads
+  -- the relevant stores internally (identity resolution routes staged
+  -- buffers to the real project cache, same as `project_root_for_bufnr`).
+  local records, counter_records = render_inputs(bufnr)
+  reconcile_records(bufnr, records, counter_records)
+end
+
+---Paint `bufnr` in a SINGLE pass: resolve `render_inputs` once, then feed
+---the same records/counters into both reconcile (with orphan detection)
+---and the (sticky-gated) viewport update. `attach_buffer` and
+---`refresh_all_loaded` share this so an attach no longer runs two full
+---identity+store passes (one in reconcile, one in the viewport refresh).
+---@param bufnr integer
+---@param sticky boolean? whether sticky mode is on (pass the resolved flag to avoid re-reading config per buffer)
+local function paint_buffer(bufnr, sticky)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  if sticky == nil then
+    local cfg = require("manicule.config").get()
+    sticky = (cfg.ui or {}).sticky
+  end
+  local render = require("manicule.ui.render")
+  local records, counter_records = render_inputs(bufnr)
+  reconcile_records(bufnr, records, counter_records)
+  -- Mirror `refresh_viewport`: the non-sticky viewport update is a no-op
+  -- under sticky (reconcile already schedules the popups), so skip the
+  -- call entirely when sticky to match the old behavior.
+  if not sticky and vim.api.nvim_buf_is_valid(bufnr) then
+    render.update_viewport_popups(bufnr, records, counter_records)
+  end
+end
+
 ---Run reconcile + the non-sticky viewport update for every loaded
 ---buffer in a SINGLE pass. Used after mutations / external syncs that
 ---may span multiple buffers (e.g. `delete` strips a record that could be
@@ -274,19 +323,11 @@ end
 ---is behavior-preserving while halving the per-buffer store reads: each
 ---buffer now resolves its inputs once instead of ~4×.
 local function refresh_all_loaded()
-  local render = require("manicule.ui.render")
   local cfg = require("manicule.config").get()
   local sticky = (cfg.ui or {}).sticky
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
-      local records, counter_records = render_inputs(bufnr)
-      render.reconcile(bufnr, records, counter_records)
-      -- Mirror `refresh_viewport`: the non-sticky viewport update is a
-      -- no-op under sticky (reconcile already schedules the popups), so
-      -- skip the call entirely when sticky to match the old behavior.
-      if not sticky and vim.api.nvim_buf_is_valid(bufnr) then
-        render.update_viewport_popups(bufnr, records, counter_records)
-      end
+      paint_buffer(bufnr, sticky)
     end
   end
 end
@@ -496,8 +537,11 @@ function attach_buffer(bufnr)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
     return
   end
-  reconcile_buffer(bufnr)
-  refresh_viewport(bufnr)
+  -- Single-pass paint: resolve `render_inputs` once and feed it to both
+  -- reconcile (orphan detection retained) and the sticky-gated viewport
+  -- update, instead of `reconcile_buffer` + `refresh_viewport` each
+  -- re-resolving identity and re-reading the store.
+  paint_buffer(bufnr)
 end
 
 ---Per-bufnr snapshot of the URI that was live when `BufFilePre`
@@ -867,17 +911,27 @@ local function finalize_add(body, bufnr, range)
     meta = identity.ephemeral and { ephemeral = true } or {},
   }
   -- Invariant canary: re-run `identify` and refuse to persist if it
-  -- doesn't reproduce the URI we built the record around. Guards
+  -- doesn't reproduce the identity we built the record around. Guards
   -- against regressions where the adapter's build-time and reload-time
-  -- URI diverge (staged buffers, future reverse-map bugs) — without
-  -- this check, a record with a non-reproducible URI would persist and
-  -- never re-anchor.
+  -- identity diverge (staged buffers, future reverse-map bugs) — without
+  -- this check, a record could persist under a non-reproducible URI and
+  -- never re-anchor, or worse, land in the wrong store if `scope` /
+  -- `project_root` drifted between the two `identify` calls.
   local verify, verr = adapter.identify(bufnr)
-  if not verify or verify.uri ~= record.uri then
+  if
+    not verify
+    or verify.uri ~= record.uri
+    or verify.scope ~= record.scope
+    or verify.project_root ~= record.project_root
+  then
     vim.notify(
-      ("manicule: URI invariant violated (expected %s, got %s: %s)"):format(
+      ("manicule: URI invariant violated (expected %s/%s/%s, got %s/%s/%s: %s)"):format(
         record.uri,
+        tostring(record.scope),
+        tostring(record.project_root),
         verify and verify.uri or "nil",
+        verify and tostring(verify.scope) or "nil",
+        verify and tostring(verify.project_root) or "nil",
         verr or "no err"
       ),
       vim.log.levels.ERROR
@@ -1195,11 +1249,17 @@ end
 
 ---Delete a comment by id.
 ---@param id string
----@param opts? { scope?: "project"|"session", project_root?: string }
+---@param opts? { scope?: "project"|"session", project_root?: string, quiet?: boolean }
 function M.delete(id, opts)
+  opts = opts or {}
   local record, _, remove = find(id, opts)
   if not record or not remove then
-    vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
+    -- `quiet` suppresses the not-found WARN for callers that delete in
+    -- bulk where some ids may already be gone (e.g. the auto-clear loop
+    -- in `M.send` after a concurrent sync removed records).
+    if not opts.quiet then
+      vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
+    end
     return
   end
   local snapshot = vim.deepcopy(record)
@@ -1211,10 +1271,7 @@ function M.delete(id, opts)
   end
   -- Push the pre-delete snapshot so `undo_delete` can restore it. The
   -- stack is LIFO; trim from the front when it exceeds the bound.
-  table.insert(delete_undo_stack, snapshot)
-  if #delete_undo_stack > DELETE_UNDO_MAX then
-    table.remove(delete_undo_stack, 1)
-  end
+  push_bounded(delete_undo_stack, snapshot)
   -- A fresh deletion invalidates the redo branch, mirroring Vim's
   -- undo-tree: a new edit discards any redo history.
   delete_redo_stack = {}
@@ -1238,10 +1295,7 @@ function M.undo_delete()
   end
   -- Restoring moves the snapshot onto the redo branch so `redo_delete`
   -- can re-apply it. LIFO; trim from the front at the bound.
-  table.insert(delete_redo_stack, snapshot)
-  if #delete_redo_stack > DELETE_UNDO_MAX then
-    table.remove(delete_redo_stack, 1)
-  end
+  push_bounded(delete_redo_stack, snapshot)
   refresh_all_loaded()
   emit("ManiculeRestored", snapshot)
 end
@@ -1255,23 +1309,30 @@ function M.redo_delete()
     vim.notify("manicule: nothing to redo", vim.log.levels.INFO)
     return
   end
-  local record, _, remove = find(snapshot.id, { scope = snapshot.scope, project_root = snapshot.project_root })
-  if not record or not remove then
-    vim.notify("manicule: cannot redo deletion (comment not found)", vim.log.levels.WARN)
-    return
+  -- Re-delete by the snapshot's OWN scope/root rather than re-`find`ing
+  -- through the current buffer. Redo invoked from a different buffer or
+  -- project must not depend on whichever store the current buffer
+  -- resolves to — that path could fail to surface the record and drop
+  -- the snapshot from the redo stack permanently.
+  local store = require("manicule.store")
+  local removed = store.remove_record(snapshot.scope, snapshot.id, snapshot.project_root)
+  local ok, err
+  if snapshot.scope == "session" then
+    ok, err = store.session_save()
+  else
+    ok, err = store.save(snapshot.project_root)
   end
-  local ok, err = remove()
   if not ok then
     table.insert(delete_redo_stack, snapshot) -- keep it for a retry
     notify_save_failed("deleted comment", err)
     return
   end
-  table.insert(delete_undo_stack, snapshot)
-  if #delete_undo_stack > DELETE_UNDO_MAX then
-    table.remove(delete_undo_stack, 1)
-  end
+  -- If the record was already gone (e.g. removed by a concurrent sync),
+  -- treat the redo as a no-op success: still pop it onto the undo stack
+  -- so the round-trip stays consistent, but don't error-spam.
+  push_bounded(delete_undo_stack, snapshot)
   refresh_all_loaded()
-  emit("ManiculeDeleted", { id = snapshot.id, record = record })
+  emit("ManiculeDeleted", { id = snapshot.id, record = removed or snapshot })
 end
 
 ---Mark a comment as resolved.
@@ -1432,10 +1493,11 @@ function M.send(sink_name, filter, ctx)
       -- — store.remove + save, render.reconcile per buffer, and one
       -- `User ManiculeDeleted` per record — exactly as if the user had
       -- deleted them by hand. `M.delete` is idempotent on unknown ids
-      -- (emits a WARN notify and returns early), so a sink that already
-      -- cleared records itself becomes a no-op here.
+      -- (returns early), so a sink that already cleared records itself
+      -- becomes a no-op here. Pass `quiet` so already-removed records
+      -- (e.g. a concurrent sync) don't spam a not-found WARN per id.
       for _, record in ipairs(records) do
-        M.delete(record.id, { scope = record.scope, project_root = record.project_root })
+        M.delete(record.id, { scope = record.scope, project_root = record.project_root, quiet = true })
       end
     end
   end)
