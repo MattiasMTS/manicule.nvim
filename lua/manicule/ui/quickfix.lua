@@ -122,13 +122,13 @@ function M.build_items(records)
   return build_items(records)
 end
 
+---Format the quickfix list title for `n` items. Single source of truth
+---so the format string and the `is_manicule_title` prefix match can't
+---drift apart.
+---@param n integer
 ---@return string
-local function current_qf_title()
-  local ok, info = pcall(vim.fn.getqflist, { title = 1 })
-  if ok and type(info) == "table" and type(info.title) == "string" then
-    return info.title
-  end
-  return ""
+local function make_title(n)
+  return string.format("%s (%d)", state.title_prefix, n)
 end
 
 ---@param title string
@@ -137,30 +137,51 @@ local function is_manicule_title(title)
   return type(title) == "string" and title:match("^" .. state.title_prefix) ~= nil
 end
 
---- Return the winid of a quickfix window in the current tab whose
---- underlying list is a manicule-titled list, or nil. Used by the
---- `User Manicule*` autocmd to decide whether a refresh is warranted.
----@return integer|nil
-function M.is_manicule_qf_open()
+---Read the title of the list ACTUALLY displayed in `winid`. Unlike a
+---bare `getqflist({title=1})` (the GLOBAL current stack entry), this
+---reflects what the window shows even after `:colder`/`:cnewer` walk
+---the qf history, so detection never targets the wrong window.
+---@param winid integer
+---@return string
+local function qf_title_for_win(winid)
+  local ok, info = pcall(vim.fn.getqflist, { winid = winid, title = 1 })
+  if ok and type(info) == "table" and type(info.title) == "string" then
+    return info.title
+  end
+  return ""
+end
+
+--- Find a quickfix window in the current tab whose DISPLAYED list is a
+--- manicule-titled list. Returns `(winid, bufnr)` or nil.
+---
+--- Both quickfix and location-list windows report
+--- `buftype == "quickfix"`. Discriminate via `getwininfo().loclist`: a
+--- true quickfix window has `loclist == 0`, a location list has
+--- `loclist == 1`. We only ever own the global quickfix list. The title
+--- is read per-window (`qf_title_for_win`) rather than from the global
+--- current stack entry, so qf history (`:colder`/`:cnewer`) can't make
+--- us match a window that's actually showing somebody else's list.
+---@return integer|nil winid
+---@return integer|nil bufnr
+local function find_manicule_qf_win()
   for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local bufnr = vim.api.nvim_win_get_buf(winid)
-    -- Both quickfix and location-list windows report
-    -- `buftype == "quickfix"`. Discriminate via `getwininfo().loclist`:
-    -- a true quickfix window has `loclist == 0`, a location list has
-    -- `loclist == 1`. We only ever own the global quickfix list.
     if vim.bo[bufnr].buftype == "quickfix" then
       local wininfo = vim.fn.getwininfo(winid)[1]
-      if wininfo and wininfo.loclist == 0 then
-        -- `getqflist` is global, but a qf window in the current tab can
-        -- only show the current qflist, so querying without a winid is
-        -- correct here.
-        if is_manicule_title(current_qf_title()) then
-          return winid
-        end
+      if wininfo and wininfo.loclist == 0 and is_manicule_title(qf_title_for_win(winid)) then
+        return winid, bufnr
       end
     end
   end
-  return nil
+  return nil, nil
+end
+
+--- Return the winid of a quickfix window in the current tab whose
+--- displayed list is a manicule-titled list, or nil. Used by the
+--- `User Manicule*` autocmd to decide whether a refresh is warranted.
+---@return integer|nil
+function M.is_manicule_qf_open()
+  return (find_manicule_qf_win())
 end
 
 --- Resolve the record id at the cursor in the current quickfix window.
@@ -180,6 +201,9 @@ function M.record_locator_at_cursor()
   if not item then
     return nil
   end
+  -- `build_items` always writes `user_data` as a table, and it
+  -- round-trips as a table through setqflist/getqflist, so we only
+  -- handle the table form here.
   local data = item.user_data
   if type(data) == "table" and type(data.id) == "string" and data.id ~= "" then
     return {
@@ -187,9 +211,6 @@ function M.record_locator_at_cursor()
       scope = data.scope,
       project_root = data.project_root,
     }
-  end
-  if type(data) == "string" and data ~= "" then
-    return { id = data }
   end
   return nil
 end
@@ -210,7 +231,7 @@ end
 function M.show(records, opts)
   opts = opts or {}
   local items = build_items(records)
-  local title = string.format("%s (%d)", state.title_prefix, #items)
+  local title = make_title(#items)
   -- Record the filter + root that produced this list so a later
   -- `M.refresh` can regenerate it without knowing who called `show`.
   state.root = opts.filter and opts.filter._root or root_for_records(records) or require("manicule.store").root()
@@ -234,35 +255,35 @@ end
 --- Re-queries `manicule.list` with the cached filter and replaces the
 --- current qflist with mode `"r"` so the open qf window stays open and
 --- the cursor keeps its line number (Neovim clamps automatically if
---- the new list is shorter). Aborts silently if the current qflist
---- title no longer starts with `manicule` — we must never stomp on
---- somebody else's quickfix (grep results, diagnostic list, …).
+--- the new list is shorter). Aborts silently if no quickfix window in
+--- the current tab is actually displaying a manicule-titled list — we
+--- must never stomp on somebody else's quickfix (grep results,
+--- diagnostic list, …), even when qf history (`:colder`/`:cnewer`) has
+--- left the global current stack entry pointing elsewhere.
 function M.refresh()
-  -- Title-prefix guard: if the user swapped to a different quickfix
-  -- between the triggering `User Manicule*` event and this refresh
-  -- call (e.g. `:grep`), leave it alone.
-  if not is_manicule_title(current_qf_title()) then
+  -- Per-window manicule guard + cursor capture in one walk. If the
+  -- user swapped the visible qf to a different list between the
+  -- triggering `User Manicule*` event and this refresh call (e.g.
+  -- `:grep`, `:colder`), leave it alone.
+  --
+  -- Capture the cursor row of the qf window so we can restore it after
+  -- the replace — `setqflist` mode `"r"` updates the buffer but in some
+  -- Neovim versions resets the cursor to line 1.
+  local qf_winid = find_manicule_qf_win()
+  if not qf_winid then
     return
   end
+  local saved_row = vim.api.nvim_win_get_cursor(qf_winid)[1]
 
-  -- Capture cursor row of the qf window (if any) so we can restore it
-  -- after the replace — `setqflist` mode `"r"` updates the buffer but
-  -- in some Neovim versions resets the cursor to line 1. Look up the
-  -- qf window inside the current tab.
-  local qf_winid, saved_row
-  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local bufnr = vim.api.nvim_win_get_buf(winid)
-    -- Location-list windows also report `buftype == "quickfix"`; skip
-    -- them via `getwininfo().loclist` so we never capture/restore a
-    -- loclist cursor as if it were ours.
-    if vim.bo[bufnr].buftype == "quickfix" then
-      local wininfo = vim.fn.getwininfo(winid)[1]
-      if wininfo and wininfo.loclist == 0 then
-        qf_winid = winid
-        saved_row = vim.api.nvim_win_get_cursor(winid)[1]
-        break
-      end
-    end
+  -- Resolve the stack entry actually DISPLAYED in `qf_winid` so the
+  -- in-place replace targets that list specifically. Otherwise a bare
+  -- `setqflist({}, "r", ...)` writes the GLOBAL current stack entry,
+  -- which qf history (`:colder`/`:cnewer`) may have moved off our list
+  -- — we'd stomp the wrong list and never update the open window.
+  local target_id = 0
+  local ok_id, id_info = pcall(vim.fn.getqflist, { winid = qf_winid, id = 0 })
+  if ok_id and type(id_info) == "table" and type(id_info.id) == "number" then
+    target_id = id_info.id
   end
 
   -- Re-run the same filter through the public `list` API so any
@@ -274,10 +295,11 @@ function M.refresh()
   filter._root = state.root
   local records = require("manicule").list(filter)
   local items = build_items(records)
-  local title = string.format("%s (%d)", state.title_prefix, #items)
-  -- Mode `"r"` replaces the current list in place; the quickfix window
-  -- stays open.
-  vim.fn.setqflist({}, "r", { title = title, items = items })
+  local title = make_title(#items)
+  -- Mode `"r"` replaces the list in place; the quickfix window stays
+  -- open. Pass `id` so we replace the entry shown in `qf_winid` even
+  -- when it isn't the global current stack entry (qf history).
+  vim.fn.setqflist({}, "r", { id = target_id, title = title, items = items })
 
   -- Restore the cursor row, clamped to the new list length. Neovim
   -- normally preserves the row in `"r"` mode but real-world reports

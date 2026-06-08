@@ -29,10 +29,12 @@ function M.attach(qf_bufnr)
     return
   end
   if vim.g.manicule_no_default_keymaps == 1 then
-    -- Runtime toggle safety: if the user flipped the flag after we
-    -- already attached to this qf buffer (e.g. in a prior `:copen`),
-    -- strip any mappings we previously installed so native `dd`/`ce`
-    -- come back.
+    -- Runtime toggle safety: `attach` only runs when something triggers
+    -- it — `FileType qf`, `:ManiculeList`'s `:copen`. There is no
+    -- trigger for an ALREADY-open, idle qf buffer, so flipping the flag
+    -- takes effect on the NEXT attach for this buffer (e.g. the next
+    -- `:ManiculeList`). When that attach sees the flag set, strip any
+    -- mappings we previously installed so native `dd`/`ce` come back.
     pcall(vim.keymap.del, "n", "dd", { buffer = qf_bufnr })
     pcall(vim.keymap.del, "n", "ce", { buffer = qf_bufnr })
     pcall(vim.keymap.del, "n", "u", { buffer = qf_bufnr })

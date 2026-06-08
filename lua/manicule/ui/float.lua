@@ -111,18 +111,29 @@ function M.apply_title_footer(win_config, border, title, title_pos, footer, foot
   end
 end
 
----Open a new floating window or reconfigure an existing one.
+---Open a new floating window or reconfigure an existing one. Both the
+---reconfigure and the fresh open are wrapped in pcall: a bad win_config
+---(e.g. an anchor window that vanished between layout and open) must not
+---unwind the caller's render closure. Returns nil on failure so callers
+---can leave a consistent handle instead of propagating the throw.
 ---@param existing_winid integer?
 ---@param bufnr integer
 ---@param enter boolean
 ---@param win_config table
----@return integer winid
+---@return integer? winid
 function M.open_or_reconfigure(existing_winid, bufnr, enter, win_config)
   if existing_winid and vim.api.nvim_win_is_valid(existing_winid) then
-    pcall(vim.api.nvim_win_set_config, existing_winid, win_config)
-    return existing_winid
+    local ok = pcall(vim.api.nvim_win_set_config, existing_winid, win_config)
+    if ok then
+      return existing_winid
+    end
+    return nil
   end
-  return vim.api.nvim_open_win(bufnr, enter, win_config)
+  local ok, winid = pcall(vim.api.nvim_open_win, bufnr, enter, win_config)
+  if ok then
+    return winid
+  end
+  return nil
 end
 
 return M

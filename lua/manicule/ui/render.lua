@@ -639,6 +639,17 @@ local function render_comment_popup(record, handle, records, counter_records, la
   )
 
   local popup_winid = float.open_or_reconfigure(handle.popup_winid, popup_bufnr, false, win_config)
+
+  -- `open_or_reconfigure` pcalls `nvim_open_win`/`nvim_win_set_config` and
+  -- returns nil on failure (e.g. the anchor window vanished between layout
+  -- and open). Don't leave a half-open handle: drop any stale winid via
+  -- `hide_popup` and bail. The scratch buffer is `bufhidden=wipe` but,
+  -- having never been shown, it isn't wiped — `handle.popup_bufnr` survives
+  -- and the next render reuses it instead of leaking a fresh one.
+  if not popup_winid or not vim.api.nvim_win_is_valid(popup_winid) then
+    hide_popup(handle)
+    return false
+  end
   handle.popup_winid = popup_winid
 
   -- Tag the float so `prune_orphan_popups` can recognize a manicule
@@ -646,9 +657,7 @@ local function render_comment_popup(record, handle, records, counter_records, la
   -- `popup_winid` got overwritten/nil'd, or the whole handle table reset
   -- on plugin reload) and close it. A window var (not a buffer var) is
   -- used because the scratch popup buffer can be wiped/reused.
-  if popup_winid and vim.api.nvim_win_is_valid(popup_winid) then
-    pcall(vim.api.nvim_win_set_var, popup_winid, "manicule_popup", true)
-  end
+  pcall(vim.api.nvim_win_set_var, popup_winid, "manicule_popup", true)
 
   vim.bo[popup_bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, display_lines)
@@ -747,6 +756,40 @@ local function dedup_popups()
       end
     end
   end
+end
+
+-- "A popup sweep (prune + dedup) is already scheduled" flag. The sticky
+-- reconcile path schedules one render closure per record, and each used
+-- to run both sweeps — O(N × sweeps) for a buffer with N comments. These
+-- sweeps are global (they walk every window / every handle, not just one
+-- buffer), so a single coalesced run after the batch produces the same
+-- final popup set. Mirrors init.lua's `viewport_refresh_pending`: the
+-- first scheduler sets the flag, later ones in the same burst no-op, and
+-- the scheduled body clears it then runs the sweeps once.
+local popup_sweep_pending = false
+
+---Coalesce the post-render orphan-prune + dedup sweeps so a batch of
+---scheduled sticky renders triggers them ONCE (after the batch) instead
+---of per-record. The sweeps must run AFTER the renders so every freshly
+---opened float is tracked (its winid is on a live handle) before pruning,
+---which is preserved because both the renders and this sweep run via
+---`vim.schedule` and the sweep is scheduled last each time.
+local function schedule_popup_sweeps()
+  if popup_sweep_pending then
+    return
+  end
+  popup_sweep_pending = true
+  vim.schedule(function()
+    popup_sweep_pending = false
+    -- Sweep any orphan left beside the just-rendered floats (e.g. a stale
+    -- float from before an edit). Every popup rendered this batch is
+    -- tracked, so only untracked tagged floats are closed.
+    prune_orphan_popups()
+    -- Collapse duplicate tracked popups (e.g. a codediff buffer mapping to
+    -- the same URI rendered its own float for a record); keeps one,
+    -- following focus to the current buffer.
+    dedup_popups()
+  end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -855,14 +898,12 @@ local function reconcile_record(bufnr, record, records, counter_records, tab)
         return
       end
       render_comment_popup(record, hdl, records, counter_records)
-      -- Run AFTER render so `hdl.popup_winid` is assigned and the
-      -- just-created float is in `tracked` (never closed); this sweeps any
-      -- orphan left beside it (e.g. a stale float from before an edit).
-      prune_orphan_popups()
-      -- Collapse any duplicate tracked popup (e.g. a codediff buffer that
-      -- maps to the same URI rendered its own float for this record on
-      -- another diff side); keeps one, following focus to the current buf.
-      dedup_popups()
+      -- Coalesce the orphan-prune + dedup sweeps to ONCE per reconcile
+      -- batch instead of per-record. The sweeps are global and run on a
+      -- later scheduled tick, so every record's float in this batch is
+      -- rendered (and thus tracked) before they fire — same final popup
+      -- set as the old per-record sweep, without the O(N) repeat work.
+      schedule_popup_sweeps()
     end)
   end
 end

@@ -307,6 +307,57 @@ describe("manicule render lifecycle", function()
     assert.are.equal(before, #vim.api.nvim_list_wins())
   end)
 
+  it("handles a float open failure without throwing or leaking a scratch buffer", function()
+    local manicule = require("manicule")
+    local render = require("manicule.ui.render")
+    local float = require("manicule.ui.float")
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    manicule.add({
+      body = "open failure note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    local records = manicule.list({ _quiet = true })
+
+    -- Simulate `nvim_open_win` throwing inside `open_or_reconfigure`
+    -- (the pcall there returns nil on failure). `render_comment_popup`
+    -- must bail cleanly: no popup, no thrown error, and the orphaned
+    -- scratch buffer must not accumulate across repeated renders.
+    local original = float.open_or_reconfigure
+    float.open_or_reconfigure = function()
+      return nil
+    end
+
+    local function count_listed_bufs()
+      return #vim.api.nvim_list_bufs()
+    end
+
+    local ok = pcall(function()
+      render.update_viewport_popups(bufnr, records)
+      render.update_viewport_popups(bufnr, records)
+    end)
+    local bufs_after_two = count_listed_bufs()
+    local ok2 = pcall(function()
+      render.update_viewport_popups(bufnr, records)
+      render.update_viewport_popups(bufnr, records)
+    end)
+    local bufs_after_four = count_listed_bufs()
+
+    float.open_or_reconfigure = original
+
+    assert.is_true(ok)
+    assert.is_true(ok2)
+    -- No popup ever appeared while the open was failing.
+    assert.are.equal(0, #floating_windows_containing("open failure note"))
+    -- The scratch buffer is reused, not leaked: extra render passes do
+    -- not grow the buffer list.
+    assert.are.equal(bufs_after_two, bufs_after_four)
+
+    -- Recovery: with the real opener restored, the popup renders again.
+    render.update_viewport_popups(bufnr, records)
+    assert.is_true(wait_for_popup_count("open failure note", 1))
+  end)
+
   it("numbers popups across project records", function()
     local first_path = H.edit_project_file(ctx, "src/a.lua", {
       "local first = true",
