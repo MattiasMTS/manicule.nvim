@@ -6,6 +6,16 @@
 
 local M = {}
 
+-- Seed the RNG once at module load. `math.random` is otherwise
+-- deterministic across same-PID process starts, which would make
+-- `id.new()`'s random suffix predictable and raise collision risk. Mix
+-- the high-resolution monotonic clock with the pid and wall-clock time
+-- so two near-simultaneous Neovim starts don't share a seed.
+do
+  local hr = (vim.uv or vim.loop).hrtime()
+  math.randomseed(hr % 0x7fffffff + vim.fn.getpid() + os.time())
+end
+
 ---Generate a new unique id.
 ---@return string
 function M.new()
