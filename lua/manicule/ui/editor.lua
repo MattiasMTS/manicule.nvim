@@ -15,6 +15,7 @@
 local M = {}
 
 local float = require("manicule.ui.float")
+local str = require("manicule.str")
 
 ---@class manicule.ui.editor.Active
 ---@field id string
@@ -26,15 +27,9 @@ local float = require("manicule.ui.float")
 local active_editor = nil
 local opening_editor = false
 
----@param text string?
----@return string[]
-local function split_lines(text)
-  local lines = vim.split(text or "", "\n", { plain = true })
-  if #lines == 0 then
-    return { "" }
-  end
-  return lines
-end
+-- Newline split with an empty-line guard, shared with the renderer and
+-- quickfix formatter via `manicule.str`.
+local split_lines = str.split_lines
 
 ---@param key string
 ---@return string
@@ -301,20 +296,50 @@ function M.open(opts, cb)
   local editor_id = tostring((vim.uv or vim.loop).hrtime())
   local closed = false
   local result_sent = false
+  -- Records whether an EXPLICIT submit/cancel chose the focus behavior.
+  -- The `WinLeave once` autocmd closes with `restore_focus=false` as a
+  -- default, which can otherwise beat (first-writer-wins on `result_sent`)
+  -- an explicit submit/cancel that wanted focus returned — e.g. submitting
+  -- by clicking another window. By capturing the explicit intent here, the
+  -- explicit action's choice wins even if WinLeave's `finish` runs first.
+  local explicit_restore_focus = nil
 
   local function finish(body, restore_focus)
     if result_sent then
       return
     end
     result_sent = true
-    restore_focus = restore_focus ~= false
+    -- Default for the WinLeave path; the explicit-action override is read
+    -- inside the scheduled body so a submit/cancel that records its intent
+    -- AFTER WinLeave already scheduled this still wins the focus decision.
+    local default_restore_focus = restore_focus ~= false
 
-    vim.schedule(function()
-      force_normal_mode()
-      if vim.api.nvim_win_is_valid(winid) then
-        pcall(vim.api.nvim_win_close, winid, true)
+    local function dispatch()
+      -- Prefer an explicit submit/cancel's focus intent over the WinLeave
+      -- default. Reading it here (not at `finish` time) lets the explicit
+      -- action's choice win even when WinLeave's `finish` scheduled first.
+      local effective_restore_focus = default_restore_focus
+      if explicit_restore_focus ~= nil then
+        effective_restore_focus = explicit_restore_focus
       end
-      if restore_focus and vim.api.nvim_win_is_valid(previous_win) then
+
+      force_normal_mode()
+      local close_ok = true
+      if vim.api.nvim_win_is_valid(winid) then
+        close_ok = pcall(vim.api.nvim_win_close, winid, true)
+      end
+      -- If the window refused to close, retry on the next tick before we
+      -- orphan it. The editor float carries no `manicule_popup` win-var
+      -- (deliberately — it isn't a comment popup, so dedup/prune must not
+      -- treat it as one), so nothing else would ever reap it.
+      if not close_ok and vim.api.nvim_win_is_valid(winid) then
+        vim.schedule(function()
+          if vim.api.nvim_win_is_valid(winid) then
+            pcall(vim.api.nvim_win_close, winid, true)
+          end
+        end)
+      end
+      if effective_restore_focus and vim.api.nvim_win_is_valid(previous_win) then
         pcall(vim.api.nvim_set_current_win, previous_win)
       end
       force_normal_mode()
@@ -323,7 +348,9 @@ function M.open(opts, cb)
       -- Callback-side UI and render refreshes can otherwise race with
       -- WinLeave/BufLeave cleanup from the closing float.
       cb(body)
-    end)
+    end
+
+    vim.schedule(dispatch)
   end
 
   local function close_editor(opts)
@@ -332,6 +359,10 @@ function M.open(opts, cb)
     end
     opts = type(opts) == "table" and opts or {}
     closed = true
+
+    -- Record the explicit focus intent before WinLeave's `finish` can
+    -- override it (keeps the single-fire `result_sent` guarantee intact).
+    explicit_restore_focus = opts.restore_focus ~= false
 
     if active_editor and active_editor.id == editor_id then
       active_editor = nil
@@ -353,6 +384,8 @@ function M.open(opts, cb)
       return
     end
     closed = true
+    -- A submit always wants focus returned to where the user was.
+    explicit_restore_focus = true
     if active_editor and active_editor.id == editor_id then
       active_editor = nil
     end

@@ -15,6 +15,7 @@
 --   ManiculeAdded     record
 --   ManiculeEdited    record
 --   ManiculeDeleted   { id, record }
+--   ManiculeRestored  record (the restored snapshot)
 --   ManiculeResolved  record (with resolved=true)
 --   ManiculeSent      { sink, count, ok, err }
 --   ManiculeSynced    { roots }
@@ -29,6 +30,30 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 local sync_timer
+
+local delete_undo_stack = {} -- LIFO stack of pre-delete record snapshots
+local delete_redo_stack = {} -- LIFO stack of undone deletions (redo branch)
+local DELETE_UNDO_MAX = 100 -- bound both stacks to avoid unbounded memory
+
+---Push `item` onto a LIFO stack and trim from the front so it never
+---exceeds `DELETE_UNDO_MAX`. Shared by the delete / undo / redo paths so
+---the bound is enforced identically everywhere.
+---@param stack table
+---@param item table
+local function push_bounded(stack, item)
+  table.insert(stack, item)
+  if #stack > DELETE_UNDO_MAX then
+    table.remove(stack, 1)
+  end
+end
+
+-- Per-buffer "a viewport refresh is already scheduled" flag. A single
+-- user action fires several viewport autocmds (WinScrolled + CursorMoved
+-- [+ WinResized]); this collapses the burst to ONE scheduled refresh per
+-- buffer with zero added latency (the schedule still runs on the same
+-- event-loop tick — no timer delay).
+---@type table<integer, boolean>
+local viewport_refresh_pending = {}
 
 ---@class manicule.Config
 ---@field store? table
@@ -127,6 +152,66 @@ local function current_project_root()
   return project_root_for_bufnr(vim.api.nvim_get_current_buf())
 end
 
+---Resolve the render inputs for `bufnr` in a single pass: one
+---`adapter.identify`, one `store.all`/`session_all` read, and derive
+---BOTH the per-buffer records (URI-filtered, resolved-filter applied)
+---and the counter set (whole project / session, no resolved-filter)
+---from those shared reads.
+---
+---`store.all_for_uri(uri, root)` internally re-reads `store.all(root)`
+---via `for_uri`, and `counter_records_for_buffer` read `store.all(root)`
+---again — two `store.all` calls per render, each running `M.sync`
+---(`SELECT COALESCE(MAX(id))`) on a cache hit, plus two identity
+---resolutions. Reading the project list once here and filtering it
+---in-process collapses that to one identity + one `store.all`.
+---@param bufnr integer
+---@return table[] records, table[] counter_records, table? identity
+local function render_inputs(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return {}, {}, nil
+  end
+  local store = require("manicule.store")
+  local adapter = require("manicule.adapter")
+  local identity = adapter.identify(bufnr)
+  -- Phase 2 policy: do not render on the reference side of a diff pair.
+  -- The reject notify on `M.add` tells the user to switch buffers.
+  if not identity or not identity.uri or identity.diff_side == "reference" then
+    return {}, {}, identity
+  end
+  local uri = identity.uri
+  local root = identity.project_root
+
+  -- Counter set = the WHOLE project record set (or the session set when
+  -- unrooted), no resolved-filter. `store.all` loads on first access and
+  -- syncs on a cache hit, so it is the single source we derive both
+  -- result sets from.
+  local project_records = {}
+  if root then
+    store.load(root)
+    project_records = store.all(root)
+  end
+  local session_records = store.session_all()
+  local counter_records = root and project_records or session_records
+
+  -- Per-buffer records = URI-equal subset of the project list PLUS
+  -- URI-equal session records — i.e. exactly what `all_for_uri` returns,
+  -- derived from the reads we already did instead of re-querying.
+  local records = {}
+  if root then
+    for _, r in ipairs(project_records) do
+      if r.uri == uri then
+        table.insert(records, r)
+      end
+    end
+  end
+  for _, r in ipairs(session_records) do
+    if r.uri == uri then
+      table.insert(records, r)
+    end
+  end
+  return records, counter_records, identity
+end
+
 ---Return records that belong to `bufnr` (URI equality). Merges project
 ---records from the currently-resolved root AND session records keyed on
 ---the same URI, so a session-scope comment on a scratch / terminal /
@@ -137,21 +222,8 @@ end
 ---@param bufnr integer
 ---@return table[]
 local function records_for_buffer(bufnr)
-  if not vim.api.nvim_buf_is_valid(bufnr) then
-    return {}
-  end
-  local store = require("manicule.store")
-  local adapter = require("manicule.adapter")
-  local identity = adapter.identify(bufnr)
-  if not identity or not identity.uri then
-    return {}
-  end
-  -- Phase 2 policy: do not render on the reference side of a diff pair.
-  -- The reject notify on `M.add` tells the user to switch buffers.
-  if identity.diff_side == "reference" then
-    return {}
-  end
-  return store.all_for_uri(identity.uri, identity.project_root)
+  local records = render_inputs(bufnr)
+  return records
 end
 
 ---Return the records used for popup title counters. Project comments are
@@ -160,52 +232,31 @@ end
 ---@param bufnr integer
 ---@return table[]
 local function counter_records_for_buffer(bufnr)
-  if not vim.api.nvim_buf_is_valid(bufnr) then
-    return {}
-  end
-  local store = require("manicule.store")
-  local adapter = require("manicule.adapter")
-  local identity = adapter.identify(bufnr)
-  if not identity or not identity.uri or identity.diff_side == "reference" then
-    return {}
-  end
-  if identity.project_root then
-    store.load(identity.project_root)
-    return store.all(identity.project_root)
-  end
-  return store.session_all()
+  local _, counter_records = render_inputs(bufnr)
+  return counter_records
 end
 
 local refresh_viewport
+-- Forward-declared (like `refresh_viewport`) because `hide_popups_on_leave`
+-- below references it from a scheduled callback, but the definition lives
+-- further down the file. Without this, the upvalue would bind to a global.
+local attach_buffer
 
----Run reconcile for every buffer that already has an entry in `buffer_to_path`
----or is loaded and visible. Returns the records passed in.
+---Reconcile `bufnr` against already-resolved render inputs and emit
+---`ManiculeOrphaned` for any record whose extmark came back invalid.
+---Split out so callers that already resolved `render_inputs` (the
+---single-pass paint path) don't re-resolve identity + re-read the store.
 ---@param bufnr integer
-local function reconcile_buffer(bufnr)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
-    return
-  end
-  local store = require("manicule.store")
-  -- Route through `current_project_root` so a staged buffer
-  -- (DiffToolGit et al.) preloads the *real* project cache — raw
-  -- `store.root()` would walk up the staged path under `stdpath('run')`
-  -- and miss the project entirely.
-  local root = project_root_for_bufnr(bufnr)
-  if root then
-    store.load(root)
-  end
-  -- Always load the session store too — a buffer may own records in
-  -- either scope (or both, if the user opened the same URI in two
-  -- contexts), so we cannot short-circuit on "no root".
-  store.session_load()
-  local records = records_for_buffer(bufnr)
-  require("manicule.ui.render").reconcile(bufnr, records, counter_records_for_buffer(bufnr))
+---@param records table[]
+---@param counter_records table[]
+local function reconcile_records(bufnr, records, counter_records)
+  local render = require("manicule.ui.render")
+  render.reconcile(bufnr, records, counter_records)
 
   -- For each attached record whose extmark came back invalid, emit a
   -- ManiculeOrphaned event. We resolve via the anchor module so the
   -- shape matches what users have been consuming.
   local anchor = require("manicule.anchor")
-  local render = require("manicule.ui.render")
   local mark_ids = render.mark_ids_for_buffer(bufnr)
   for _, record in ipairs(records) do
     local mid = mark_ids[tostring(record.id)]
@@ -218,23 +269,65 @@ local function reconcile_buffer(bufnr)
   end
 end
 
----Run reconcile for every loaded listed buffer. Used after mutations
----that may span multiple buffers (e.g. `delete` strips a record that
----could be visible in several windows showing different files).
-local function reconcile_all_loaded()
+---Run reconcile for every buffer that already has an entry in `buffer_to_path`
+---or is loaded and visible. Returns the records passed in.
+---@param bufnr integer
+local function reconcile_buffer(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  -- Single-pass: one identify + one project/session read derives both
+  -- the per-buffer records and the counter set. `render_inputs` loads
+  -- the relevant stores internally (identity resolution routes staged
+  -- buffers to the real project cache, same as `project_root_for_bufnr`).
+  local records, counter_records = render_inputs(bufnr)
+  reconcile_records(bufnr, records, counter_records)
+end
+
+---Paint `bufnr` in a SINGLE pass: resolve `render_inputs` once, then feed
+---the same records/counters into both reconcile (with orphan detection)
+---and the (sticky-gated) viewport update. `attach_buffer` and
+---`refresh_all_loaded` share this so an attach no longer runs two full
+---identity+store passes (one in reconcile, one in the viewport refresh).
+---@param bufnr integer
+---@param sticky boolean? whether sticky mode is on (pass the resolved flag to avoid re-reading config per buffer)
+local function paint_buffer(bufnr, sticky)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  if sticky == nil then
+    local cfg = require("manicule.config").get()
+    sticky = (cfg.ui or {}).sticky
+  end
   local render = require("manicule.ui.render")
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(bufnr) then
-      local records = records_for_buffer(bufnr)
-      render.reconcile(bufnr, records, counter_records_for_buffer(bufnr))
-    end
+  local records, counter_records = render_inputs(bufnr)
+  reconcile_records(bufnr, records, counter_records)
+  -- Mirror `refresh_viewport`: the non-sticky viewport update is a no-op
+  -- under sticky (reconcile already schedules the popups), so skip the
+  -- call entirely when sticky to match the old behavior.
+  if not sticky and vim.api.nvim_buf_is_valid(bufnr) then
+    render.update_viewport_popups(bufnr, records, counter_records)
   end
 end
 
-local function refresh_all_loaded_viewports()
+---Run reconcile + the non-sticky viewport update for every loaded
+---buffer in a SINGLE pass. Used after mutations / external syncs that
+---may span multiple buffers (e.g. `delete` strips a record that could be
+---visible in several windows showing different files).
+---
+---Reconcile and the viewport update are per-buffer independent —
+---`render.reconcile`/`update_viewport_popups` only touch state keyed on
+---their own `bufnr` (handles[bufnr], that buffer's extmarks, windows
+---showing that buffer) — so fusing the two former back-to-back sweeps
+---(reconcile_all_loaded then refresh_all_loaded_viewports) into one loop
+---is behavior-preserving while halving the per-buffer store reads: each
+---buffer now resolves its inputs once instead of ~4×.
+local function refresh_all_loaded()
+  local cfg = require("manicule.config").get()
+  local sticky = (cfg.ui or {}).sticky
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
-      refresh_viewport(bufnr)
+      paint_buffer(bufnr, sticky)
     end
   end
 end
@@ -244,15 +337,40 @@ local function hide_popups_on_leave(bufnr)
   if ok_editor and editor.is_opening() then
     return
   end
-  require("manicule.ui.render").hide_all_popups(bufnr)
+  -- Defer the hide/keep decision: at BufLeave/WinLeave the window+buffer
+  -- transition hasn't settled, so we can't yet tell whether the buffer is
+  -- going off-screen (`:edit other`, window closed) or just losing focus
+  -- while staying visible (splitting open the quickfix list, help, a diff,
+  -- etc.). After scheduling, `win_findbuf` reflects the final layout. Only
+  -- hide when the buffer is no longer displayed anywhere; otherwise refresh
+  -- its viewport so the popups persist while it stays on screen.
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
+    if #vim.fn.win_findbuf(bufnr) == 0 then
+      require("manicule.ui.render").hide_all_popups(bufnr)
+    else
+      -- Buffer still visible, just lost focus. Under non-sticky this is a
+      -- cheap viewport refresh (unchanged behavior). Under sticky,
+      -- `refresh_viewport` early-returns and would never rebuild popups,
+      -- so route through `attach_buffer` (reconcile re-schedules the
+      -- sticky popups). `attach_buffer` covers both modes.
+      local cfg = require("manicule.config").get()
+      if (cfg.ui or {}).sticky then
+        attach_buffer(bufnr)
+      else
+        refresh_viewport(bufnr)
+      end
+    end
+  end)
 end
 
 local function refresh_external_store_changes(roots)
   if type(roots) ~= "table" or #roots == 0 then
     return
   end
-  reconcile_all_loaded()
-  refresh_all_loaded_viewports()
+  refresh_all_loaded()
   local quickfix = require("manicule.ui.quickfix")
   if quickfix.is_manicule_qf_open() then
     quickfix.refresh()
@@ -309,8 +427,11 @@ function refresh_viewport(bufnr)
   if (cfg.ui or {}).sticky then
     return
   end
-  local records = records_for_buffer(bufnr)
-  require("manicule.ui.render").update_viewport_popups(bufnr, records, counter_records_for_buffer(bufnr))
+  -- Single-pass: one identify + one store read derives both result sets,
+  -- instead of `records_for_buffer` + `counter_records_for_buffer` each
+  -- re-resolving identity and re-querying the store.
+  local records, counter_records = render_inputs(bufnr)
+  require("manicule.ui.render").update_viewport_popups(bufnr, records, counter_records)
 end
 
 ---Copy live extmark positions back into their records. Extmarks are the
@@ -412,12 +533,15 @@ end
 ---no project root (both helpers early-return). Does NOT emit User
 ---`Manicule*` events — those are reserved for mutations.
 ---@param bufnr integer
-local function attach_buffer(bufnr)
+function attach_buffer(bufnr)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
     return
   end
-  reconcile_buffer(bufnr)
-  refresh_viewport(bufnr)
+  -- Single-pass paint: resolve `render_inputs` once and feed it to both
+  -- reconcile (orphan detection retained) and the sticky-gated viewport
+  -- update, instead of `reconcile_buffer` + `refresh_viewport` each
+  -- re-resolving identity and re-reading the store.
+  paint_buffer(bufnr)
 end
 
 ---Per-bufnr snapshot of the URI that was live when `BufFilePre`
@@ -565,10 +689,54 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized", "CursorMoved", "CursorMovedI" }, {
     group = group,
     callback = function(ev)
-      -- Avoid doing float reconfigure work from inside the autocmd;
-      -- scheduling lets batched events coalesce into a single render.
+      local bufnr = ev.buf
+      if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      -- Coalesce the burst: a single user action fires several of these
+      -- events, but only the first schedules the refresh. Subsequent
+      -- events in the same burst find the flag already set and no-op, so
+      -- the buffer renders once per action instead of 2–3×. Scheduling
+      -- (vs. an inline call) still avoids float-reconfigure work from
+      -- inside the autocmd and adds no latency.
+      if viewport_refresh_pending[bufnr] then
+        return
+      end
+      viewport_refresh_pending[bufnr] = true
       vim.schedule(function()
-        refresh_viewport(ev.buf)
+        viewport_refresh_pending[bufnr] = nil
+        refresh_viewport(bufnr)
+      end)
+    end,
+  })
+
+  -- Sticky-only: rebuild popups after a window-layout change. Under
+  -- sticky every layout event routes through `refresh_viewport`, which
+  -- early-returns, so closing a window never re-runs reconcile. When the
+  -- closed window was a sticky float's `relative='win'` anchor, Neovim
+  -- auto-closes the float; if the buffer is still shown in another window
+  -- nothing rebuilds the popup. Re-reconcile every still-visible buffer so
+  -- their floats come back. Non-sticky users pay nothing (early return).
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = group,
+    callback = function()
+      local cfg = require("manicule.config").get()
+      if not (cfg.ui or {}).sticky then
+        return
+      end
+      -- The window is still in the layout inside the WinClosed callback, so
+      -- defer: recompute the surviving windows and reconcile their buffers.
+      vim.schedule(function()
+        local seen = {}
+        for _, winid in ipairs(vim.api.nvim_list_wins()) do
+          if vim.api.nvim_win_is_valid(winid) then
+            local bufnr = vim.api.nvim_win_get_buf(winid)
+            if not seen[bufnr] then
+              seen[bufnr] = true
+              attach_buffer(bufnr)
+            end
+          end
+        end
       end)
     end,
   })
@@ -679,6 +847,7 @@ function M.setup(opts)
       "ManiculeOrphaned",
       "ManiculeRenamed",
       "ManiculeSynced",
+      "ManiculeRestored",
     },
     callback = function()
       -- Defer so a burst of events coalesces and we don't mutate the
@@ -742,17 +911,27 @@ local function finalize_add(body, bufnr, range)
     meta = identity.ephemeral and { ephemeral = true } or {},
   }
   -- Invariant canary: re-run `identify` and refuse to persist if it
-  -- doesn't reproduce the URI we built the record around. Guards
+  -- doesn't reproduce the identity we built the record around. Guards
   -- against regressions where the adapter's build-time and reload-time
-  -- URI diverge (staged buffers, future reverse-map bugs) — without
-  -- this check, a record with a non-reproducible URI would persist and
-  -- never re-anchor.
+  -- identity diverge (staged buffers, future reverse-map bugs) — without
+  -- this check, a record could persist under a non-reproducible URI and
+  -- never re-anchor, or worse, land in the wrong store if `scope` /
+  -- `project_root` drifted between the two `identify` calls.
   local verify, verr = adapter.identify(bufnr)
-  if not verify or verify.uri ~= record.uri then
+  if
+    not verify
+    or verify.uri ~= record.uri
+    or verify.scope ~= record.scope
+    or verify.project_root ~= record.project_root
+  then
     vim.notify(
-      ("manicule: URI invariant violated (expected %s, got %s: %s)"):format(
+      ("manicule: URI invariant violated (expected %s/%s/%s, got %s/%s/%s: %s)"):format(
         record.uri,
+        tostring(record.scope),
+        tostring(record.project_root),
         verify and verify.uri or "nil",
+        verify and tostring(verify.scope) or "nil",
+        verify and tostring(verify.project_root) or "nil",
         verr or "no err"
       ),
       vim.log.levels.ERROR
@@ -1063,23 +1242,24 @@ function M.edit(id, opts)
       return
     end
     -- Rebuild popups for every buffer that currently renders this record.
-    reconcile_all_loaded()
-    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(bufnr) then
-        refresh_viewport(bufnr)
-      end
-    end
+    refresh_all_loaded()
     emit("ManiculeEdited", record)
   end)
 end
 
 ---Delete a comment by id.
 ---@param id string
----@param opts? { scope?: "project"|"session", project_root?: string }
+---@param opts? { scope?: "project"|"session", project_root?: string, quiet?: boolean }
 function M.delete(id, opts)
+  opts = opts or {}
   local record, _, remove = find(id, opts)
   if not record or not remove then
-    vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
+    -- `quiet` suppresses the not-found WARN for callers that delete in
+    -- bulk where some ids may already be gone (e.g. the auto-clear loop
+    -- in `M.send` after a concurrent sync removed records).
+    if not opts.quiet then
+      vim.notify("manicule: no comment with id " .. tostring(id), vim.log.levels.WARN)
+    end
     return
   end
   local snapshot = vim.deepcopy(record)
@@ -1089,9 +1269,70 @@ function M.delete(id, opts)
     notify_save_failed("deleted comment", err)
     return
   end
-  reconcile_all_loaded()
-  refresh_all_loaded_viewports()
+  -- Push the pre-delete snapshot so `undo_delete` can restore it. The
+  -- stack is LIFO; trim from the front when it exceeds the bound.
+  push_bounded(delete_undo_stack, snapshot)
+  -- A fresh deletion invalidates the redo branch, mirroring Vim's
+  -- undo-tree: a new edit discards any redo history.
+  delete_redo_stack = {}
+  refresh_all_loaded()
   emit("ManiculeDeleted", { id = id, record = record })
+end
+
+---Restore the most recently deleted comment. Multi-level: call
+---repeatedly to undo successive deletions in LIFO order.
+function M.undo_delete()
+  local snapshot = table.remove(delete_undo_stack)
+  if not snapshot then
+    vim.notify("manicule: nothing to undo", vim.log.levels.INFO)
+    return
+  end
+  local ok, err = require("manicule.store").restore_record(snapshot)
+  if not ok then
+    table.insert(delete_undo_stack, snapshot) -- keep it for a retry
+    notify_save_failed("restored comment", err)
+    return
+  end
+  -- Restoring moves the snapshot onto the redo branch so `redo_delete`
+  -- can re-apply it. LIFO; trim from the front at the bound.
+  push_bounded(delete_redo_stack, snapshot)
+  refresh_all_loaded()
+  emit("ManiculeRestored", snapshot)
+end
+
+---Re-apply the most recently undone deletion (redo). Multi-level:
+---call repeatedly to redo successive undos in LIFO order. A fresh
+---`M.delete` clears the redo stack, matching Vim's undo-tree behavior.
+function M.redo_delete()
+  local snapshot = table.remove(delete_redo_stack)
+  if not snapshot then
+    vim.notify("manicule: nothing to redo", vim.log.levels.INFO)
+    return
+  end
+  -- Re-delete by the snapshot's OWN scope/root rather than re-`find`ing
+  -- through the current buffer. Redo invoked from a different buffer or
+  -- project must not depend on whichever store the current buffer
+  -- resolves to — that path could fail to surface the record and drop
+  -- the snapshot from the redo stack permanently.
+  local store = require("manicule.store")
+  local removed = store.remove_record(snapshot.scope, snapshot.id, snapshot.project_root)
+  local ok, err
+  if snapshot.scope == "session" then
+    ok, err = store.session_save()
+  else
+    ok, err = store.save(snapshot.project_root)
+  end
+  if not ok then
+    table.insert(delete_redo_stack, snapshot) -- keep it for a retry
+    notify_save_failed("deleted comment", err)
+    return
+  end
+  -- If the record was already gone (e.g. removed by a concurrent sync),
+  -- treat the redo as a no-op success: still pop it onto the undo stack
+  -- so the round-trip stays consistent, but don't error-spam.
+  push_bounded(delete_undo_stack, snapshot)
+  refresh_all_loaded()
+  emit("ManiculeDeleted", { id = snapshot.id, record = removed or snapshot })
 end
 
 ---Mark a comment as resolved.
@@ -1124,25 +1365,10 @@ end
 ---@param records table[]
 ---@return table[]
 local function sort_records(records)
-  local function start_line(r)
-    if r and r.range and r.range.start then
-      return (r.range.start[1] or 0) + 1
-    end
-    return 1
-  end
-  table.sort(records, function(a, b)
-    local ap = tostring(a.uri or "")
-    local bp = tostring(b.uri or "")
-    if ap ~= bp then
-      return ap < bp
-    end
-    local al = start_line(a)
-    local bl = start_line(b)
-    if al ~= bl then
-      return al < bl
-    end
-    return tostring(a.id or "") < tostring(b.id or "")
-  end)
+  -- Sorts in place (callers own a fresh list). Ordering matches the
+  -- quickfix formatter via the shared `manicule.range.compare` so the
+  -- picker, completion, and quickfix all agree.
+  table.sort(records, require("manicule.range").compare)
   return records
 end
 
@@ -1267,10 +1493,11 @@ function M.send(sink_name, filter, ctx)
       -- — store.remove + save, render.reconcile per buffer, and one
       -- `User ManiculeDeleted` per record — exactly as if the user had
       -- deleted them by hand. `M.delete` is idempotent on unknown ids
-      -- (emits a WARN notify and returns early), so a sink that already
-      -- cleared records itself becomes a no-op here.
+      -- (returns early), so a sink that already cleared records itself
+      -- becomes a no-op here. Pass `quiet` so already-removed records
+      -- (e.g. a concurrent sync) don't spam a not-found WARN per id.
       for _, record in ipairs(records) do
-        M.delete(record.id, { scope = record.scope, project_root = record.project_root })
+        M.delete(record.id, { scope = record.scope, project_root = record.project_root, quiet = true })
       end
     end
   end)

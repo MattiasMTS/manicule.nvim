@@ -30,6 +30,12 @@ local M = {}
 local uv = vim.uv or vim.loop
 local config = require("manicule.config")
 
+-- Seed the RNG once at module load so `client_id`'s random suffix is not
+-- deterministic across same-PID process starts (collision risk when two
+-- peers share a client_id in the event log). Mix the high-resolution
+-- monotonic clock with pid + wall-clock time for entropy.
+math.randomseed(uv.hrtime() % 0x7fffffff + vim.fn.getpid() + os.time())
+
 local STORE_VERSION = 1
 
 ---@class manicule.StoreEntry
@@ -499,6 +505,65 @@ local function event_kind_for_field(field, value)
   return "comment_updated"
 end
 
+---Field-level merge of a local `record` against the on-disk `projected`
+---row, diffed relative to `base`. Used by `M.save` for both the
+---known-base path (`base` = the cache snapshot) and the
+---unknown-base-but-row-exists path (`base` = the on-disk row itself, so
+---local changes are persisted instead of dropped).
+---
+---For each field the local client changed relative to `base`:
+---  * If the on-disk projection ALSO changed that same field relative to
+---    `base` (a concurrent same-field edit), prefer the newer
+---    `updated_at`: keep the local value only when it is at least as new
+---    as the on-disk row, otherwise leave the on-disk value untouched.
+---  * If only the local client changed the field (different fields, or
+---    the disk left it alone), write the local value — this preserves the
+---    existing field-granularity merge so concurrent edits to DIFFERENT
+---    fields both survive.
+---`projected.updated_at` is bumped once to `max(local, on-disk)` rather
+---than to whichever field happened to be merged last.
+---@param db table
+---@param root string
+---@param id string
+---@param base table
+---@param record table
+---@param projected table the on-disk projection (mutated in place)
+---@param now integer
+---@return boolean ok, string? err
+local function merge_fields_into_projection(db, root, id, base, record, projected, now)
+  local fields = changed_fields(base, record)
+  local local_updated = tonumber(record.updated_at) or now
+  local disk_updated = tonumber(projected.updated_at) or 0
+  for _, field in ipairs(RECORD_FIELDS) do
+    if fields[field] then
+      -- A concurrent same-field edit lands on disk when the projection's
+      -- value for this field already diverged from our base. In that case
+      -- last-writer-wins by `updated_at`; only overwrite when local is at
+      -- least as new. Different-field edits never hit this branch, so they
+      -- always merge (preserving field-granularity behavior).
+      local also_changed_on_disk = not vim.deep_equal(base and base[field], projected and projected[field])
+      if not also_changed_on_disk or local_updated >= disk_updated then
+        projected[field] = vim.deepcopy(record[field])
+        local event_ok, event_err = sqlite_insert_event(db, root, id, event_kind_for_field(field, record[field]), {
+          field = field,
+          value = record[field],
+          updated_at = local_updated,
+        }, now)
+        if not event_ok then
+          return false, event_err
+        end
+      end
+    end
+  end
+  projected.updated_at = math.max(local_updated, disk_updated)
+  return true
+end
+
+-- Forward declaration: `M.load` calls the shared refresh helper, whose
+-- definition lives below it (so it can reuse the same doc/body as the
+-- post-write resync path). Declared local here to avoid leaking a global.
+local refresh_cache_entry
+
 ---Load all records for `root` into the cache. No-op if already loaded.
 ---@param root string|nil
 ---@return table[]
@@ -510,28 +575,56 @@ function M.load(root)
     return cache[root].records
   end
 
-  local records = {}
   local db, err = sqlite_db(root)
   if not db then
     vim.notify(("manicule: failed to open sqlite store for %s: %s"):format(root, tostring(err)), vim.log.levels.ERROR)
     cache[root] = {
-      records = records,
+      records = {},
       dirty = false,
       base_by_id = {},
       removed = {},
       last_seen_event_id = 0,
     }
-    return records
+    return cache[root].records
   end
-  records = sqlite_read_records(db, root)
-  cache[root] = {
-    records = records,
+  -- Start from an empty entry, then fill it via the shared refresh helper
+  -- so the on-disk read + error-handling guard live in exactly one place.
+  -- A transient read error leaves the empty cache (nothing to clobber yet).
+  local entry = {
+    records = {},
     dirty = false,
-    base_by_id = by_id(records),
+    base_by_id = {},
     removed = {},
-    last_seen_event_id = sqlite_last_event_id(db, root),
+    last_seen_event_id = 0,
   }
-  return records
+  cache[root] = entry
+  refresh_cache_entry(entry, db, root)
+  return entry.records
+end
+
+---Refresh a cache entry from the on-disk SQLite state. Shared by
+---`M.load`, `M.sync`, and post-write resync (`M.save`/`M.restore_record`)
+---so the `records = read; base_by_id = by_id(records); removed = {};
+---last_seen_event_id = ...; dirty = false` sequence — and the
+---transient-read-error guard — exist in exactly one place. On a read
+---error the existing cache is left untouched (records/base_by_id/
+---last_seen_event_id are NOT advanced), so a flaky read never blanks the
+---UI's comments.
+---@param entry table cache[root] entry
+---@param db table
+---@param root string
+---@return boolean ok, string? err
+function refresh_cache_entry(entry, db, root)
+  local fresh_records, read_err = sqlite_read_records(db, root)
+  if read_err then
+    return false, read_err
+  end
+  entry.records = fresh_records
+  entry.base_by_id = by_id(fresh_records)
+  entry.removed = {}
+  entry.last_seen_event_id = sqlite_last_event_id(db, root)
+  entry.dirty = false
+  return true
 end
 
 ---Persist the cache entry for `root` if dirty.
@@ -579,7 +672,7 @@ function M.save(root)
         local id = tostring(record.id)
         local base = entry.base_by_id and entry.base_by_id[id] or nil
         if not base then
-          local current = sqlite_get_record(db, root, id, true)
+          local current, deleted_at = sqlite_get_record(db, root, id, true)
           if not current then
             local event_ok, event_err = sqlite_insert_event(db, root, id, "comment_created", { record = record }, now)
             if not event_ok then
@@ -589,6 +682,24 @@ function M.save(root)
             if not upsert_ok then
               return false, upsert_err
             end
+          elseif not deleted_at then
+            -- A live row already exists on disk but isn't in our snapshot
+            -- (e.g. created by a peer after we loaded). Without a base we
+            -- can't tell which fields we changed, so treat the on-disk row
+            -- as the base and field-merge our local record into it —
+            -- otherwise our content would be silently dropped.
+            local fields = changed_fields(current, record)
+            if has_changes(fields) then
+              local projected = vim.deepcopy(current)
+              local merged_ok, merged_err = merge_fields_into_projection(db, root, id, current, record, projected, now)
+              if not merged_ok then
+                return false, merged_err
+              end
+              local upsert_ok, upsert_err = sqlite_upsert_record(db, root, projected)
+              if not upsert_ok then
+                return false, upsert_err
+              end
+            end
           end
         else
           local fields = changed_fields(base, record)
@@ -596,20 +707,9 @@ function M.save(root)
             local projected, deleted_at = sqlite_get_record(db, root, id, true)
             if not deleted_at then
               projected = projected or vim.deepcopy(base)
-              for _, field in ipairs(RECORD_FIELDS) do
-                if fields[field] then
-                  projected[field] = vim.deepcopy(record[field])
-                  projected.updated_at = record.updated_at or now
-                  local event_ok, event_err =
-                    sqlite_insert_event(db, root, id, event_kind_for_field(field, record[field]), {
-                      field = field,
-                      value = record[field],
-                      updated_at = projected.updated_at,
-                    }, now)
-                  if not event_ok then
-                    return false, event_err
-                  end
-                end
+              local merged_ok, merged_err = merge_fields_into_projection(db, root, id, base, record, projected, now)
+              if not merged_ok then
+                return false, merged_err
               end
               local upsert_ok, upsert_err = sqlite_upsert_record(db, root, projected)
               if not upsert_ok then
@@ -625,16 +725,7 @@ function M.save(root)
   if not ok then
     return false, err
   end
-  local fresh_records, read_err = sqlite_read_records(db, root)
-  if read_err then
-    return false, read_err
-  end
-  entry.records = fresh_records
-  entry.base_by_id = by_id(fresh_records)
-  entry.removed = {}
-  entry.last_seen_event_id = sqlite_last_event_id(db, root)
-  entry.dirty = false
-  return true
+  return refresh_cache_entry(entry, db, root)
 end
 
 ---Return all cached records for `root` (loads on first access).
@@ -673,11 +764,13 @@ function M.sync(root)
   if last <= (entry.last_seen_event_id or 0) then
     return false
   end
-  local records = sqlite_read_records(db, root)
-  entry.records = records
-  entry.base_by_id = by_id(records)
-  entry.removed = {}
-  entry.last_seen_event_id = last
+  -- Route through the shared refresh helper so a transient read error
+  -- leaves the existing cache intact (records/base_by_id/last_seen_event_id
+  -- are NOT advanced) instead of blanking the UI's comments with `{}`.
+  local ok = refresh_cache_entry(entry, db, root)
+  if not ok then
+    return false
+  end
   return true
 end
 
@@ -707,6 +800,12 @@ function M.get(root, id)
 end
 
 ---Insert or update a record (matched by id). Flags the root dirty.
+---Re-inserting a record cancels any pending removal of the same id: a
+---prior `M.remove` set `entry.removed[id]` (the tombstone-intent marker),
+---and without clearing it the next `save` would write a `comment_deleted`
+---tombstone for a record that is also live in `entry.records`, silently
+---dropping the comment. This makes the `M.delete` rollback path
+---(`put_record(snapshot)` after a failed delete, in init.lua) safe.
 ---@param root string|nil
 ---@param record table
 function M.put(root, record)
@@ -715,6 +814,9 @@ function M.put(root, record)
   end
   local records = M.all(root)
   local entry = cache[root]
+  if entry.removed then
+    entry.removed[tostring(record.id)] = nil
+  end
   for i, r in ipairs(records) do
     if r.id == record.id then
       records[i] = record
@@ -944,6 +1046,54 @@ function M.put_record(record)
   end
   -- Default / project: require an explicit root on the record.
   M.put(record.project_root, record)
+end
+
+---Restore a previously-deleted record from a snapshot. Session records
+---are re-inserted into the JSON cache and saved. Project records are
+---soft-deleted via a SQLite tombstone (`deleted_at`), so a plain
+---`put_record` + `save` won't bring them back — `M.save` deliberately
+---refuses to resurrect a tombstoned row. We therefore clear the
+---tombstone directly by upserting the record with `deleted_at = NULL`
+---inside a transaction, alongside a `comment_restored` event for the
+---audit log, then refresh the cache entry from disk.
+---@param record table A previously-deleted record snapshot (must have id; project records must carry project_root).
+---@return boolean ok, string? err
+function M.restore_record(record)
+  if record.scope == "session" then
+    M.session_put(vim.deepcopy(record))
+    return M.session_save()
+  end
+  -- Project scope: clear the SQLite tombstone in place.
+  local root = record.project_root
+  if not root then
+    return false, "restore_record: missing project_root"
+  end
+  -- Ensure a cache entry exists before we refresh it post-transaction.
+  M.all(root)
+  local entry = cache[root]
+  local db, db_err = sqlite_db(root)
+  if not db then
+    return false, db_err
+  end
+  local ok, err = db:transaction(function()
+    local now = os.time()
+    local event_ok, event_err =
+      sqlite_insert_event(db, root, record.id, "comment_restored", { record = record, restored_at = now }, now)
+    if not event_ok then
+      return false, event_err
+    end
+    -- No deleted_at argument → writes deleted_at = NULL, un-tombstoning.
+    local upsert_ok, upsert_err = sqlite_upsert_record(db, root, record)
+    if not upsert_ok then
+      return false, upsert_err
+    end
+    return true
+  end)
+  if not ok then
+    return false, err
+  end
+  -- `M.all(root)` populated `cache[root]`, so `entry` is non-nil here.
+  return refresh_cache_entry(entry, db, root)
 end
 
 ---Dispatch a `remove` by scope. For project-scope, `scope_or_root` may

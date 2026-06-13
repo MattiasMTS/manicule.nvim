@@ -19,7 +19,6 @@ if ok_ffi then
     void sqlite3_free(void*);
     const char *sqlite3_errmsg(sqlite3*);
     int sqlite3_busy_timeout(sqlite3*, int ms);
-    sqlite3_int64 sqlite3_last_insert_rowid(sqlite3*);
 
     int sqlite3_prepare_v2(sqlite3*, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
     int sqlite3_finalize(sqlite3_stmt *pStmt);
@@ -145,12 +144,41 @@ end
 
 local SQLITE_TRANSIENT = ok_ffi and ffi.cast("sqlite3_destructor_type", -1) or nil
 
-local function bind(stmt, params)
+---Count of placeholders implied by `params`. `ipairs` stops at the first
+---nil hole, so a NULL parameter (Lua nil) would truncate the bind list
+---and leave later placeholders unbound. Determine the real length from
+---an explicit `n`, an embedded `params.n`, or the highest numeric key
+---(`table.maxn` on LuaJIT) so binding spans every slot.
+---@param params table
+---@param n integer?
+---@return integer
+local function param_count(params, n)
+  if n then
+    return n
+  end
+  if params.n then
+    return params.n
+  end
+  if table.maxn then
+    return table.maxn(params)
+  end
+  local max = 0
+  for k in pairs(params) do
+    if type(k) == "number" and k > max then
+      max = k
+    end
+  end
+  return max
+end
+
+local function bind(stmt, params, n)
   if not params then
     return true
   end
   local C = load_lib()
-  for i, value in ipairs(params) do
+  local count = param_count(params, n)
+  for i = 1, count do
+    local value = params[i]
     local rc
     local t = type(value)
     if value == nil then
@@ -266,11 +294,6 @@ function DB:row(sql, params)
     return nil, err
   end
   return rows[1]
-end
-
----@return integer
-function DB:last_insert_rowid()
-  return tonumber(load_lib().sqlite3_last_insert_rowid(self.handle))
 end
 
 ---@param fn fun(): boolean?, string?

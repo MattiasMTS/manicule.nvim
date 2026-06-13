@@ -13,6 +13,8 @@
 
 local M = {}
 
+local range = require("manicule.range")
+
 local BODY_MAX = 50
 local LOCATION_MAX = 28
 local ELLIPSIS = "…"
@@ -50,9 +52,9 @@ local function first_nonempty_line(body)
   return ""
 end
 
----Compute the display width of a string in cells (treats any non-ASCII
----byte as width 1 because `vim.fn.strdisplaywidth` isn't available in
----every test harness and the picker target widths are approximate).
+---Compute the display width of a string in cells via
+---`vim.fn.strdisplaywidth`, so multibyte/wide glyphs count their real
+---cell width when aligning the picker columns.
 ---@param s string
 ---@return integer
 local function width(s)
@@ -151,20 +153,17 @@ end
 ---@return string
 local function location_for(record)
   local path = display_path(record)
+  -- Reuse the shared 1-indexed range accessors so the picker's line
+  -- numbers stay in lockstep with the quickfix formatter. `start_line`
+  -- falls back to 1 when the range is missing; `end_line` is nil unless
+  -- there's a numeric end row.
+  local sl = range.start_line(record)
+  local el_row = range.end_line(record)
   local line
-  if record.range and record.range.start then
-    local sl = (record.range.start[1] or 0) + 1
-    local el_row
-    if record.range.end_ and type(record.range.end_[1]) == "number" then
-      el_row = record.range.end_[1] + 1
-    end
-    if el_row and el_row > sl then
-      line = string.format("%d-%d", sl, el_row)
-    else
-      line = tostring(sl)
-    end
+  if el_row and el_row > sl then
+    line = string.format("%d-%d", sl, el_row)
   else
-    line = "1"
+    line = tostring(sl)
   end
   local suffix = ":" .. line
   local path_budget = LOCATION_MAX - width(suffix)

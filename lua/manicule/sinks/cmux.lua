@@ -139,10 +139,6 @@ local function detect_agent_from_screen(screen)
   return nil
 end
 
-local function agent_matches(agent, patterns)
-  return title_matches(agent, patterns)
-end
-
 ---@param surface string|table
 ---@return string?
 function M.surface_ref(surface)
@@ -155,10 +151,6 @@ function M.surface_ref(surface)
   return surface.ref or surface.id
 end
 
-local function surface_ref(surface)
-  return M.surface_ref(surface)
-end
-
 ---@param surface table|string
 ---@return string
 function M.surface_label(surface)
@@ -166,7 +158,7 @@ function M.surface_label(surface)
     return tostring(surface)
   end
   local title = surface.tab_title or surface.title or surface.name or "cmux surface"
-  local ref = surface_ref(surface) or "?"
+  local ref = M.surface_ref(surface) or "?"
   local agent = surface.agent or surface.type
   local status = surface.status
   if type(surface.detail) == "string" and surface.detail ~= "" then
@@ -204,30 +196,33 @@ end
 local function read_agent_states(opts)
   local states = {}
   local labels = {}
+  local dropped = 0
   local files = vim.fn.glob(clean_tmpdir(opts.agent_state_dir) .. "/cmux-agent-state-*/*.state", false, true)
   for _, file in ipairs(files) do
     local line = read_first_line(file)
-    if line and line ~= "" then
+    local surface_key = line and line ~= "" and split_tabs(line)[6] or nil
+    if surface_key and surface_key ~= "" then
       local fields = split_tabs(line)
-      local surface_key = fields[6]
-      if surface_key and surface_key ~= "" then
-        local state = {
-          agent_key = fields[1],
-          agent_title = fields[2],
-          start_ts = tonumber(fields[3]),
-          status = fields[4],
-          detail = fields[5],
-          surface_key = surface_key,
-          tab_title = fields[7],
-          status_color = fields[8],
-          active = fields[9] == "1",
-        }
-        states[state_surface_key(surface_key)] = state
-        table.insert(labels, (state.agent_title or state.agent_key or "agent") .. ":" .. surface_key)
-      end
+      local state = {
+        agent_key = fields[1],
+        agent_title = fields[2],
+        start_ts = tonumber(fields[3]),
+        status = fields[4],
+        detail = fields[5],
+        surface_key = surface_key,
+        tab_title = fields[7],
+        status_color = fields[8],
+        active = fields[9] == "1",
+      }
+      states[state_surface_key(surface_key)] = state
+      table.insert(labels, (state.agent_title or state.agent_key or "agent") .. ":" .. surface_key)
+    else
+      -- Malformed/empty state file (no surface key): drop it, but leave a
+      -- breadcrumb so the "no cmux agent surfaces" error can explain it.
+      dropped = dropped + 1
     end
   end
-  return states, labels
+  return states, labels, dropped
 end
 
 local function state_for_surface(states, surface)
@@ -248,9 +243,11 @@ local function parse_tree_surface(line)
   if not ref then
     return nil
   end
+  -- Leave title nil when the tree line carries no quoted title, so a real
+  -- RPC title can fill it in instead of a placeholder clobbering it.
   return {
     ref = ref,
-    title = line:match('%[terminal%]%s+"(.-)"') or line:match('%[browser%]%s+"(.-)"') or "cmux surface",
+    title = line:match('%[terminal%]%s+"(.-)"') or line:match('%[browser%]%s+"(.-)"'),
     type = line:match("%[(terminal)%]") or line:match("%[(browser)%]") or "surface",
     tty = line:match("tty=([^%s]+)"),
     is_current = line:find(" here", 1, true) ~= nil,
@@ -313,7 +310,10 @@ local function merge_tree_rpc_surfaces(tree_surfaces, rpc_surfaces)
   local merged = {}
   for _, surface in ipairs(tree_surfaces) do
     local metadata = rpc_by_ref[surface.ref] or {}
-    table.insert(merged, vim.tbl_extend("force", {}, metadata, surface))
+    -- Merge tree fields first, then let RPC metadata win: a real RPC title
+    -- must not be clobbered by the tree-parsed (often nil) title. Tree-only
+    -- surfaces still get a sensible label via surface_label's fallback.
+    table.insert(merged, vim.tbl_extend("force", {}, surface, metadata))
   end
   return merged
 end
@@ -383,7 +383,7 @@ end
 local function read_surface_screens(opts, surfaces)
   local jobs = {}
   for _, surface in ipairs(surfaces) do
-    local ref = surface_ref(surface)
+    local ref = M.surface_ref(surface)
     if ref then
       table.insert(jobs, {
         surface = surface,
@@ -411,8 +411,20 @@ local function read_surface_screens(opts, surfaces)
 end
 
 local function is_current_surface(opts, surface)
+  if surface.is_current == true then
+    return true
+  end
   local current = opts.current_surface
-  return surface.is_current == true or (current and current ~= "" and (surface.id == current or surface.ref == current))
+  if not current or current == "" then
+    return false
+  end
+  -- Normalize both id and ref forms (tree surfaces only carry .ref) so the
+  -- current (nvim) pane is reliably excluded regardless of which key the
+  -- environment's CMUX_SURFACE_ID matches.
+  local current_key = state_surface_key(current)
+  return state_surface_key(surface.id) == current_key
+    or state_surface_key(surface.ref) == current_key
+    or state_surface_key(surface.surface_key) == current_key
 end
 
 local function copy_surface(surface)
@@ -462,7 +474,7 @@ function M.list_agent_surfaces(opts)
     return finish(nil, err)
   end
 
-  local states, state_labels = read_agent_states(opts)
+  local states, state_labels, dropped_states = read_agent_states(opts)
   local ttys = nil
   local ps = {}
   local matches = {}
@@ -474,7 +486,7 @@ function M.list_agent_surfaces(opts)
     if not metadata then
       return
     end
-    local ref = surface_ref(surface)
+    local ref = M.surface_ref(surface)
     local key_for_surface = ref or surface.id or tostring(surface.index or surface)
     if not metadata.tty and ref then
       metadata.tty = surface.tty
@@ -523,11 +535,11 @@ function M.list_agent_surfaces(opts)
         local tty = surface.tty
         if not tty then
           ttys = ttys or tree_ttys_by_surface_ref(opts)
-          tty = ttys[surface_ref(surface)]
+          tty = ttys[M.surface_ref(surface)]
         end
         for _, command in ipairs(ps_commands_for_tty(tty, ps)) do
           local command_agent = detect_agent_from_command(command)
-          if agent_matches(command_agent, opts.patterns) then
+          if title_matches(command_agent, opts.patterns) then
             metadata = {
               agent = command_agent,
               detected_by = "tty",
@@ -550,7 +562,7 @@ function M.list_agent_surfaces(opts)
     local screens = read_surface_screens(opts, screen_candidates)
     for _, surface in ipairs(screen_candidates) do
       local screen_agent = detect_agent_from_screen(screens[surface])
-      if agent_matches(screen_agent, opts.patterns) then
+      if title_matches(screen_agent, opts.patterns) then
         add_match(surface, {
           agent = screen_agent,
           detected_by = "screen",
@@ -560,6 +572,9 @@ function M.list_agent_surfaces(opts)
   end
 
   if #matches == 0 then
+    local dropped_note = (dropped_states or 0) > 0
+        and ("; dropped " .. tostring(dropped_states) .. " malformed state file(s)")
+      or ""
     return finish(
       matches,
       "no cmux agent surfaces among "
@@ -568,6 +583,7 @@ function M.list_agent_surfaces(opts)
         .. table.concat(titles, ", ")
         .. "; agent states: "
         .. (#state_labels > 0 and table.concat(state_labels, ", ") or "none")
+        .. dropped_note
         .. ")"
     )
   end
@@ -643,24 +659,53 @@ local function chunk_text(text, max_bytes)
   return chunks
 end
 
+-- Compose an actionable error for a chunked paste that failed partway. The
+-- cmux CLI surface used here pastes per chunk (no atomic append+paste), so a
+-- failure can leave a truncated review in the pane; tell the caller how many
+-- chunks landed and that the pane should be cleared before retrying.
+local function partial_paste_error(pasted, total, detail)
+  local msg = string.format(
+    "cmux paste failed after %d/%d chunks; the pane holds a truncated review — clear it before retrying",
+    pasted,
+    total
+  )
+  if detail and detail ~= "" then
+    msg = msg .. " (" .. detail .. ")"
+  end
+  return msg
+end
+
 local function send_text(opts, surface, text)
-  local ref = surface_ref(surface)
+  local ref = M.surface_ref(surface)
   if not ref or ref == "" then
     return false, "cmux target has no surface ref"
   end
+  text = tostring(text or "")
+  local chunk_bytes = math.max(1, math.floor(tonumber(opts.paste_chunk_bytes) or 1024))
+  -- Route through the chunked set-buffer/paste-buffer path whenever the
+  -- payload is multiline OR larger than the chunk threshold. A single,
+  -- newline-free payload that exceeds the threshold must NOT be passed as
+  -- one argv to `cmux send --` (it can fail at the exec layer with E2BIG).
+  -- The small/simple `cmux send` path stays only for genuinely small,
+  -- single-line payloads.
   local result
-  if tostring(text or ""):find("\n", 1, true) then
-    local chunks = chunk_text(text, opts.paste_chunk_bytes)
+  if text:find("\n", 1, true) or #text > chunk_bytes then
+    local chunks = chunk_text(text, chunk_bytes)
     local stamp = string.format("%d", (vim.uv or vim.loop).hrtime())
     for idx, chunk in ipairs(chunks) do
       local buffer_name = "manicule-" .. stamp .. "-" .. idx
       local set_result = helpers.system({ cli(opts), "set-buffer", "--name", buffer_name, "--", chunk })
       if set_result.code ~= 0 then
-        return false, set_result.stderr:gsub("%s+$", "")
+        -- Nothing for this chunk was pasted yet; report how far we got so the
+        -- caller knows the pane holds a partial review.
+        return false, partial_paste_error(idx - 1, #chunks, set_result.stderr:gsub("%s+$", ""))
       end
       local paste_result = helpers.system({ cli(opts), "paste-buffer", "--name", buffer_name, "--surface", ref })
       if paste_result.code ~= 0 then
-        return false, paste_result.stderr:gsub("%s+$", "")
+        -- Chunk idx failed after 1..idx-1 were pasted: the pane now holds a
+        -- truncated review. Surface that so a retry doesn't silently
+        -- duplicate content into a half-pasted pane.
+        return false, partial_paste_error(idx - 1, #chunks, paste_result.stderr:gsub("%s+$", ""))
       end
       if idx < #chunks then
         sleep_ms(opts.paste_chunk_delay_ms)
@@ -719,7 +764,6 @@ function M.setup(opts)
     clear_on_success = opts.clear_on_success ~= false,
     pre_text = opts.pre_text,
     post_text = opts.post_text,
-    format = helpers.format_line,
     validate = function(ctx)
       if ctx_surface(ctx) then
         return true

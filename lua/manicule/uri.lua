@@ -89,14 +89,7 @@ function M.nvim_runtime_staged_suffix(abs)
     end
   end
 
-  local has_tmp_prefix = false
-  for _, p in ipairs(TMP_PREFIXES) do
-    if abs:sub(1, #p) == p then
-      has_tmp_prefix = true
-      break
-    end
-  end
-  if not has_tmp_prefix then
+  if not M.is_temp_path(abs) then
     return nil
   end
 
@@ -173,6 +166,22 @@ local function canonicalize_symlinks()
   return true
 end
 
+---Encode an already-`vim.fs.normalize`d absolute path as a `file://`
+---URI, resolving symlinks through `fs_realpath` first when
+---canonicalisation is enabled. Single home for the canonicalisation
+---step shared by `for_bufnr` and `for_path`.
+---@param abs string
+---@return string
+local function canonical_uri(abs)
+  if canonicalize_symlinks() then
+    local real = uv.fs_realpath(abs)
+    if real then
+      abs = real
+    end
+  end
+  return vim.uri_from_fname(abs)
+end
+
 ---Extract the URI scheme from `name`, or nil if there isn't one.
 ---@param name string
 ---@return string?
@@ -245,14 +254,7 @@ function M.for_bufnr(bufnr)
     -- key off these directly.
     return name
   end
-  local abs = vim.fs.normalize(vim.fn.fnamemodify(name, ":p"))
-  if canonicalize_symlinks() then
-    local real = uv.fs_realpath(abs)
-    if real then
-      abs = real
-    end
-  end
-  return vim.uri_from_fname(abs)
+  return canonical_uri(vim.fs.normalize(vim.fn.fnamemodify(name, ":p")))
 end
 
 ---Find a loaded buffer that currently corresponds to `uri`.
@@ -282,14 +284,7 @@ end
 ---@param path string
 ---@return string
 function M.for_path(path)
-  local abs = vim.fs.normalize(path)
-  if canonicalize_symlinks() then
-    local real = uv.fs_realpath(abs)
-    if real then
-      abs = real
-    end
-  end
-  return vim.uri_from_fname(abs)
+  return canonical_uri(vim.fs.normalize(path))
 end
 
 ---Extract a filesystem path from a file:// or supported virtual-file URI.
