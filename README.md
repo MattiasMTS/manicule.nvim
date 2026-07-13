@@ -182,7 +182,9 @@ Built-ins:
   comments in Manicule by default so you can verify fixes before resolving them.
 
 `cmux.enabled` is boolean. When enabled, the integration registers only when a
-cmux workspace and usable cmux executable are available.
+cmux workspace and usable cmux executable are available. Agent discovery
+supports Claude Code, Codex, Amp, and Pi through cmux metadata, titles, process
+commands, and terminal contents.
 `cmux.auto_submit` controls whether Manicule presses Enter after pasting the
 review into the agent prompt. Set it to `false` if you want to inspect or edit
 the prompt manually before submission. `cmux.submit_delay_ms` adds a delay

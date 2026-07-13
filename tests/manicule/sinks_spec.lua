@@ -262,6 +262,72 @@ describe("manicule sink helpers", function()
     assert.are.same({}, require("manicule.sinks").list())
   end)
 
+  it("discovers Pi from cmux resume metadata before scanning stale screen content", function()
+    local bin = H.fake_cmux(ctx, {
+      surfaces = {
+        { id = "surface-current", ref = "surface:1", title = "manicule.nvim" },
+        {
+          id = "surface-pi",
+          ref = "surface:2",
+          title = "dotfiles",
+          resume_binding = { kind = "pi", name = "Pi" },
+        },
+      },
+      tree = {
+        'surface:1 [terminal] "manicule.nvim" tty=ttys001 here',
+        'surface:2 [terminal] "dotfiles" tty=ttys002',
+      },
+      screens = {
+        ["surface:2"] = "old notes mentioning OpenAI Codex\nContext 0 tokens",
+      },
+    })
+
+    local surfaces, err = require("manicule.sinks.cmux").list_agent_surfaces({
+      command = bin,
+      workspace_id = "workspace-1",
+      current_surface = "surface-current",
+      process_fallback = false,
+      cache = false,
+      agent_state_dir = ctx.state,
+    })
+
+    assert.is_nil(err)
+    assert.are.equal(1, #surfaces)
+    assert.are.equal("surface:2", surfaces[1].ref)
+    assert.are.equal("Pi", surfaces[1].agent)
+    assert.are.equal("metadata", surfaces[1].detected_by)
+  end)
+
+  it("discovers Pi from its unicode cmux title", function()
+    local bin = H.fake_cmux(ctx, {
+      surfaces = {
+        { id = "surface-current", ref = "surface:1", title = "manicule.nvim" },
+        { id = "surface-pi", ref = "surface:2", title = "π - dotfiles" },
+      },
+      tree = {
+        'surface:1 [terminal] "manicule.nvim" tty=ttys001 here',
+        'surface:2 [terminal] "π - dotfiles" tty=ttys002',
+      },
+      screens = {},
+    })
+
+    local surfaces, err = require("manicule.sinks.cmux").list_agent_surfaces({
+      command = bin,
+      workspace_id = "workspace-1",
+      current_surface = "surface-current",
+      process_fallback = false,
+      screen_fallback = false,
+      cache = false,
+      agent_state_dir = ctx.state,
+    })
+
+    assert.is_nil(err)
+    assert.are.equal(1, #surfaces)
+    assert.are.equal("surface:2", surfaces[1].ref)
+    assert.are.equal("Pi", surfaces[1].agent)
+    assert.are.equal("title", surfaces[1].detected_by)
+  end)
+
   it("discovers a generic-titled split pane by reading the agent screen", function()
     local bin = H.fake_cmux(ctx, {
       surfaces = {

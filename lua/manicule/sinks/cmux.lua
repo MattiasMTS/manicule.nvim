@@ -9,7 +9,17 @@ local helpers = require("manicule.sinks.helpers")
 
 local M = {}
 
-local DEFAULT_PATTERNS = { "Claude Code", "claude-code", "Claude", "OpenAI Codex", "Codex", "sourcegraph/amp", "Amp" }
+local DEFAULT_PATTERNS = {
+  "Claude Code",
+  "claude-code",
+  "Claude",
+  "OpenAI Codex",
+  "Codex",
+  "sourcegraph/amp",
+  "Amp",
+  "Pi",
+  "π",
+}
 local DEFAULT_CACHE_TTL_MS = 5000
 local agent_surface_cache = {}
 
@@ -92,13 +102,19 @@ local function split_tabs(text)
   return fields
 end
 
+local function is_pi_name(value)
+  local lower = tostring(value or ""):lower()
+  return lower:find("π", 1, true) ~= nil or lower:match("%f[%w]pi%f[%W]") ~= nil
+end
+
 local function title_matches(title, patterns)
   if type(title) ~= "string" then
     return false
   end
   local lower = title:lower()
   for _, pattern in ipairs(patterns or DEFAULT_PATTERNS) do
-    if lower:find(tostring(pattern):lower(), 1, true) then
+    local needle = tostring(pattern):lower()
+    if (needle == "pi" and is_pi_name(lower)) or (needle ~= "pi" and lower:find(needle, 1, true)) then
       return true
     end
   end
@@ -115,6 +131,10 @@ local function detect_agent_from_command(command)
   end
   if lower:find("sourcegraph/amp", 1, true) or lower:find("/amp", 1, true) then
     return "Amp"
+  end
+  local executable = lower:match("^%s*([^%s]+)")
+  if executable and executable:match("([^/]+)$") == "pi" then
+    return "Pi"
   end
   return nil
 end
@@ -135,6 +155,32 @@ local function detect_agent_from_screen(screen)
   end
   if lower:find("sourcegraph/amp", 1, true) or lower:match("%f[%w]amp%f[%W]") then
     return "Amp"
+  end
+  if lower:find("pi coding agent", 1, true) or lower:find("π coding agent", 1, true) then
+    return "Pi"
+  end
+  return nil
+end
+
+local function agent_from_metadata(surface, patterns)
+  local candidates = {}
+  local function add(value)
+    if type(value) == "string" and value ~= "" then
+      table.insert(candidates, value)
+    end
+  end
+
+  add(surface.agent)
+  add(surface.agent_key)
+  if type(surface.resume_binding) == "table" then
+    add(surface.resume_binding.name)
+    add(surface.resume_binding.kind)
+  end
+
+  for _, candidate in ipairs(candidates) do
+    if title_matches(candidate, patterns) then
+      return is_pi_name(candidate) and "Pi" or candidate
+    end
   end
   return nil
 end
@@ -508,6 +554,7 @@ function M.list_agent_surfaces(opts)
     if not is_current_surface(opts, surface) then
       local state = state_for_surface(states, surface)
       local agent = state and (state.agent_title or state.agent_key) or nil
+      local rpc_agent = agent_from_metadata(surface, opts.patterns)
       local metadata = nil
 
       if state and state_matches(state, opts.patterns) then
@@ -521,15 +568,15 @@ function M.list_agent_surfaces(opts)
           agent_state = state,
           detected_by = "state",
         }
+      elseif rpc_agent then
+        metadata = {
+          agent = rpc_agent,
+          detected_by = "metadata",
+        }
       elseif title_matches(surface.title, opts.patterns) or title_matches(surface.name, opts.patterns) then
         metadata = {
-          agent = surface.agent or surface.type,
+          agent = is_pi_name(surface.title) and "Pi" or surface.agent or surface.type,
           detected_by = "title",
-        }
-      elseif title_matches(surface.agent, opts.patterns) or title_matches(surface.agent_key, opts.patterns) then
-        metadata = {
-          agent = surface.agent or surface.agent_key,
-          detected_by = "metadata",
         }
       elseif opts.process_fallback ~= false then
         local tty = surface.tty
