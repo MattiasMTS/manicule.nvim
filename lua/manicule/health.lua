@@ -221,6 +221,18 @@ function M.check()
   else
     health.info("cmux integration is not registered")
   end
+
+  health.start("manicule review mode")
+  if vim.fn.executable("git") == 1 then
+    health.ok("git is available")
+  else
+    health.warn("git is not available; :ManiculeReview needs git for ref/pr resolvers")
+  end
+  if vim.fn.executable("gh") == 1 then
+    health.ok("gh CLI is available")
+  else
+    health.info("gh CLI not found; :ManiculeReview pr <n> is disabled")
+  end
 end
 
 return M

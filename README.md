@@ -107,6 +107,29 @@ vim.keymap.set("n", "[c", "<Plug>(manicule-prev)")
 The list refreshes in place when comments are added, edited, deleted,
 restored, or resolved.
 
+## Review mode
+
+`:ManiculeReview` opens a diff-review session: baseline versions staged on
+the left (read-only), your working tree on the right. Comment on the right
+side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
+
+    :ManiculeReview              " uncommitted changes (vs HEAD)
+    :ManiculeReview main         " your branch vs merge-base with main
+    :ManiculeReview pr 123       " a GitHub PR (requires gh CLI)
+    :ManiculeReview <dirA> <dirB>" any two directories
+    :ManiculeReviewNext          " next changed file
+    :ManiculeReviewPrev          " previous changed file
+    :ManiculeReviewFinish [sink] " send comments to a sink (optional arg)
+    :ManiculeReviewStop          " close the session
+
+Diffs render as side-by-side `:diffsplit` pairs (baseline left, read-only;
+worktree right). The changed-file list is also published as a quickfix list
+titled `manicule-review (...)`.
+
+External tools can drive a review session by writing a JSON job file and
+calling `require("manicule.review").start_from_job(path)`; comments return
+through the bundled `socket` sink as JSONL over a unix socket.
+
 ## Configuration
 
 All keys are optional.

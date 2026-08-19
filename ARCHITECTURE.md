@@ -23,19 +23,22 @@ for unrooted and special buffers use a small file store under Neovim state.
 ## Module Map
 
 ```text
-plugin/manicule.lua          commands and <Plug> maps
-lua/manicule/init.lua        public API, autocmd wiring, lifecycle events
-lua/manicule/config.lua      defaults and validation
-lua/manicule/adapter.lua     buffer identity and diff/staged-buffer handling
-lua/manicule/uri.lua         canonical URI helpers
-lua/manicule/store.lua       project/session persistence facade
-lua/manicule/sqlite.lua      minimal LuaJIT FFI SQLite wrapper
-lua/manicule/anchor.lua      shared extmark namespace
-lua/manicule/ui.lua          prompt and sink picker facade
-lua/manicule/ui/editor.lua   floating comment editor
-lua/manicule/ui/render.lua   extmarks, popups, viewport rendering
-lua/manicule/ui/quickfix.lua quickfix formatting and refresh
-lua/manicule/sinks/          sink registry and bundled sinks
+plugin/manicule.lua             commands and <Plug> maps
+lua/manicule/init.lua           public API, autocmd wiring, lifecycle events
+lua/manicule/config.lua         defaults and validation
+lua/manicule/adapter.lua        buffer identity and diff/staged-buffer handling
+lua/manicule/uri.lua            canonical URI helpers
+lua/manicule/store.lua          project/session persistence facade
+lua/manicule/sqlite.lua         minimal LuaJIT FFI SQLite wrapper
+lua/manicule/anchor.lua         shared extmark namespace
+lua/manicule/ui.lua             prompt and sink picker facade
+lua/manicule/ui/editor.lua      floating comment editor
+lua/manicule/ui/render.lua      extmarks, popups, viewport rendering
+lua/manicule/ui/quickfix.lua    quickfix formatting and refresh
+lua/manicule/review.lua         review session core (start/open/next/prev/finish/stop)
+lua/manicule/review/git.lua     git plumbing (rev-parse, merge-base, changed files, staging)
+lua/manicule/review/sources.lua resolver registry (dirs, git ref, pr via gh CLI)
+lua/manicule/sinks/             sink registry and bundled sinks (clipboard, cmux, socket)
 ```
 
 `init.lua` lazy-requires most modules so command/key based lazy-loading has
@@ -244,6 +247,48 @@ require("manicule").register_sink({
 Sinks should use `lua/manicule/sinks/helpers.lua` for shared formatting where
 possible, including the optional `pre_text` and `post_text` wrappers for text
 payloads. Tests should exercise sinks with local fakes, not real network calls.
+
+## Review Mode
+
+`:ManiculeReview` opens a diff-review session over file pairs (baseline left,
+worktree right). One active session at a time, in its own tab page.
+
+**Session core** (`lua/manicule/review.lua`):
+- Right side: real worktree file where it exists; comments anchor natively.
+- Left side: read-only staged baseline copy (modifiable=false, readonly=true,
+  bufhidden=wipe, swapfile=false).
+- Diffs render as `:diffsplit` pairs (left split beside right).
+- Deleted files: left-only display, notify that comments are file-level notes.
+- Navigation: `next()`/`prev()` wrap around; quickfix list titled
+  `manicule-review (<label>)` lists all pairs.
+- `finish()`: collects session comments via URI filter, dispatches to
+  configured sink; auto-flushes on `VimLeavePre` when sink is configured and
+  comments exist.
+
+**Resolver registry** (`lua/manicule/review/sources.lua`):
+- Turns `:ManiculeReview` arguments into staged file pairs.
+- Builtin resolvers: `<dirL> <dirR>` (walks dirR, pairs by rel-path, content
+  diff), `<git-ref>` (merge-base vs HEAD, shows only your changes), bare
+  (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI).
+- `register(resolver)` prepends to registry → user resolvers shadow builtins.
+- All resolvers return `{files: [{left, right, status, path}], label}`.
+
+**Socket sink** (`lua/manicule/sinks/socket.lua`):
+- Generic JSONL-over-unix-socket transport; bundled, enabled by default.
+- Protocol: `hello` (pid, job id) → `submit` (label, comments array) ← `ack`.
+- Comments serialized as `{path, lnum, end_lnum, body, side: "working"}`;
+  paths project-relative when `project_root` present, line numbers 1-based.
+- Timeout: 2000ms default for ack; on connect/write/ack failure, writes
+  `submit.json` fallback next to socket path so comments are never lost.
+- `clear_on_success = true` (records deleted after consumer acks).
+
+**Driver contract** (`start_from_job`):
+- External tools (coding-agent extensions, scripts) write a job JSON file:
+  `{id, label, return_socket, files: [{left, right, status, path}]}`.
+- `require("manicule.review").start_from_job(path)` reads it, starts the
+  session, wires the socket sink.
+- Comments flow back via the socket; the driver composes feedback however it
+  wants (insert into editor, post to PR, etc).
 
 ## Tests
 
