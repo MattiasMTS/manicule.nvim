@@ -165,15 +165,24 @@ end
 
 -- Review mode commands
 vim.api.nvim_create_user_command("ManiculeReview", function(opts)
+  -- Schedule error notifies: on lazy-loading stubs the command is re-invoked
+  -- via nvim_cmd, where an ERROR notify behaves like :echoerr and is
+  -- rethrown as a "Vim:" traceback. Deferring past the command context
+  -- keeps it a plain red message.
+  local function notify_error(msg)
+    vim.schedule(function()
+      vim.notify(msg, vim.log.levels.ERROR)
+    end)
+  end
   local sources = require("manicule.review.sources")
   local job, err = sources.resolve(opts.fargs, {})
   if not job then
-    vim.notify(err or "manicule: cannot resolve review", vim.log.levels.ERROR)
+    notify_error(err or "manicule: cannot resolve review")
     return
   end
   local ok, start_err = require("manicule.review").start(job)
   if not ok then
-    vim.notify(start_err, vim.log.levels.ERROR)
+    notify_error(start_err)
   end
 end, {
   nargs = "*",
