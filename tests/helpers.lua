@@ -44,6 +44,7 @@ function H.setup(opts)
     sinks = {
       clipboard = false,
       cmux = false,
+      socket = false,
     },
   }
   require("manicule").setup(vim.tbl_deep_extend("force", base, opts or {}))

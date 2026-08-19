@@ -26,6 +26,7 @@ local M = {}
 ---@class manicule.SinksConfig
 ---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
 ---@field cmux boolean|table Enable the bundled cmux integration (defaults to `{ enabled = true }`). Built-in text sinks accept optional `pre_text` and `post_text` strings. cmux also accepts `auto_submit` and `submit_delay_ms`.
+---@field socket boolean|table Enable the bundled socket sink (default true). Accepts `ack_timeout_ms`.
 
 ---@type manicule.Config
 M.defaults = {
@@ -112,6 +113,7 @@ function M.setup(opts)
       -- options; allow both forms.
       ["sinks.clipboard"] = { opts.sinks.clipboard, { "boolean", "table" }, true },
       ["sinks.cmux"] = { opts.sinks.cmux, { "boolean", "table" }, true },
+      ["sinks.socket"] = { opts.sinks.socket, { "boolean", "table" }, true },
     })
   end
   if opts.ui then

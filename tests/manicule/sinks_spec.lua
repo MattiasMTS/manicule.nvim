@@ -74,7 +74,7 @@ describe("manicule sink helpers", function()
     })
 
     local names = require("manicule.sinks").list()
-    assert.are.same({ "clipboard", "cmux" }, names)
+    assert.are.same({ "clipboard", "cmux", "socket" }, names)
     assert.are.equal("sink", require("manicule.sinks").get("clipboard").type)
     assert.are.equal("integration", require("manicule.sinks").get("cmux").type)
     assert.is_false(require("manicule.sinks").get("cmux").clear_on_success)
@@ -259,7 +259,7 @@ describe("manicule sink helpers", function()
       },
     })
 
-    assert.are.same({}, require("manicule.sinks").list())
+    assert.are.same({ "socket" }, require("manicule.sinks").list())
   end)
 
   it("discovers Pi from cmux resume metadata before scanning stale screen content", function()
