@@ -7,6 +7,26 @@
 local M = {}
 
 local registry = {}
+local uv = vim.uv or vim.loop
+
+---Create a staging directory that does NOT match the nvim runtime staged-path
+---pattern (nvim.<user>/<run-id>/<N>/...), so adapter.identify won't refuse
+---comments on deleted files whose worktree path no longer exists.
+---
+---Uses $TMPDIR or /tmp directly, avoiding vim.fn.tempname() which nests under
+---nvim.<user>/<run-id>/. The pattern matches any path containing that segment.
+local function make_stage_dir()
+  local tmpdir = os.getenv("TMPDIR") or "/tmp"
+  tmpdir = tmpdir:gsub("/$", "") -- strip trailing slash
+  local dir = uv.fs_mkdtemp(tmpdir .. "/manicule-review-XXXXXX")
+  if not dir or dir == "" or dir == "/" then
+    -- fs_mkdtemp failed; fall back to plain tempname and mkdir.
+    -- This is a degraded path but won't block the review.
+    dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+  end
+  return dir
+end
 
 ---@param resolver {name: string, match: fun(fargs: string[]): boolean, resolve: fun(fargs: string[], opts: table): table|nil, string|nil}
 function M.register(resolver)
@@ -70,7 +90,8 @@ M.register({
         table.insert(files, { left = left, right = right_dir .. "/" .. rel, status = "D", path = rel })
       else
         -- Right-only: stage an empty left so the diff shows all-added.
-        local staged = vim.fn.tempname()
+        local staged = make_stage_dir() .. "/" .. rel
+        vim.fn.mkdir(vim.fn.fnamemodify(staged, ":h"), "p")
         vim.fn.writefile({}, staged)
         table.insert(files, { left = staged, right = right, status = "A", path = rel })
       end
@@ -109,8 +130,7 @@ M.register({
     if #changed == 0 then
       return nil, ("manicule: no changes vs %s"):format(ref)
     end
-    local stage_dir = opts.stage_dir or vim.fn.tempname()
-    vim.fn.mkdir(stage_dir, "p")
+    local stage_dir = opts.stage_dir or make_stage_dir()
     return {
       files = G.stage_baseline(root, base, changed, stage_dir),
       label = ref,
@@ -156,8 +176,7 @@ M.register({
     if not base then
       return nil, err
     end
-    local stage_dir = opts.stage_dir or vim.fn.tempname()
-    vim.fn.mkdir(stage_dir, "p")
+    local stage_dir = opts.stage_dir or make_stage_dir()
     local head = G.rev_parse(root, "HEAD")
     local label = ("pr %s"):format(number)
 

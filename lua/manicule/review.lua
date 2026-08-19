@@ -64,10 +64,7 @@ function M.open(index)
   if pair.status == "D" then
     vim.cmd.edit(vim.fn.fnameescape(pair.left))
     protect_left(vim.api.nvim_get_current_buf())
-    vim.notify(
-      ("manicule: %s was deleted; comments here are file-level notes"):format(pair.path),
-      vim.log.levels.INFO
-    )
+    vim.notify(("manicule: %s was deleted; comments here are file-level notes"):format(pair.path), vim.log.levels.INFO)
     return
   end
 
@@ -216,7 +213,22 @@ vim.api.nvim_create_autocmd("VimLeavePre", {
   group = augroup,
   callback = function()
     if session and session.sink and #pending_comments() > 0 then
+      -- Block until the async sink settles or times out so the submit/fallback
+      -- completes before nvim exits. Socket sink's default ack_timeout_ms is
+      -- 2000; wait slightly longer to let submit.json fallback finish.
+      local done = false
+      local done_id = vim.api.nvim_create_autocmd("User", {
+        pattern = "ManiculeSent",
+        once = true,
+        callback = function()
+          done = true
+        end,
+      })
       M.finish()
+      vim.wait(2500, function()
+        return done
+      end, 50, false)
+      pcall(vim.api.nvim_del_autocmd, done_id)
     end
   end,
 })

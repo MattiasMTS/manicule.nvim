@@ -71,7 +71,7 @@ function M.setup(opts)
       -- Pre-encode JSONL strings before entering uv callbacks for strict fast-event safety
       local hello = vim.json.encode({ type = "hello", pid = uv.os_getpid(), job = ctx.job }) .. "\n"
       local body = vim.json.encode(submit) .. "\n"
-      
+
       local pipe = uv.new_pipe(false)
       local finished = false
       local timer = uv.new_timer()
@@ -89,7 +89,7 @@ function M.setup(opts)
         if not pipe:is_closing() then
           pipe:close()
         end
-        
+
         vim.schedule(function()
           if not ok then
             local dir = vim.fn.fnamemodify(ctx.socket, ":h")

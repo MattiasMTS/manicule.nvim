@@ -189,4 +189,39 @@ describe("manicule review session", function()
     assert.are.equal(1, #state.files)
     assert.are.equal("cmd.lua", state.files[1].path)
   end)
+
+  it("deleted-file (D) pairs accept comments on the left buffer", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local root = H.git_repo(ctx, { ["gone.lua"] = { "return 1" } })
+    -- Delete the file from worktree so git resolver stages status=D.
+    vim.fn.delete(root .. "/gone.lua")
+    local saved = (vim.uv or vim.loop).cwd()
+    vim.cmd.cd(root)
+
+    vim.cmd("ManiculeReview HEAD")
+    local state = require("manicule.review").state()
+    assert.is_truthy(state)
+    assert.are.equal(1, #state.files)
+    assert.are.equal("D", state.files[1].status)
+
+    -- Current buffer is the left (staged baseline) for the D pair.
+    -- Fake prompt and add a comment.
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("deleted file note")
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+
+    local records = require("manicule").list({ _quiet = true })
+    assert.are.equal(1, #records)
+    assert.are.equal("deleted file note", records[1].body)
+    -- Scope is session because the staged left file path no longer
+    -- matches the nvim-runtime pattern after sources.lua fix.
+    assert.are.equal("session", records[1].scope)
+
+    vim.cmd.cd(saved)
+  end)
 end)

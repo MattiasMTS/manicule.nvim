@@ -45,7 +45,18 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 {
   "MattiasMTS/manicule.nvim",
   event = { "BufReadPost", "BufNewFile" },
-  cmd = { "ManiculeAdd", "ManiculeList", "ManiculeNext", "ManiculePrev", "ManiculeSend" },
+  cmd = {
+    "ManiculeAdd",
+    "ManiculeList",
+    "ManiculeNext",
+    "ManiculePrev",
+    "ManiculeSend",
+    "ManiculeReview",
+    "ManiculeReviewNext",
+    "ManiculeReviewPrev",
+    "ManiculeReviewFinish",
+    "ManiculeReviewStop",
+  },
   keys = {
     { "<leader>ma", "<Plug>(manicule-add)", mode = { "n", "x" }, desc = "Manicule: add comment" },
     { "<leader>ml", "<Plug>(manicule-list)", desc = "Manicule: list comments" },
@@ -116,7 +127,7 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
     :ManiculeReview              " uncommitted changes (vs HEAD)
     :ManiculeReview main         " your branch vs merge-base with main
     :ManiculeReview pr 123       " a GitHub PR (requires gh CLI)
-    :ManiculeReview <dirA> <dirB>" any two directories
+    :ManiculeReview <dirA> <dirB> " any two directories
     :ManiculeReviewNext          " next changed file
     :ManiculeReviewPrev          " previous changed file
     :ManiculeReviewFinish [sink] " send comments to a sink (optional arg)
