@@ -162,3 +162,58 @@ if vim.g.manicule_no_default_keymaps ~= 1 then
     desc = "Manicule: previous comment",
   })
 end
+
+-- Review mode commands
+vim.api.nvim_create_user_command("ManiculeReview", function(opts)
+  local sources = require("manicule.review.sources")
+  local job, err = sources.resolve(opts.fargs, {})
+  if not job then
+    vim.notify(err or "manicule: cannot resolve review", vim.log.levels.ERROR)
+    return
+  end
+  local ok, start_err = require("manicule.review").start(job)
+  if not ok then
+    vim.notify(start_err, vim.log.levels.ERROR)
+  end
+end, {
+  nargs = "*",
+  complete = function(_, cmdline)
+    -- Complete local branch names for the common `:ManiculeReview <ref>` case.
+    if cmdline:match("ManiculeReview%s+%S*$") then
+      local result = vim.system({ "git", "branch", "--format=%(refname:short)" }, { text = true }):wait()
+      if result.code == 0 then
+        return vim.split(vim.trim(result.stdout or ""), "\n", { trimempty = true })
+      end
+    end
+    return {}
+  end,
+})
+
+vim.api.nvim_create_user_command("ManiculeReviewNext", function()
+  require("manicule.review").next()
+end, {})
+
+vim.api.nvim_create_user_command("ManiculeReviewPrev", function()
+  require("manicule.review").prev()
+end, {})
+
+vim.api.nvim_create_user_command("ManiculeReviewFinish", function(opts)
+  require("manicule.review").finish({ sink = opts.args ~= "" and opts.args or nil })
+end, {
+  nargs = "?",
+  complete = function()
+    return require("manicule.sinks").list()
+  end,
+})
+
+vim.api.nvim_create_user_command("ManiculeReviewStop", function()
+  require("manicule.review").stop()
+end, {})
+
+vim.keymap.set("n", "<Plug>(manicule-review-next)", function()
+  require("manicule.review").next()
+end, { silent = true })
+
+vim.keymap.set("n", "<Plug>(manicule-review-prev)", function()
+  require("manicule.review").prev()
+end, { silent = true })
