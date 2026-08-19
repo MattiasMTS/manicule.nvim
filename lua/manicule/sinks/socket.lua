@@ -68,6 +68,10 @@ function M.setup(opts)
     end,
     send = function(comments, ctx, cb)
       local submit = payload(comments, ctx)
+      -- Pre-encode JSONL strings before entering uv callbacks for strict fast-event safety
+      local hello = vim.json.encode({ type = "hello", pid = uv.os_getpid(), job = ctx.job }) .. "\n"
+      local body = vim.json.encode(submit) .. "\n"
+      
       local pipe = uv.new_pipe(false)
       local finished = false
       local timer = uv.new_timer()
@@ -117,19 +121,20 @@ function M.setup(opts)
             finish(false, "manicule: socket closed before ack")
             return
           end
+          -- Pure string work in uv callback; JSON decode + ack check scheduled
           buffer = buffer .. chunk
           local line = buffer:match("^(.-)\n")
           if line then
-            local ok, decoded = pcall(vim.json.decode, line)
-            if ok and type(decoded) == "table" and decoded.type == "ack" then
-              finish(true)
-            else
-              finish(false, "manicule: unexpected socket reply: " .. line:sub(1, 120))
-            end
+            vim.schedule(function()
+              local ok, decoded = pcall(vim.json.decode, line)
+              if ok and type(decoded) == "table" and decoded.type == "ack" then
+                finish(true)
+              else
+                finish(false, "manicule: unexpected socket reply: " .. line:sub(1, 120))
+              end
+            end)
           end
         end)
-        local hello = vim.json.encode({ type = "hello", pid = uv.os_getpid(), job = ctx.job }) .. "\n"
-        local body = vim.json.encode(submit) .. "\n"
         pipe:write(hello .. body, function(write_err)
           if write_err then
             finish(false, "manicule: socket write failed: " .. tostring(write_err))
