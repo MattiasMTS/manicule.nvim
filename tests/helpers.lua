@@ -208,4 +208,30 @@ function H.fake_cmux(ctx, opts)
   return bin, log
 end
 
+---Create a real git repository with an initial commit.
+---@param ctx table H.setup context
+---@param files table<string, string[]>|nil relative path -> lines
+---@return string root, fun(...): table git  -- git(...) runs git -C root
+function H.git_repo(ctx, files)
+  local root = H.project_dir(ctx.artifact_root, "gitrepo")
+  vim.fn.delete(root .. "/.git", "rf")
+  local function git(...)
+    local result = vim.system({ "git", "-C", root, ... }, { text = true }):wait()
+    assert(result.code == 0, ("git %s failed: %s"):format(table.concat({ ... }, " "), result.stderr))
+    return result
+  end
+  git("init", "-q", "-b", "main")
+  git("config", "user.email", "manicule@test.local")
+  git("config", "user.name", "Manicule Test")
+  git("config", "commit.gpgsign", "false")
+  for path, lines in pairs(files or {}) do
+    local abs = root .. "/" .. path
+    vim.fn.mkdir(vim.fn.fnamemodify(abs, ":h"), "p")
+    vim.fn.writefile(lines, abs)
+    git("add", path)
+  end
+  git("commit", "-q", "--allow-empty", "-m", "init")
+  return root, git
+end
+
 return H
