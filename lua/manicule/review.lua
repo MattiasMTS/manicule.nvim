@@ -26,9 +26,25 @@ local function protect_left(bufnr)
 end
 
 local function close_session_windows()
-  -- Reduce the session tab to one window so the next pair starts clean.
+  -- Reduce the session tab windows to diff windows only (preserve qf panel).
   vim.cmd("silent! diffoff!")
-  vim.cmd("silent! only")
+  -- Close all non-quickfix windows except the first one
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local first_non_qf = nil
+  for _, winid in ipairs(wins) do
+    local bufnr = vim.api.nvim_win_get_buf(winid)
+    if vim.bo[bufnr].buftype ~= "quickfix" then
+      if not first_non_qf then
+        first_non_qf = winid
+      else
+        pcall(vim.api.nvim_win_close, winid, false)
+      end
+    end
+  end
+  -- Focus the remaining non-qf window
+  if first_non_qf and vim.api.nvim_win_is_valid(first_non_qf) then
+    vim.api.nvim_set_current_win(first_non_qf)
+  end
 end
 
 local function set_quickfix(files, label)
@@ -115,6 +131,7 @@ function M.start(opts)
   }
   set_quickfix(session.files, session.label)
   M.open(1)
+  require("manicule.review.panel").open()
   return true
 end
 
@@ -122,6 +139,7 @@ function M.stop()
   if not session then
     return
   end
+  require("manicule.review.panel").close()
   local tab = session.tab
   session = nil
   if vim.api.nvim_tabpage_is_valid(tab) and #vim.api.nvim_list_tabpages() > 1 then

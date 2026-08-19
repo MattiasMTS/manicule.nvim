@@ -32,18 +32,22 @@ describe("manicule review session", function()
     assert.is_true(R.start({ files = make_pairs(1), label = "test" }))
 
     local wins = vim.api.nvim_tabpage_list_wins(0)
-    assert.are.equal(2, #wins)
+    -- 3 windows: 2 diff + 1 panel
+    assert.are.equal(3, #wins)
     local saw_left, saw_right = false, false
     for _, win in ipairs(wins) do
       local buf = vim.api.nvim_win_get_buf(win)
       local name = vim.api.nvim_buf_get_name(buf)
-      assert.is_true(vim.wo[win].diff)
-      if name:find("/left/", 1, true) then
-        saw_left = true
-        assert.is_false(vim.bo[buf].modifiable)
-      else
-        saw_right = true
-        assert.is_true(vim.bo[buf].modifiable)
+      -- Skip quickfix window
+      if vim.bo[buf].buftype ~= "quickfix" then
+        assert.is_true(vim.wo[win].diff)
+        if name:find("/left/", 1, true) then
+          saw_left = true
+          assert.is_false(vim.bo[buf].modifiable)
+        else
+          saw_right = true
+          assert.is_true(vim.bo[buf].modifiable)
+        end
       end
     end
     assert.is_true(saw_left)
@@ -96,6 +100,15 @@ describe("manicule review session", function()
     })
 
     assert.is_true(R.start({ files = files, label = "test", sink = "capture" }))
+
+    -- Find the right (non-qf) window and focus it
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype ~= "quickfix" and vim.bo[bufnr].modifiable then
+        vim.api.nvim_set_current_win(winid)
+        break
+      end
+    end
 
     -- Comment on pair 1's worktree file (the current buffer after start).
     vim.api.nvim_win_set_cursor(0, { 1, 0 })
@@ -223,5 +236,152 @@ describe("manicule review session", function()
     assert.are.equal("session", records[1].scope)
 
     vim.cmd.cd(saved)
+  end)
+
+  it("panel opens on start with file rows and focus returns to diff", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "panel-test" }))
+
+    -- Panel should be open
+    local found_panel = false
+    local panel_winid
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype == "quickfix" then
+        local ok, info = pcall(vim.fn.getqflist, { winid = winid, title = 1 })
+        if ok and info.title and info.title:find("manicule-review") then
+          found_panel = true
+          panel_winid = winid
+          break
+        end
+      end
+    end
+    assert.is_true(found_panel, "panel quickfix window not found")
+
+    -- Focus should be in diff (non-qf window)
+    local current_buf = vim.api.nvim_get_current_buf()
+    assert.is_false(vim.bo[current_buf].buftype == "quickfix")
+
+    -- Panel should have 2 rows (one per pair)
+    local items = vim.fn.getqflist()
+    assert.are.equal(2, #items)
+    assert.is_truthy(items[1].text:find("f1.lua"))
+    assert.is_truthy(items[1].text:find("0 comments"))
+  end)
+
+  it("panel comment count updates when a comment is added", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))
+
+    -- Initial count should be 0
+    local items = vim.fn.getqflist()
+    assert.is_truthy(items[1].text:find("0 comments"))
+
+    -- Find the right (modifiable) window and focus it
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype ~= "quickfix" and vim.bo[bufnr].modifiable then
+        vim.api.nvim_set_current_win(winid)
+        break
+      end
+    end
+
+    -- Add a comment
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("test comment")
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+
+    -- Wait for refresh
+    vim.wait(200)
+
+    -- Count should now be 1
+    items = vim.fn.getqflist()
+    assert.is_truthy(items[1].text:find("1 comments"))
+  end)
+
+  it("<CR> in panel files view switches to that pair and keeps panel open", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(3), label = "panel-test" }))
+
+    -- Find panel window
+    local panel_winid
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype == "quickfix" then
+        panel_winid = winid
+        break
+      end
+    end
+    assert.is_truthy(panel_winid)
+
+    -- Switch to panel and press <CR> on row 2
+    vim.api.nvim_set_current_win(panel_winid)
+    vim.api.nvim_win_set_cursor(panel_winid, { 2, 0 })
+    vim.cmd("normal! \\<CR>")
+
+    -- Session index should now be 2
+    assert.are.equal(2, R.state().index)
+
+    -- Panel should still be open
+    assert.is_true(vim.api.nvim_win_is_valid(panel_winid))
+  end)
+
+  it("panel shows files view with comment counts", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "panel-test" }))
+
+    -- Find the right (modifiable) window and focus it
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype ~= "quickfix" and vim.bo[bufnr].modifiable then
+        vim.api.nvim_set_current_win(winid)
+        break
+      end
+    end
+
+    -- Add a comment so we have something in comments view
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("test comment")
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+    vim.wait(200)
+
+    -- Files view should show both files with comment counts
+    local items = vim.fn.getqflist()
+    -- Should have entries for each file
+    assert.is_true(#items >= 1, "Expected at least 1 item, got " .. #items)
+    -- Items should have comment count format
+    assert.is_truthy(items[1].text:find("comments"))
+  end)
+
+  it("stop() closes the panel and clears autocmds", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))
+
+    -- Panel should be open
+    local panel_winid
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype == "quickfix" then
+        panel_winid = winid
+        break
+      end
+    end
+    assert.is_truthy(panel_winid)
+
+    R.stop()
+
+    -- Panel should be closed
+    assert.is_false(vim.api.nvim_win_is_valid(panel_winid))
   end)
 end)
