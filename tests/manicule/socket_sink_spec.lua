@@ -4,6 +4,7 @@ local uv = vim.uv or vim.loop
 local ctx
 
 ---Start an in-process JSONL pipe server. Returns { path, messages, close }.
+---@param reply_ack boolean|"close" - true: ack normally, "close": ack then immediately close
 local function pipe_server(reply_ack)
   local path = ctx.artifact_root .. "/srv-" .. tostring(math.random(1e6)) .. ".sock"
   local server = uv.new_pipe(false)
@@ -29,6 +30,9 @@ local function pipe_server(reply_ack)
         table.insert(messages, decoded)
         if decoded.type == "submit" and reply_ack then
           client:write(vim.json.encode({ type = "ack" }) .. "\n")
+          if reply_ack == "close" then
+            client:close()
+          end
         end
       end
     end)
@@ -113,5 +117,29 @@ describe("manicule socket sink", function()
     local ok, err = spec.validate({})
     assert.is_false(ok)
     assert.is_truthy(err)
+  end)
+
+  it("succeeds when server sends ack and immediately closes", function()
+    local server = pipe_server("close")
+    local spec = require("manicule.sinks.socket").setup({})
+    local record = {
+      body = "eof race test",
+      uri = "file://" .. ctx.root .. "/test.lua",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    }
+
+    local got_ok, got_err
+    spec.send({ record }, { socket = server.path, job = "race-test" }, function(ok, err)
+      got_ok, got_err = ok, err
+    end)
+    vim.wait(2000, function()
+      return got_ok ~= nil
+    end)
+    server.close()
+
+    assert.is_true(got_ok, got_err)
+    -- No fallback file should be written on success
+    local fallback_path = vim.fn.fnamemodify(server.path, ":h") .. "/submit.json"
+    assert.are.equal(0, vim.fn.filereadable(fallback_path))
   end)
 end)

@@ -118,7 +118,10 @@ function M.setup(opts)
             return
           end
           if not chunk then
-            finish(false, "manicule: socket closed before ack")
+            -- Schedule EOF handling to preserve order when ack+EOF arrive together
+            vim.schedule(function()
+              finish(false, "manicule: socket closed before ack")
+            end)
             return
           end
           -- Pure string work in uv callback; JSON decode + ack check scheduled
