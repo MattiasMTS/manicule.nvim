@@ -138,4 +138,38 @@ describe("manicule review session", function()
     R.finish()
     assert.is_false(called)
   end)
+
+  it("start_from_job wires files, label, and the socket sink", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    local job_path = ctx.artifact_root .. "/job.json"
+    vim.fn.writefile({
+      vim.json.encode({
+        id = "job-7",
+        label = "since-review",
+        return_socket = ctx.artifact_root .. "/return.sock",
+        files = files,
+      }),
+    }, job_path)
+
+    assert.is_true(R.start_from_job(job_path))
+    local state = R.state()
+    assert.are.equal("since-review", state.label)
+    assert.are.equal("socket", state.sink)
+    assert.are.equal(ctx.artifact_root .. "/return.sock", state.sink_ctx.socket)
+    assert.are.equal("job-7", state.sink_ctx.job)
+  end)
+
+  it("start_from_job rejects unreadable or invalid job files", function()
+    local R = require("manicule.review")
+    local ok, err = R.start_from_job(ctx.artifact_root .. "/absent.json")
+    assert.is_false(ok)
+    assert.is_truthy(err)
+
+    local bad = ctx.artifact_root .. "/bad.json"
+    vim.fn.writefile({ "{not json" }, bad)
+    local ok2, err2 = R.start_from_job(bad)
+    assert.is_false(ok2)
+    assert.is_truthy(err2)
+  end)
 end)

@@ -175,6 +175,42 @@ function M.finish(opts)
   require("manicule").send(sink, { uris = session_uris() }, session.sink_ctx)
 end
 
+---Start a review from a JSON job file written by an external driver
+---(e.g. a coding-agent extension). Errors are returned AND notified so
+---headless drivers see them on stderr.
+---@param path string
+---@return boolean ok, string|nil err
+function M.start_from_job(path)
+  local ok_read, lines = pcall(vim.fn.readfile, path)
+  if not ok_read then
+    local err = ("manicule: cannot read job file %s"):format(path)
+    vim.notify(err, vim.log.levels.ERROR)
+    return false, err
+  end
+  local ok_decode, job = pcall(vim.json.decode, table.concat(lines, "\n"))
+  if not ok_decode or type(job) ~= "table" or type(job.files) ~= "table" then
+    local err = ("manicule: invalid job file %s"):format(path)
+    vim.notify(err, vim.log.levels.ERROR)
+    return false, err
+  end
+  local sink_ctx = nil
+  local sink = nil
+  if type(job.return_socket) == "string" and job.return_socket ~= "" then
+    sink = "socket"
+    sink_ctx = { socket = job.return_socket, job = job.id, label = job.label }
+  end
+  local ok, err = M.start({
+    files = job.files,
+    label = job.label or "review",
+    sink = sink,
+    sink_ctx = sink_ctx,
+  })
+  if not ok then
+    vim.notify(err, vim.log.levels.ERROR)
+  end
+  return ok, err
+end
+
 local augroup = vim.api.nvim_create_augroup("ManiculeReview", { clear = true })
 vim.api.nvim_create_autocmd("VimLeavePre", {
   group = augroup,
