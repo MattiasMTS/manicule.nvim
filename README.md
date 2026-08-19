@@ -134,8 +134,10 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
     :ManiculeReviewStop          " close the session
 
 Diffs render as side-by-side `:diffsplit` pairs (baseline left, read-only;
-worktree right). The changed-file list is also published as a quickfix list
-titled `manicule-review (...)`.
+worktree right). A bottom panel opens automatically showing the file list
+with live comment counts. Press `<Tab>` in the panel to toggle between
+files view and comments view; press `<CR>` on a file to switch the diff
+to that pair.
 
 External tools can drive a review session by writing a JSON job file and
 calling `require("manicule.review").start_from_job(path)`; comments return

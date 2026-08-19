@@ -259,8 +259,13 @@ worktree right). One active session at a time, in its own tab page.
   bufhidden=wipe, swapfile=false).
 - Diffs render as `:diffsplit` pairs (left split beside right).
 - Deleted files: left-only display, notify that comments are file-level notes.
-- Navigation: `next()`/`prev()` wrap around; quickfix list titled
-  `manicule-review (<label>)` lists all pairs.
+- Navigation: `next()`/`prev()` wrap around.
+- Panel (`lua/manicule/review/panel.lua`): auto-opens bottom quickfix window
+  on session start. Files view (default) shows `[status] path  (N comments)`
+  with live counts refreshing on `User Manicule*` events; `<CR>` calls
+  `review.open(idx)` to switch pairs. `<Tab>` toggles to comments view
+  (session-scoped `M.list` with standard quickfix formatting/mappings). Panel
+  closed on `stop()`, autocmds cleaned up.
 - `finish()`: collects session comments via URI filter, dispatches to
   configured sink; auto-flushes on `VimLeavePre` when sink is configured and
   comments exist.
