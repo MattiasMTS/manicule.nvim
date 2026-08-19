@@ -2,6 +2,18 @@ local H = require("helpers")
 
 local ctx
 
+local function fake_gh(dir, base_oid, head_oid)
+  local bin = dir .. "/bin"
+  vim.fn.mkdir(bin, "p")
+  local script = bin .. "/gh"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    ('echo \'{"baseRefOid":"%s","headRefOid":"%s"}\''):format(base_oid, head_oid),
+  }, script)
+  vim.fn.system({ "chmod", "+x", script })
+  return bin
+end
+
 describe("manicule review sources", function()
   before_each(function()
     ctx = H.setup()
@@ -70,5 +82,28 @@ describe("manicule review sources", function()
     local job, err = S.resolve({ "main" }, { cwd = ctx.artifact_root })
     assert.is_nil(job)
     assert.is_truthy(err)
+  end)
+
+  it("resolves pr <n> via gh with head checked out", function()
+    local S = require("manicule.review.sources")
+    local root, git = H.git_repo(ctx, { ["a.lua"] = { "return 1" } })
+    local base_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+    git("checkout", "-q", "-b", "pr-branch")
+    vim.fn.writefile({ "return 2" }, root .. "/a.lua")
+    git("commit", "-aqm", "pr change")
+    local head_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+
+    local bin = fake_gh(ctx.artifact_root, base_oid, head_oid)
+    local saved_path = vim.env.PATH
+    vim.env.PATH = bin .. ":" .. saved_path
+
+    local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s3" })
+    vim.env.PATH = saved_path
+
+    assert.is_nil(err)
+    assert.are.equal("pr 42", job.label)
+    assert.are.equal(1, #job.files)
+    assert.are.equal("a.lua", job.files[1].path)
+    assert.are.equal(root .. "/a.lua", job.files[1].right)
   end)
 end)
