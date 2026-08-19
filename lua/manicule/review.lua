@@ -3,8 +3,7 @@
 -- Opens baseline-vs-worktree file pairs as diffs, one active session at
 -- a time. The right side is always the real worktree file so comments
 -- anchor natively; the left side is a read-only staged baseline copy.
--- Diff rendering prefers the builtin nvim.difftool (0.12+) and falls
--- back to plain :diffsplit.
+-- Uses plain :diffsplit for reliable, pair-based diff rendering.
 
 local M = {}
 
@@ -18,14 +17,6 @@ local M = {}
 
 ---@type manicule.ReviewSession|nil
 local session = nil
-
-local function difftool_mod()
-  if not pcall(vim.cmd.packadd, "nvim.difftool") then
-    return nil
-  end
-  local ok, mod = pcall(require, "difftool")
-  return ok and mod or nil
-end
 
 local function protect_left(bufnr)
   vim.bo[bufnr].modifiable = false
@@ -80,27 +71,8 @@ function M.open(index)
     return
   end
 
-  -- Note: nvim.difftool (0.12+) is available but currently not used.
-  -- The plugin creates buffers with both sides modifiable, and protecting
-  -- them after the fact is unreliable (timing issues, buffer identification).
-  -- The plain :diffsplit fallback provides consistent, testable behavior.
-  -- difftool support can be added later with proper buffer event hooks.
-  local use_difftool = false
-  local difftool = use_difftool and difftool_mod() or nil
-  if difftool then
-    local ok = pcall(difftool.open, pair.left, pair.right)
-    if ok then
-      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-        local buf = vim.api.nvim_win_get_buf(win)
-        if vim.api.nvim_buf_get_name(buf) == vim.fs.normalize(pair.left) then
-          protect_left(buf)
-        end
-      end
-      return
-    end
-  end
-
-  -- Fallback: plain diffsplit. Right first (focused), left split beside it.
+  -- Plain diffsplit: Right first (focused), left split beside it.
+  -- nvim.difftool support could be added later via open() hook if needed.
   vim.cmd.edit(vim.fn.fnameescape(pair.right))
   vim.cmd("leftabove vertical diffsplit " .. vim.fn.fnameescape(pair.left))
   protect_left(vim.api.nvim_get_current_buf())
