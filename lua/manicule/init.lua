@@ -1375,7 +1375,7 @@ end
 ---List comments, optionally filtered. Results are always sorted by
 ---`uri → start line → id` so the ordering seen in `:ManiculeList`,
 ---the picker, and the positional-number completer is identical.
----@param filter {uri?: string, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, _root?: string}|nil
+---@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, _root?: string}|nil
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
@@ -1408,6 +1408,9 @@ function M.list(filter)
     .iter(all)
     :filter(function(r)
       if filter.uri and r.uri ~= filter.uri then
+        return false
+      end
+      if filter.uris and not filter.uris[r.uri] then
         return false
       end
       if filter.path_suffix then

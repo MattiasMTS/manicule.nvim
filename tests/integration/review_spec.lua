@@ -78,4 +78,64 @@ describe("manicule review session", function()
     assert.is_false(ok)
     assert.is_truthy(err:find("no files", 1, true))
   end)
+
+  it("finish() sends only the session's comments to the sink", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    -- A comment on a file OUTSIDE the review session must not be sent.
+    local outside = ctx.root .. "/outside.lua"
+    vim.fn.writefile({ "return 0" }, outside)
+
+    local sent
+    require("manicule").register_sink({
+      name = "capture",
+      send = function(comments, _, cb)
+        sent = comments
+        cb(true)
+      end,
+    })
+
+    assert.is_true(R.start({ files = files, label = "test", sink = "capture" }))
+
+    -- Comment on pair 1's worktree file (the current buffer after start).
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("session comment")
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+
+    -- Comment on the outside file.
+    vim.cmd.edit(vim.fn.fnameescape(outside))
+    ui.prompt = function(_opts, cb)
+      cb("outside comment")
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+
+    R.finish()
+    vim.wait(200, function()
+      return sent ~= nil
+    end)
+    assert.is_truthy(sent)
+    assert.are.equal(1, #sent)
+    assert.are.equal("session comment", sent[1].body)
+  end)
+
+  it("finish() with no comments notifies and does not dispatch", function()
+    local R = require("manicule.review")
+    local called = false
+    require("manicule").register_sink({
+      name = "capture",
+      send = function(_, _, cb)
+        called = true
+        cb(true)
+      end,
+    })
+    assert.is_true(R.start({ files = make_pairs(1), label = "test", sink = "capture" }))
+    R.finish()
+    assert.is_false(called)
+  end)
 end)

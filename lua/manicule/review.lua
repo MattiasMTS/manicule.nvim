@@ -134,4 +134,55 @@ function M.stop()
   end
 end
 
+---URIs for every commentable buffer in the session (right side; left
+---side for deletions), matching how adapter.identify keys records.
+local function session_uris()
+  local uri_mod = require("manicule.uri")
+  local uris = {}
+  for _, pair in ipairs(session.files) do
+    local path = pair.status == "D" and pair.left or pair.right
+    uris[uri_mod.for_path(path)] = true
+  end
+  return uris
+end
+
+---Count the session's pending comments without side effects.
+local function pending_comments()
+  if not session then
+    return {}
+  end
+  return require("manicule").list({ _quiet = true, uris = session_uris() })
+end
+
+---Dispatch the session's comments to the configured sink.
+---@param opts? {sink?: string}
+function M.finish(opts)
+  opts = opts or {}
+  if not session then
+    vim.notify("manicule: no active review session", vim.log.levels.WARN)
+    return
+  end
+  local sink = opts.sink or session.sink
+  if not sink then
+    vim.notify("manicule: review session has no sink configured", vim.log.levels.WARN)
+    return
+  end
+  local comments = pending_comments()
+  if #comments == 0 then
+    vim.notify("manicule: review has no comments to send", vim.log.levels.INFO)
+    return
+  end
+  require("manicule").send(sink, { uris = session_uris() }, session.sink_ctx)
+end
+
+local augroup = vim.api.nvim_create_augroup("ManiculeReview", { clear = true })
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  group = augroup,
+  callback = function()
+    if session and session.sink and #pending_comments() > 0 then
+      M.finish()
+    end
+  end,
+})
+
 return M
