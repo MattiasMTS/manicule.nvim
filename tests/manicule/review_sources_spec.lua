@@ -8,7 +8,13 @@ local function fake_gh(dir, base_oid, head_oid)
   local script = bin .. "/gh"
   vim.fn.writefile({
     "#!/bin/sh",
-    ('echo \'{"baseRefOid":"%s","headRefOid":"%s"}\''):format(base_oid, head_oid),
+    'if [ "$1 $2" = "repo view" ]; then',
+    '  echo \'{"nameWithOwner":"acme/widgets"}\';',
+    'elif [ "$1" = "api" ]; then',
+    "  echo '[]';",
+    "else",
+    ('  echo \'{"baseRefOid":"%s","headRefOid":"%s"}\';'):format(base_oid, head_oid),
+    "fi",
   }, script)
   vim.fn.system({ "chmod", "+x", script })
   return bin
@@ -33,7 +39,13 @@ local function fake_gh_pr(dir, opts)
     '  if [ -f "$dir/no-repo" ]; then echo "gh: no GitHub remote" >&2; exit 1; fi;',
     '  echo \'{"nameWithOwner":"acme/widgets"}\';',
     'elif [ "$1" = "api" ]; then',
-    '  cat "$dir/comments.json";',
+    '  case "$*" in',
+    "  *--slurp*)",
+    '    if [ -f "$dir/no-slurp" ]; then echo "unknown flag: --slurp" >&2; exit 1; fi;',
+    "    printf '['; cat \"$dir/comments.json\"; printf ']';;",
+    "  *)",
+    '    cat "$dir/comments.json";;',
+    "  esac;",
     "else",
     "  exit 2;",
     "fi",
@@ -44,6 +56,9 @@ local function fake_gh_pr(dir, opts)
     home = home,
     set_no_repo = function()
       vim.fn.writefile({ "" }, home .. "/no-repo")
+    end,
+    set_no_slurp = function()
+      vim.fn.writefile({ "" }, home .. "/no-slurp")
     end,
   }
 end
@@ -227,6 +242,41 @@ describe("manicule review sources", function()
       assert.are.equal(1002, r.meta.github.id)
       assert.are.equal("https://example.test/r/1002", r.meta.github.url)
       assert.is_true(r.meta.github.imported)
+    end)
+
+    it("preserves comment bodies containing `][` byte-for-byte", function()
+      local S = require("manicule.review.sources")
+      local body = "see [ref][1] and t[1][2]"
+      local root, _, gh = pr_repo_with_comments({
+        {
+          id = 2001,
+          path = "a.lua",
+          line = 1,
+          body = body,
+          html_url = "https://example.test/r/2001",
+          user = { login = "octocat" },
+        },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s10" }))
+
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      assert.are.equal(body, records[1].body)
+    end)
+
+    it("falls back to manual paging when gh lacks --slurp", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      gh.set_no_slurp()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s11" }))
+
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      assert.are.equal("range comment", records[1].body)
     end)
 
     it("re-resolving the same PR does not duplicate imported records", function()

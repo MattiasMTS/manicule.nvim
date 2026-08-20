@@ -55,20 +55,60 @@ function M.github_pr(root, number)
     return warn("unexpected gh repo view output")
   end
 
-  local result = G.run({
-    "gh",
-    "api",
-    ("repos/%s/pulls/%s/comments"):format(repo.nameWithOwner, number),
-    "--paginate",
-  }, { cwd = root })
-  if result.code ~= 0 then
-    return warn(vim.trim(result.stderr))
+  local endpoint = ("repos/%s/pulls/%s/comments"):format(repo.nameWithOwner, number)
+
+  -- Prefer `--paginate --slurp`: gh wraps one JSON array per page in an
+  -- outer array, so page boundaries never require rewriting the payload
+  -- (a gsub on `][` would corrupt comment bodies containing brackets).
+  ---@return table|nil comments, string|nil err
+  local function fetch_comments()
+    local result = G.run({ "gh", "api", endpoint, "--paginate", "--slurp" }, { cwd = root })
+    if result.code == 0 then
+      local ok, pages = pcall(vim.json.decode, result.stdout)
+      if not ok or type(pages) ~= "table" then
+        return nil, "unexpected gh api output"
+      end
+      local comments = {}
+      for _, page in ipairs(pages) do
+        if type(page) ~= "table" then
+          return nil, "unexpected gh api output"
+        end
+        for _, comment in ipairs(page) do
+          comments[#comments + 1] = comment
+        end
+      end
+      return comments, nil
+    end
+    local stderr = result.stderr:lower()
+    if not (stderr:find("slurp", 1, true) or stderr:find("unknown flag", 1, true)) then
+      return nil, vim.trim(result.stderr)
+    end
+    -- gh too old for `--slurp`: fetch pages manually until a short page.
+    local per_page = 100
+    local comments = {}
+    local page = 1
+    while true do
+      local r = G.run({ "gh", "api", ("%s?page=%d&per_page=%d"):format(endpoint, page, per_page) }, { cwd = root })
+      if r.code ~= 0 then
+        return nil, vim.trim(r.stderr)
+      end
+      local ok, list = pcall(vim.json.decode, r.stdout)
+      if not ok or type(list) ~= "table" then
+        return nil, "unexpected gh api output"
+      end
+      for _, comment in ipairs(list) do
+        comments[#comments + 1] = comment
+      end
+      if #list < per_page then
+        return comments, nil
+      end
+      page = page + 1
+    end
   end
-  -- `--paginate` concatenates one JSON array per page (`[...][...]`);
-  -- join the page boundaries so multi-page output still decodes.
-  local ok, comments = pcall(vim.json.decode, (result.stdout:gsub("%]%s*%[", ",")))
-  if not ok or type(comments) ~= "table" then
-    return warn("unexpected gh api output")
+
+  local comments, fetch_err = fetch_comments()
+  if not comments then
+    return warn(fetch_err)
   end
 
   local store = require("manicule.store")

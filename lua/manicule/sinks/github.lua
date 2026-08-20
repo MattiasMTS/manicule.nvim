@@ -144,8 +144,9 @@ end
 
 local function post_review(opts, repo, pr, review, cwd)
   local tmp = vim.fn.tempname() .. ".json"
-  local write_ok = pcall(vim.fn.writefile, { vim.json.encode(review) }, tmp)
-  if not write_ok then
+  -- `writefile` can also signal failure by returning -1 without throwing.
+  local write_ok, wrote = pcall(vim.fn.writefile, { vim.json.encode(review) }, tmp)
+  if not write_ok or wrote ~= 0 then
     return false, "manicule: github sink could not write review payload to " .. tmp
   end
   local result = helpers.system({
