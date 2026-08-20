@@ -19,8 +19,27 @@
 -- Display modes (`config.get().ui.display` is the startup default; the
 -- live mode is module state, switched via `M.set_display_mode` /
 -- `:ManiculeDisplay`):
---   * "float"  -> anchored popups, exactly the original behavior (the
---                 sticky/viewport gating above applies)
+--   * "float"  -> anchored popups (the sticky/viewport gating above
+--                 applies). Placement is occlusion-aware and
+--                 unconditional (no config): the right-margin spot is
+--                 only used when every buffer line the popup would
+--                 vertically span leaves it on genuinely empty cells —
+--                 each spanned line's `strdisplaywidth` must end at
+--                 least one cell left of the popup's left edge.
+--                 Otherwise the popup falls back BELOW the anchor line,
+--                 left-aligned like the inline box (one-cell gutter),
+--                 or ABOVE the anchor when the window bottom leaves no
+--                 room below. A same-line stack decides + falls back as
+--                 a unit — never split between margin and below-line —
+--                 and keeps its vertical stacking in either placement.
+--                 Measurement assumes 'nowrap' and no horizontal scroll
+--                 (leftcol 0), the same assumptions the margin layout
+--                 math itself makes (one screen row per buffer line,
+--                 cell 0 = buffer column 0). Inputs are buffer lines +
+--                 window geometry only — stable while the cursor moves
+--                 along a line, so a layout pass never flaps between
+--                 margin and fallback. Eol's expanded popups reuse this
+--                 path and inherit the same rule.
 --   * "eol"    -> one collapsed end-of-line virt-text marker per record
 --                 on its anchor line; the full popup(s) for a line
 --                 expand while the cursor sits on it and close when it
@@ -750,6 +769,134 @@ end
 -- Popup rendering
 -- ---------------------------------------------------------------------------
 
+-- Left text-column offset of a fallback-placed float (the below/above
+-- placement of the occlusion-aware float mode): one cell right of the
+-- anchor line's column 0, mirroring the inline box's one-cell gutter.
+local FLOAT_FALLBACK_COL = 1
+
+---Popup body height in content rows (borders add 2). Shared by the
+---stack layout, the viewport cascade, and the occlusion measurement so
+---they all agree on how tall a record's popup is.
+---@param record table
+---@return integer
+local function popup_body_height(record)
+  return math.max(1, #split_lines(record.body))
+end
+
+---Widest content a float popup may take in a `win_width`-cell window.
+---Shared by the popup renderer, the viewport layout pass, and the
+---inline box's cap so every mode sizes content identically.
+---@param win_width integer
+---@return integer
+local function popup_width_cap(win_width)
+  return math.max(24, math.floor(win_width * 0.52))
+end
+
+---Content display width of `record`'s popup: the widest body/footer
+---line clamped to `max_width` — a short comment stays narrow. Shared by
+---`build_popup_content` and the float placement measurement (which
+---needs widths for a whole stack without building every popup's
+---content).
+---@param record table
+---@param max_width integer Content-width cap in display cells
+---@return integer
+local function popup_content_width(record, max_width)
+  local max_line_width = 0
+  for _, line in ipairs(split_lines(record.body)) do
+    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(line))
+  end
+  if max_line_width == 0 then
+    max_line_width = 1
+  end
+  local footer = comment_footer_text(record)
+  local footer_width = footer and vim.fn.strdisplaywidth(footer) or 0
+  return math.min(math.max(max_line_width, footer_width), math.max(1, max_width))
+end
+
+---Left column of a margin-placed popup (cells right of the anchor
+---line's column 0): right-aligned to the window edge with a fixed
+---inset, staggered left by `col_shift`. One formula shared by the
+---renderer and the placement measurement so the measured spot is the
+---placed spot.
+---@param win_width integer
+---@param content_width integer
+---@param col_shift integer
+---@return integer
+local function margin_col(win_width, content_width, col_shift)
+  return math.max(2, win_width - content_width - 6 - col_shift)
+end
+
+---Measure whether a same-line stack's right-margin spot rests on
+---genuinely empty cells. `entries` describe each member's would-be
+---margin rectangle: `row` (top offset in screen rows from the anchor
+---line — 0 means the popup's top border sits ON the anchor row),
+---`height` (content rows; the border adds 2 more), and `col` (left edge
+---in cells right of the anchor line's column 0). A spanned buffer line
+---occludes when its display width reaches past the rectangle's left
+---edge minus a 1-cell gap; rows past the last buffer line are empty and
+---never occlude.
+---
+---Assumes 'nowrap' and no horizontal scroll (leftcol 0) — the same
+---assumptions the margin layout math itself makes (one screen row per
+---buffer line, cell 0 = buffer column 0). Inputs are buffer lines and
+---the precomputed rectangles only, both stable while the cursor moves
+---along a line, so a layout pass never flaps between placements.
+---@param bufnr integer
+---@param anchor_line integer 1-indexed buffer line the stack anchors to
+---@param entries { row: integer, height: integer, col: integer }[]
+---@return boolean
+local function margin_spot_is_clear(bufnr, anchor_line, entries)
+  local min_row, max_row
+  for _, entry in ipairs(entries) do
+    local top = entry.row
+    local bottom = entry.row + entry.height + 1
+    min_row = math.min(min_row or top, top)
+    max_row = math.max(max_row or bottom, bottom)
+  end
+  if not min_row then
+    return true
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local first = anchor_line + min_row
+  local last = math.min(anchor_line + max_row, line_count)
+  if first > last then
+    return true
+  end
+  local lines = vim.api.nvim_buf_get_lines(bufnr, first - 1, last, false)
+
+  for _, entry in ipairs(entries) do
+    local top = anchor_line + entry.row
+    local bottom = math.min(anchor_line + entry.row + entry.height + 1, line_count)
+    for lnum = top, bottom do
+      local line = lines[lnum - first + 1] or ""
+      if vim.fn.strdisplaywidth(line) + 1 > entry.col then
+        return false
+      end
+    end
+  end
+  return true
+end
+
+---Direction of the fallback placement for a stack of `total_height`
+---popup rows (borders included) anchored at `anchor_line`: BELOW the
+---anchor when the whole stack fits between the anchor row and the
+---window bottom, otherwise ABOVE. Depends only on the window's topline
+---and height — stable while the cursor moves along a line.
+---@param anchor_win integer
+---@param anchor_line integer 1-indexed buffer line
+---@param total_height integer
+---@return "below"|"above"
+local function fallback_direction(anchor_win, anchor_line, total_height)
+  local top = vim.fn.line("w0", anchor_win)
+  local win_height = vim.api.nvim_win_get_height(anchor_win)
+  local anchor_row = anchor_line - top -- 0-based window row of the anchor
+  if anchor_row + 1 + total_height <= win_height then
+    return "below"
+  end
+  return "above"
+end
+
 ---@class manicule.ui.render.PopupContent
 ---@field title string Title: " c<short-id> <n>/<m> "
 ---@field footer string? Timestamp + edit/delete hint (nil when both absent)
@@ -773,17 +920,7 @@ end
 local function build_popup_content(record, max_width, display_index, display_total, wrap)
   local footer = comment_footer_text(record)
   local body_lines = split_lines(record.body)
-
-  local max_line_width = 0
-  for _, line in ipairs(body_lines) do
-    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(line))
-  end
-  if max_line_width == 0 then
-    max_line_width = 1
-  end
-
-  local footer_width = footer and vim.fn.strdisplaywidth(footer) or 0
-  local content_width = math.min(math.max(max_line_width, footer_width), math.max(1, max_width))
+  local content_width = popup_content_width(record, max_width)
 
   local fitted = {}
   for _, line in ipairs(body_lines) do
@@ -810,7 +947,7 @@ end
 ---@param handle manicule.ui.render.Handle
 ---@param records table[] Current record snapshot (used for stack offset)
 ---@param counter_records? table[] Current project/session snapshot (used for title count)
----@param layout? {winid?: integer, row?: integer, col_shift?: integer, index?: integer, total?: integer, display?: {index: integer, total: integer}}
+---@param layout? {winid?: integer, placement?: "margin"|"below"|"above", row?: integer, col_shift?: integer, index?: integer, total?: integer, display?: {index: integer, total: integer}}
 ---@return boolean
 local function render_comment_popup(record, handle, records, counter_records, layout)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
@@ -838,20 +975,26 @@ local function render_comment_popup(record, handle, records, counter_records, la
   end
 
   local win_width = vim.api.nvim_win_get_width(anchor_win)
-  local max_popup_width = math.max(24, math.floor(win_width * 0.52))
-  local content = build_popup_content(record, max_popup_width, display_index, display_total, false)
+  local width_cap = popup_width_cap(win_width)
+  local content = build_popup_content(record, width_cap, display_index, display_total, false)
 
   local my_line = record_start_line(record)
   local my_id = tostring(record.id or "")
 
-  -- `stack_offset`/`stack_index` only feed the `layout.row` /
-  -- `layout.col_shift` fallbacks. The non-sticky viewport path always
-  -- supplies both (it computes its own stacked layout up front), so skip
-  -- the O(records) stack scan + sort entirely in that case — it was pure
-  -- discarded work. The sticky path (no layout) still computes them.
+  -- Placement + stack geometry. The non-sticky viewport path supplies
+  -- everything precomputed (`layout.placement`/`row`/`col_shift` — it
+  -- lays out whole viewports at once), so skip the O(records) stack
+  -- scan + sort entirely in that case. The sticky path (no layout)
+  -- computes the same-line stack here and makes the same
+  -- occlusion-aware placement decision `update_viewport_popups` makes:
+  -- margin only when every buffer line the stack would span leaves the
+  -- spot on empty cells, otherwise below/above the anchor — always for
+  -- the stack as a unit, so same-line popups never split placements.
+  local placement = layout.placement
   local stack_offset = 0
   local stack_index = 1
-  if layout.row == nil or layout.col_shift == nil then
+  local fallback_row = 1
+  if not placement then
     local stack = {}
     for _, other in ipairs(records or {}) do
       if other.uri == record.uri and record_start_line(other) == my_line then
@@ -859,16 +1002,43 @@ local function render_comment_popup(record, handle, records, counter_records, la
       end
     end
     table.sort(stack, record_stack_less)
+    if #stack == 0 then
+      stack = { record }
+    end
 
+    local entries = {}
+    local total = 0
     for index, other in ipairs(stack) do
-      local other_id = tostring(other.id or "")
-      if other_id == my_id then
+      local height = popup_body_height(other)
+      if tostring(other.id or "") == my_id then
         stack_index = index
-        break
+        stack_offset = total
       end
-      stack_offset = stack_offset + math.max(1, #split_lines(other.body)) + 2
+      table.insert(entries, {
+        row = total,
+        height = height,
+        col = margin_col(win_width, popup_content_width(other, width_cap), math.min((index - 1) * 2, 12)),
+      })
+      total = total + height + 2
+    end
+
+    if margin_spot_is_clear(handle.bufnr, my_line, entries) then
+      placement = "margin"
+    else
+      placement = fallback_direction(anchor_win, my_line, total)
+      fallback_row = (placement == "below" and 1 or -total) + stack_offset
     end
   end
+
+  local popup_row, popup_col
+  if placement == "margin" then
+    popup_row = layout.row or stack_offset
+    popup_col = margin_col(win_width, content.width, layout.col_shift or math.min((stack_index - 1) * 2, 12))
+  else
+    popup_row = layout.row or fallback_row
+    popup_col = FLOAT_FALLBACK_COL
+  end
+
   local popup_bufnr = handle.popup_bufnr
   if not popup_bufnr or not vim.api.nvim_buf_is_valid(popup_bufnr) then
     popup_bufnr = float.create_scratch_buf()
@@ -879,8 +1049,8 @@ local function render_comment_popup(record, handle, records, counter_records, la
     relative = "win",
     win = anchor_win,
     bufpos = { my_line - 1, 0 },
-    row = layout.row or stack_offset,
-    col = math.max(2, win_width - content.width - 6 - (layout.col_shift or math.min((stack_index - 1) * 2, 12))),
+    row = popup_row,
+    col = popup_col,
     width = content.width,
     height = math.max(1, #content.lines),
     style = "minimal",
@@ -1292,7 +1462,7 @@ local function render_inline_virt_lines(record, handle, records, counter_records
   if anchor_win then
     win_width = vim.api.nvim_win_get_width(anchor_win)
   end
-  local max_width = math.max(8, math.min(math.max(24, math.floor(win_width * 0.52)), win_width - INLINE_FRAME_CELLS))
+  local max_width = math.max(8, math.min(popup_width_cap(win_width), win_width - INLINE_FRAME_CELLS))
 
   local virt_lines = {}
   for _, member in ipairs(stack) do
@@ -1591,23 +1761,89 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     -- per-record `render_comment_popup` re-scan + re-sort the counter set.
     local display = precompute_display_positions(visible, counter_records or records)
 
-    local next_top
-    for index, record in ipairs(visible) do
-      local body_height = math.max(1, #split_lines(record.body))
-      local popup_height = body_height + 2
-      local natural_top = record_start_line(record) - active_range.top
-      local row = 0
-      if next_top and natural_top < next_top then
-        row = next_top - natural_top
+    -- Group the visible records by anchor line (adjacent after the
+    -- sort): the occlusion-aware placement decision is made per
+    -- same-line stack, and a stack relocates as a unit — never split
+    -- between the margin and the below-anchor spot.
+    local groups = {}
+    for _, record in ipairs(visible) do
+      local line = record_start_line(record)
+      local group = groups[#groups]
+      if not group or group.line ~= line then
+        group = { line = line, records = {} }
+        table.insert(groups, group)
       end
-      local top = natural_top + row
-      next_top = top + popup_height
-      layouts[tostring(record.id or "")] = {
-        winid = active_range.winid,
-        row = row,
-        col_shift = math.min((index - 1) * 2, 12),
-        display = display[tostring(record.id or "")],
-      }
+      table.insert(group.records, record)
+    end
+
+    local win_width = vim.api.nvim_win_get_width(active_range.winid)
+    local width_cap = popup_width_cap(win_width)
+
+    local next_top
+    local stagger = 0
+    for _, group in ipairs(groups) do
+      -- The group's would-be margin geometry: today's cascade rows +
+      -- stagger columns, computed against trial copies of the cascade
+      -- state so a group that relocates leaves the margin cascade
+      -- untouched (its rows/stagger stay available to later margin
+      -- popups — a relocated stack no longer occupies the margin).
+      local entries = {}
+      local group_next_top = next_top
+      local group_stagger = stagger
+      local natural_top = group.line - active_range.top
+      for _, record in ipairs(group.records) do
+        group_stagger = group_stagger + 1
+        local body_height = popup_body_height(record)
+        local row = 0
+        if group_next_top and natural_top < group_next_top then
+          row = group_next_top - natural_top
+        end
+        group_next_top = natural_top + row + body_height + 2
+        local col_shift = math.min((group_stagger - 1) * 2, 12)
+        table.insert(entries, {
+          record = record,
+          row = row,
+          height = body_height,
+          col_shift = col_shift,
+          col = margin_col(win_width, popup_content_width(record, width_cap), col_shift),
+        })
+      end
+
+      if margin_spot_is_clear(bufnr, group.line, entries) then
+        -- Margin spot rests on empty cells: place exactly as before and
+        -- advance the cascade.
+        next_top = group_next_top
+        stagger = group_stagger
+        for _, entry in ipairs(entries) do
+          layouts[tostring(entry.record.id or "")] = {
+            winid = active_range.winid,
+            placement = "margin",
+            row = entry.row,
+            col_shift = entry.col_shift,
+            display = display[tostring(entry.record.id or "")],
+          }
+        end
+      else
+        -- The margin would cover code: the whole stack falls back below
+        -- the anchor line (above when the window bottom leaves no room),
+        -- left-aligned like the inline box, still vertically stacked.
+        local total = 0
+        for _, entry in ipairs(entries) do
+          total = total + entry.height + 2
+        end
+        local direction = fallback_direction(active_range.winid, group.line, total)
+        local offset = direction == "below" and 1 or -total
+        for _, entry in ipairs(entries) do
+          layouts[tostring(entry.record.id or "")] = {
+            winid = active_range.winid,
+            placement = direction,
+            row = offset,
+            col_shift = 0,
+            display = display[tostring(entry.record.id or "")],
+          }
+          offset = offset + entry.height + 2
+        end
+      end
     end
   end
 

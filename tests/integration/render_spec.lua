@@ -449,6 +449,135 @@ describe("manicule render lifecycle", function()
   end)
 end)
 
+-- Occlusion-aware float placement. The right-margin spot is only used
+-- when every buffer line the popup would vertically span leaves it on
+-- genuinely empty cells (1-cell gap); otherwise the popup — or its whole
+-- same-line stack, as a unit — drops below the anchor line, left-aligned
+-- like the inline box (above the anchor when the window bottom leaves no
+-- room below). Measurement assumes 'nowrap' (like the margin layout
+-- math itself), so the long-line fixtures pin it explicitly.
+describe("manicule float placement", function()
+  -- Wider than any margin column a test window can offer.
+  local LONG_LINE = "-- " .. string.rep("x", 200)
+
+  before_each(function()
+    ctx = H.setup({ ui = { display = "float" } })
+  end)
+  after_each(teardown_env)
+
+  it("keeps the popup at the margin when the spanned lines are short", function()
+    H.edit_project_file(ctx, "src/short.lua", {
+      "local value = 1",
+      "value = value + 1",
+      "return value",
+      "return value",
+    })
+    vim.wo.wrap = false
+    require("manicule").add({
+      body = "margin note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("margin note", 1))
+    local cfg = vim.api.nvim_win_get_config(floating_windows_containing("margin note")[1])
+    local win_width = vim.api.nvim_win_get_width(0)
+    -- Existing margin layout math: right margin inset by the popup width
+    -- + fixed gutter, no stagger for the first visible popup, top row on
+    -- the anchor line.
+    assert.are.equal(0, cfg.bufpos[1])
+    assert.are.equal(0, tonumber(cfg.row))
+    assert.are.equal(math.max(2, win_width - cfg.width - 6), tonumber(cfg.col))
+  end)
+
+  it("relocates the popup below the anchor when the margin would cover code", function()
+    H.edit_project_file(ctx, "src/long.lua", { LONG_LINE, LONG_LINE, LONG_LINE, LONG_LINE })
+    vim.wo.wrap = false
+    require("manicule").add({
+      body = "occluded note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("occluded note", 1))
+    local cfg = vim.api.nvim_win_get_config(floating_windows_containing("occluded note")[1])
+    local win_width = vim.api.nvim_win_get_width(0)
+    -- Sanity: the margin spot really was hiding code (the spanned lines
+    -- reach past the would-be left edge minus the 1-cell gap).
+    assert.is_true(vim.fn.strdisplaywidth(LONG_LINE) + 1 > math.max(2, win_width - cfg.width - 6))
+    -- Fallback: anchored at the commented line, one row below it,
+    -- left-aligned like the inline box — nowhere near the right margin.
+    assert.are.equal(0, cfg.bufpos[1])
+    assert.are.equal(1, tonumber(cfg.row))
+    assert.are.equal(1, tonumber(cfg.col))
+  end)
+
+  it("falls back a same-line stack as a unit, still vertically stacked", function()
+    H.edit_project_file(ctx, "src/stack-long.lua", {
+      LONG_LINE,
+      LONG_LINE,
+      LONG_LINE,
+      LONG_LINE,
+      LONG_LINE,
+      LONG_LINE,
+      LONG_LINE,
+      LONG_LINE,
+    })
+    vim.wo.wrap = false
+    require("manicule").add({
+      body = "unit fallback one",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    require("manicule").add({
+      body = "unit fallback two",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("unit fallback one", 1))
+    assert.is_true(wait_for_popup_count("unit fallback two", 1))
+    local first_cfg = vim.api.nvim_win_get_config(floating_windows_containing("unit fallback one")[1])
+    local second_cfg = vim.api.nvim_win_get_config(floating_windows_containing("unit fallback two")[1])
+
+    -- BOTH left the margin (never split between margin and below-line),
+    -- both anchored to the commented line at the inline-box column.
+    assert.are.equal(0, first_cfg.bufpos[1])
+    assert.are.equal(0, second_cfg.bufpos[1])
+    assert.are.equal(1, tonumber(first_cfg.col))
+    assert.are.equal(1, tonumber(second_cfg.col))
+
+    -- Still vertically stacked below the anchor: the stack head sits one
+    -- row below the line, the next member a full popup (body + borders)
+    -- further down. Stack order is created_at/id, so assert set-wise.
+    local rows = { tonumber(first_cfg.row), tonumber(second_cfg.row) }
+    table.sort(rows)
+    assert.are.equal(1, rows[1])
+    assert.are.equal(4, rows[2])
+  end)
+
+  it("places the popup above the anchor on the last visible line", function()
+    local win_height = vim.api.nvim_win_get_height(0)
+    local lines = {}
+    for _ = 1, win_height do
+      table.insert(lines, LONG_LINE)
+    end
+    H.edit_project_file(ctx, "src/bottom.lua", lines)
+    vim.wo.wrap = false
+    -- Keep the window scrolled to the top so the anchor is the LAST
+    -- visible line: no room for the popup below it.
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    require("manicule").add({
+      body = "bottom note",
+      range = { start = { win_height - 1, 0 }, end_ = { win_height - 1, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("bottom note", 1))
+    local cfg = vim.api.nvim_win_get_config(floating_windows_containing("bottom note")[1])
+    -- Above the anchor: the popup's bottom border rests on the row just
+    -- above the anchor line (1 body row + 2 border rows = offset -3).
+    assert.are.equal(win_height - 1, cfg.bufpos[1])
+    assert.are.equal(-3, tonumber(cfg.row))
+    assert.are.equal(1, tonumber(cfg.col))
+  end)
+end)
+
 -- Sticky-mode regressions (#5, #6). Dedicated describe so the sticky
 -- config doesn't bleed into the non-sticky specs above. `H.setup`
 -- deep-merges the opts into the base config, so `ui = { sticky = true }`
@@ -508,6 +637,25 @@ describe("manicule sticky render", function()
     vim.api.nvim_set_current_win(original)
     vim.cmd("close")
     assert.is_true(wait_for_popup_count("sticky split note", 1))
+  end)
+
+  it("relocates a sticky popup below the anchor when the margin would cover code", function()
+    -- The sticky render path computes its own layout (no precomputed
+    -- viewport layout), so it must make the same occlusion-aware
+    -- placement decision the viewport pass makes.
+    local long_line = "-- " .. string.rep("x", 200)
+    H.edit_project_file(ctx, "src/sticky-long.lua", { long_line, long_line, long_line, long_line })
+    vim.wo.wrap = false
+    require("manicule").add({
+      body = "sticky occluded note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    assert.is_true(wait_for_popup_count("sticky occluded note", 1))
+    local cfg = vim.api.nvim_win_get_config(floating_windows_containing("sticky occluded note")[1])
+    assert.are.equal(0, cfg.bufpos[1])
+    assert.are.equal(1, tonumber(cfg.row))
+    assert.are.equal(1, tonumber(cfg.col))
   end)
 
   it("does not leak an orphaned float when the buffer is wiped before the scheduled render (#5)", function()

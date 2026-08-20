@@ -377,6 +377,38 @@ describe("manicule eol display mode", function()
     assert.is_true(vim.fn.strdisplaywidth(text) <= win_width - line_width - 1)
   end)
 
+  it("relocates the expanded popup below the anchor on a long line", function()
+    -- Eol-mode cursor expansion reuses the float placement path, so it
+    -- inherits the occlusion-aware placement: on a line too long for the
+    -- right margin, the expanded popup drops below the anchor instead of
+    -- covering the code. Placement math assumes 'nowrap' — pin it.
+    local win_width = vim.api.nvim_win_get_width(0)
+    local long_line = "-- " .. string.rep("z", win_width + 60)
+    H.edit_project_file(ctx, "src/eol-long.lua", {
+      long_line,
+      long_line,
+      long_line,
+      "return true",
+    })
+    vim.wo.wrap = false
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 4)
+    require("manicule").add({
+      body = "eol avoids margin",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("eol avoids margin", 0))
+
+    -- Cursor onto the long commented line: the popup expands below the
+    -- anchor row at the inline-box column, not in the right margin.
+    move_cursor(bufnr, 1)
+    assert.is_true(wait_for_popup_count("eol avoids margin", 1))
+    local cfg = vim.api.nvim_win_get_config(floating_windows_containing("eol avoids margin")[1])
+    assert.are.equal(0, cfg.bufpos[1])
+    assert.are.equal(1, tonumber(cfg.row))
+    assert.are.equal(1, tonumber(cfg.col))
+  end)
+
   it("degrades to a bare marker when the line leaves no room", function()
     local win_width = vim.api.nvim_win_get_width(0)
     H.edit_project_file(ctx, "src/long.lua", {
