@@ -29,6 +29,10 @@ local function fake_gh_pr(dir, opts)
   local bin = home .. "/bin"
   vim.fn.mkdir(bin, "p")
   vim.fn.writefile({ opts.comments_json or "[]" }, home .. "/comments.json")
+  local default_threads = vim.json.encode({
+    data = { repository = { pullRequest = { reviewThreads = { nodes = {} } } } },
+  })
+  vim.fn.writefile({ opts.threads_json or default_threads }, home .. "/threads.json")
   local script = bin .. "/gh"
   vim.fn.writefile({
     "#!/bin/sh",
@@ -38,6 +42,9 @@ local function fake_gh_pr(dir, opts)
     'elif [ "$1 $2" = "repo view" ]; then',
     '  if [ -f "$dir/no-repo" ]; then echo "gh: no GitHub remote" >&2; exit 1; fi;',
     '  echo \'{"nameWithOwner":"acme/widgets"}\';',
+    'elif [ "$1 $2" = "api graphql" ]; then',
+    '  if [ -f "$dir/no-graphql" ]; then echo "gh: graphql boom" >&2; exit 1; fi;',
+    '  cat "$dir/threads.json";',
     'elif [ "$1" = "api" ]; then',
     '  case "$*" in',
     "  *--slurp*)",
@@ -60,13 +67,16 @@ local function fake_gh_pr(dir, opts)
     set_no_slurp = function()
       vim.fn.writefile({ "" }, home .. "/no-slurp")
     end,
+    set_no_graphql = function()
+      vim.fn.writefile({ "" }, home .. "/no-graphql")
+    end,
   }
 end
 
 ---A git repo with a checked-out PR branch plus a fake gh answering the
 ---comments endpoint with `comments` (default: one range comment and one
 ---outdated comment with line=null).
-local function pr_repo_with_comments(comments)
+local function pr_repo_with_comments(comments, threads)
   local root, git = H.git_repo(ctx, { ["a.lua"] = { "return 1", "-- two", "-- three", "-- four", "-- five" } })
   local base_oid = vim.trim(git("rev-parse", "HEAD").stdout)
   git("checkout", "-q", "-b", "pr-branch")
@@ -96,6 +106,9 @@ local function pr_repo_with_comments(comments)
         user = { login = "ghost" },
       },
     }),
+    threads_json = threads and vim.json.encode({
+      data = { repository = { pullRequest = { reviewThreads = { nodes = threads } } } },
+    }) or nil,
   })
   return root, git, gh
 end
@@ -276,6 +289,46 @@ describe("manicule review sources", function()
       assert.are.equal(1002, by_id[1002].meta.github.thread_id)
       assert.are.equal(1002, by_id[1004].meta.github.thread_id)
       assert.are.equal(42, by_id[1002].meta.github.pr)
+    end)
+
+    it("maps review thread node ids and resolved flags onto imported records", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments(nil, {
+        { id = "RT_1", isResolved = true, comments = { nodes = { { databaseId = 1002 } } } },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s13" }))
+
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      assert.are.equal("RT_1", records[1].meta.github.thread_node)
+      assert.is_true(records[1].meta.github.resolved)
+    end)
+
+    it("imports without resolve support when the thread query fails", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      gh.set_no_graphql()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      local warned
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        if level == vim.log.levels.WARN then
+          warned = msg
+        end
+        return original_notify(msg, level)
+      end
+      local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s14" })
+      vim.notify = original_notify
+
+      assert.is_nil(err)
+      assert.is_truthy(job)
+      assert.is_truthy(warned, "expected a WARN about resolve support")
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      assert.is_nil(records[1].meta.github.thread_node)
     end)
 
     it("preserves comment bodies containing `][` byte-for-byte", function()

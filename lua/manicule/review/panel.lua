@@ -113,6 +113,13 @@ local function build_comments_items()
     if record then
       item.user_data.uri = record.uri
       item.user_data.line = range.start_line(record)
+      -- Mark GitHub-resolved threads (meta.github.resolved, toggled via
+      -- `gr`) — distinct from the record's own `resolved` flag.
+      local meta = type(record.meta) == "table" and record.meta or nil
+      local gh = meta and type(meta.github) == "table" and meta.github or nil
+      if gh and gh.resolved == true then
+        item.text = "\u{2713} " .. item.text
+      end
     end
   end
   return items
@@ -359,6 +366,20 @@ local function setup_panel_keymaps(bufnr)
       require("manicule.review.github").reply(locator)
     end
   end, vim.tbl_extend("keep", { desc = "Manicule review: reply to imported GitHub comment" }, map_opts))
+
+  -- `gr` in comments view toggles GitHub thread resolution for an
+  -- imported comment. Falls through to the default `gr` elsewhere.
+  vim.keymap.set("n", "gr", function()
+    if current_view ~= "comments" then
+      local gr = vim.api.nvim_replace_termcodes("gr", true, false, true)
+      vim.api.nvim_feedkeys(gr, "n", false)
+      return
+    end
+    local locator = record_locator_at_cursor()
+    if locator then
+      require("manicule.review.github").toggle_resolve(locator)
+    end
+  end, vim.tbl_extend("keep", { desc = "Manicule review: toggle GitHub thread resolution" }, map_opts))
 
   -- <Esc> in a comments view returns to files (clearing any file
   -- filter); in files view it falls through to the default behavior.

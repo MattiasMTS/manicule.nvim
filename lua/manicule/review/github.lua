@@ -121,4 +121,49 @@ function M.reply(locator)
   end)
 end
 
+---Toggle GitHub thread resolution for the imported comment behind
+---`locator` via the resolveReviewThread / unresolveReviewThread GraphQL
+---mutations. On success `meta.github.resolved` flips locally and a
+---ManiculeEdited event refreshes every open surface. Requires
+---`meta.github.thread_node` (captured at import time); records imported
+---before resolve support need a re-import.
+---@param locator {id: string, scope?: string, project_root?: string}|nil
+function M.toggle_resolve(locator)
+  local record, save = find(locator)
+  if not record or not save then
+    vim.notify("manicule: no comment with id " .. tostring(locator and locator.id), vim.log.levels.WARN)
+    return
+  end
+  local gh = imported_github(record)
+  if not gh then
+    vim.notify("manicule: resolve targets a comment imported from GitHub", vim.log.levels.WARN)
+    return
+  end
+  if type(gh.thread_node) ~= "string" or gh.thread_node == "" then
+    vim.notify("manicule: comment has no review-thread id; re-import the PR to enable resolve", vim.log.levels.WARN)
+    return
+  end
+  local resolving = gh.resolved ~= true
+  local mutation = resolving and "resolveReviewThread" or "unresolveReviewThread"
+  local query = ("mutation($id:ID!){%s(input:{threadId:$id}){thread{isResolved}}}"):format(mutation)
+  local result = require("manicule.review.git").run(
+    { "gh", "api", "graphql", "-f", "query=" .. query, "-f", "id=" .. gh.thread_node },
+    { cwd = record.project_root }
+  )
+  if result.code ~= 0 then
+    vim.notify(("manicule: gh %s failed: %s"):format(mutation, vim.trim(result.stderr)), vim.log.levels.ERROR)
+    return
+  end
+  gh.resolved = resolving
+  record.updated_at = os.time()
+  local ok, err = save()
+  if not ok then
+    gh.resolved = not resolving
+    vim.notify("manicule: failed to persist thread state: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  emit("ManiculeEdited", record)
+  vim.notify(("manicule: thread %s"):format(resolving and "resolved" or "unresolved"), vim.log.levels.INFO)
+end
+
 return M

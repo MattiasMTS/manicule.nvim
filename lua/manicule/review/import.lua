@@ -111,6 +111,62 @@ function M.github_pr(root, number)
     return warn(fetch_err)
   end
 
+  -- Best-effort resolve support: the REST comments payload carries no
+  -- review-thread ids, and resolving needs the THREAD node id. One
+  -- GraphQL query maps each thread's first comment databaseId to the
+  -- thread node + isResolved; failure degrades to import-without-resolve.
+  ---@return table<number, {thread_node: string, resolved: boolean}>|nil, string|nil err
+  local function fetch_threads()
+    local owner, name = repo.nameWithOwner:match("^([^/]+)/(.+)$")
+    if not owner then
+      return nil, "unexpected repository name " .. repo.nameWithOwner
+    end
+    local query = "query($owner:String!,$name:String!,$number:Int!){"
+      .. "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+      .. "reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}"
+    local result = G.run({
+      "gh",
+      "api",
+      "graphql",
+      "-f",
+      "query=" .. query,
+      "-f",
+      "owner=" .. owner,
+      "-f",
+      "name=" .. name,
+      "-F",
+      "number=" .. tostring(number),
+    }, { cwd = root })
+    if result.code ~= 0 then
+      return nil, vim.trim(result.stderr)
+    end
+    local ok, decoded = pcall(vim.json.decode, result.stdout)
+    local nodes = ok
+      and type(decoded) == "table"
+      and vim.tbl_get(decoded, "data", "repository", "pullRequest", "reviewThreads", "nodes")
+    if type(nodes) ~= "table" then
+      return nil, "unexpected gh graphql output"
+    end
+    local map = {}
+    for _, node in ipairs(nodes) do
+      local db = type(node) == "table" and vim.tbl_get(node, "comments", "nodes", 1, "databaseId")
+      if type(node.id) == "string" and type(db) == "number" then
+        map[db] = { thread_node = node.id, resolved = node.isResolved == true }
+      end
+    end
+    return map, nil
+  end
+
+  local threads = {}
+  if #comments > 0 then
+    local thread_map, thread_err = fetch_threads()
+    if thread_map then
+      threads = thread_map
+    else
+      vim.notify(("manicule: PR thread resolve support unavailable: %s"):format(thread_err), vim.log.levels.WARN)
+    end
+  end
+
   local store = require("manicule.store")
   local uri_mod = require("manicule.uri")
   local id_mod = require("manicule.id")
@@ -140,6 +196,7 @@ function M.github_pr(root, number)
         -- the comment's own id for top-level comments, its
         -- in_reply_to_id otherwise.
         local thread_id = num(comment.in_reply_to_id) or comment.id
+        local thread = threads[thread_id]
         store.put_record({
           id = id_mod.new(),
           uri = uri_mod.for_path(root .. "/" .. comment.path),
@@ -158,6 +215,8 @@ function M.github_pr(root, number)
               imported = true,
               thread_id = thread_id,
               pr = tonumber(number),
+              thread_node = thread and thread.thread_node or nil,
+              resolved = thread and thread.resolved or nil,
             },
           },
         })

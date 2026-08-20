@@ -765,6 +765,103 @@ describe("manicule review session", function()
     assert.are.equal(1, #require("manicule").list({ _quiet = true, _root = ctx.root }))
   end)
 
+  ---Fake gh on PATH that logs every argv line and answers any call
+  ---with an empty JSON object (enough for graphql mutations).
+  local function fake_gh_resolve(dir)
+    local home = dir .. "/gh-resolve"
+    local bin = home .. "/bin"
+    vim.fn.mkdir(bin, "p")
+    vim.fn.writefile({
+      "#!/bin/sh",
+      "dir=" .. vim.fn.shellescape(home),
+      'echo "$*" >> "$dir/argv.log"',
+      "echo '{\"data\":{}}'",
+    }, bin .. "/gh")
+    vim.fn.system({ "chmod", "+x", bin .. "/gh" })
+    return {
+      bin = bin,
+      argv = function()
+        local ok, lines = pcall(vim.fn.readfile, home .. "/argv.log")
+        return ok and lines or {}
+      end,
+    }
+  end
+
+  it("gr in comments view toggles GitHub thread resolution", function()
+    local gh = fake_gh_resolve(ctx.artifact_root)
+    local saved_path = vim.env.PATH
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    local record = put_imported(
+      files[1].right,
+      { id = 9001, imported = true, thread_id = 9001, thread_node = "RT_kwDO1", resolved = false, pr = 42 }
+    )
+    assert.is_true(R.start({ files = files, label = "resolve" }))
+
+    press_in_panel(1, "<Tab>")
+    assert.is_nil(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
+
+    press_in_panel(1, "gr")
+
+    local argv = table.concat(gh.argv(), "\n")
+    assert.is_truthy(argv:find("resolveReviewThread", 1, true))
+    assert.is_truthy(argv:find("RT_kwDO1", 1, true))
+    assert.is_nil(argv:find("unresolveReviewThread", 1, true))
+    local store = require("manicule.store")
+    assert.is_true(store.get(ctx.root, record.id).meta.github.resolved)
+    assert.is_truthy(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
+
+    press_in_panel(1, "gr")
+
+    argv = table.concat(gh.argv(), "\n")
+    assert.is_truthy(argv:find("unresolveReviewThread", 1, true))
+    assert.is_false(store.get(ctx.root, record.id).meta.github.resolved)
+    assert.is_nil(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
+
+    vim.env.PATH = saved_path
+  end)
+
+  it("gr on a non-imported comment warns", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    assert.is_true(R.start({ files = files, label = "resolve-warn" }))
+    add_comment(files[1].right, "local note")
+
+    local warned
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if level == vim.log.levels.WARN then
+        warned = msg
+      end
+    end
+    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "gr")
+    vim.notify = original_notify
+
+    assert.is_truthy(warned, "expected a WARN")
+  end)
+
+  it("gr on an imported comment without a thread id warns", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    put_imported(files[1].right, { id = 9002, imported = true, thread_id = 9002, pr = 42 })
+    assert.is_true(R.start({ files = files, label = "resolve-no-node" }))
+
+    local warned
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if level == vim.log.levels.WARN then
+        warned = msg
+      end
+    end
+    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "gr")
+    vim.notify = original_notify
+
+    assert.is_truthy(warned, "expected a WARN")
+  end)
+
   it(":ManiculeToggle hides the panel during a session and keeps it running", function()
     vim.cmd("runtime plugin/manicule.lua")
     local R = require("manicule.review")
