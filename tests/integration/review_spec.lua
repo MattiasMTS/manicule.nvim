@@ -67,6 +67,37 @@ describe("manicule review session", function()
     assert.are.equal(2, R.state().index)
   end)
 
+  it("maps <Tab>/<S-Tab> in review buffers and removes them on stop", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "tabnav" }))
+
+    local right_buf = vim.fn.bufnr(R.state().files[1].right)
+    assert.is_true(right_buf > 0, "right buffer not loaded")
+    local function buf_map(bufnr, lhs)
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return nil
+      end
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+        if map.lhs:lower() == lhs:lower() then
+          return map
+        end
+      end
+      return nil
+    end
+
+    local tab_map = buf_map(right_buf, "<Tab>")
+    assert.is_truthy(tab_map, "<Tab> not mapped in review buffer")
+    assert.is_truthy(buf_map(right_buf, "<S-Tab>"), "<S-Tab> not mapped in review buffer")
+
+    -- Invoking the mapping advances the pair.
+    tab_map.callback()
+    assert.are.equal(2, R.state().index)
+
+    R.stop()
+    assert.is_nil(buf_map(right_buf, "<Tab>"), "<Tab> map leaked past stop()")
+    assert.is_nil(buf_map(right_buf, "<S-Tab>"), "<S-Tab> map leaked past stop()")
+  end)
+
   it("stop() clears state and closes the session tab", function()
     local R = require("manicule.review")
     local tabs_before = #vim.api.nvim_list_tabpages()

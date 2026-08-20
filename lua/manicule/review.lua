@@ -47,6 +47,33 @@ local function close_session_windows()
   end
 end
 
+-- Session-scoped file navigation: <Tab>/<S-Tab> cycle pairs. Buffer-local
+-- so the global <Tab> (= <C-i> jumplist) is shadowed only inside review
+-- buffers, and removed again in stop(). Left buffers are bufhidden=wipe;
+-- right buffers are real files, so stop() must unmap them explicitly.
+local function map_navigation(bufnr)
+  if not session then
+    return
+  end
+  vim.keymap.set("n", "<Tab>", function()
+    require("manicule.review").next()
+  end, { buffer = bufnr, desc = "Manicule review: next file" })
+  vim.keymap.set("n", "<S-Tab>", function()
+    require("manicule.review").prev()
+  end, { buffer = bufnr, desc = "Manicule review: previous file" })
+  session.mapped_bufs = session.mapped_bufs or {}
+  session.mapped_bufs[bufnr] = true
+end
+
+local function unmap_navigation(mapped_bufs)
+  for bufnr in pairs(mapped_bufs or {}) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      pcall(vim.keymap.del, "n", "<Tab>", { buffer = bufnr })
+      pcall(vim.keymap.del, "n", "<S-Tab>", { buffer = bufnr })
+    end
+  end
+end
+
 ---@param index integer
 function M.open(index)
   if not session then
@@ -65,6 +92,7 @@ function M.open(index)
   if pair.status == "D" then
     vim.cmd.edit(vim.fn.fnameescape(pair.left))
     protect_left(vim.api.nvim_get_current_buf())
+    map_navigation(vim.api.nvim_get_current_buf())
     vim.notify(("manicule: %s was deleted; comments here are file-level notes"):format(pair.path), vim.log.levels.INFO)
     return
   end
@@ -72,8 +100,11 @@ function M.open(index)
   -- Plain diffsplit: Right first (focused), left split beside it.
   -- nvim.difftool support could be added later via open() hook if needed.
   vim.cmd.edit(vim.fn.fnameescape(pair.right))
+  local right_buf = vim.api.nvim_get_current_buf()
   vim.cmd("leftabove vertical diffsplit " .. vim.fn.fnameescape(pair.left))
   protect_left(vim.api.nvim_get_current_buf())
+  map_navigation(vim.api.nvim_get_current_buf())
+  map_navigation(right_buf)
   vim.cmd.wincmd("p") -- focus back on the right / worktree side
 end
 
@@ -127,6 +158,7 @@ function M.stop()
   end
   require("manicule.review.panel").close()
   local tab = session.tab
+  unmap_navigation(session.mapped_bufs)
   session = nil
   if vim.api.nvim_tabpage_is_valid(tab) then
     local tab_count = #vim.api.nvim_list_tabpages()
