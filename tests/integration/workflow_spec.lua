@@ -220,6 +220,47 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
+  it("keeps quickfix keymaps off location-list buffers while a manicule list is set", function()
+    -- Count buffer-local normal-mode maps installed by
+    -- quickfix_keymaps.attach — all desc'd "Manicule: …".
+    local function manicule_map_count(bufnr)
+      local count = 0
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+        if type(map.desc) == "string" and map.desc:find("Manicule:", 1, true) then
+          count = count + 1
+        end
+      end
+      return count
+    end
+
+    -- A manicule-titled GLOBAL quickfix list, as an active review
+    -- session leaves behind.
+    local path = ctx.root .. "/src/example.lua"
+    vim.fn.setqflist({}, " ", {
+      title = "manicule-review (1/2)",
+      items = { { filename = path, lnum = 1, text = "review entry" } },
+    })
+
+    -- A location list is a different list entirely: its qf buffer must
+    -- not inherit manicule's dd/ce/u/<C-r> maps.
+    vim.fn.setloclist(0, { { filename = path, lnum = 1, text = "loc entry" } })
+    vim.cmd("lopen")
+    local loclist_win = vim.api.nvim_get_current_win()
+    local loclist_buf = vim.api.nvim_win_get_buf(loclist_win)
+    assert.are.equal(1, vim.fn.getwininfo(loclist_win)[1].loclist)
+    assert.are.equal(0, manicule_map_count(loclist_buf), "manicule quickfix maps leaked onto a location-list buffer")
+    vim.cmd("lclose")
+
+    -- The real quickfix window showing the manicule-titled list still
+    -- gets the maps.
+    vim.cmd("copen")
+    local qf_win = vim.api.nvim_get_current_win()
+    local qf_buf = vim.api.nvim_win_get_buf(qf_win)
+    assert.are.equal(0, vim.fn.getwininfo(qf_win)[1].loclist)
+    assert.is_true(manicule_map_count(qf_buf) > 0, "manicule maps missing from the manicule quickfix buffer")
+    vim.cmd("cclose")
+  end)
+
   it("edits a project record through quickfix and repaints the source popup", function()
     vim.cmd("runtime plugin/manicule.lua")
 

@@ -823,6 +823,17 @@ function M.setup(opts)
     group = group,
     pattern = "qf",
     callback = function(ev)
+      -- Location-list buffers share the `qf` filetype, but the GLOBAL
+      -- quickfix title below says nothing about them — while a review
+      -- session holds a `manicule…`-titled global list, any `:lopen`ed
+      -- location list would inherit manicule's dd/ce/u/<C-r> maps.
+      -- Manicule only ever owns the global quickfix list, so skip
+      -- loclist windows entirely.
+      local win = vim.fn.bufwinid(ev.buf)
+      local wininfo = win ~= -1 and vim.fn.getwininfo(win)[1] or nil
+      if not wininfo or wininfo.loclist == 1 then
+        return
+      end
       local ok, info = pcall(vim.fn.getqflist, { title = 1 })
       if not ok or type(info) ~= "table" then
         return
