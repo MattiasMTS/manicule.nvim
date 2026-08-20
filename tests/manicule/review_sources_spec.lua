@@ -70,6 +70,11 @@ local function fake_gh_pr(dir, opts)
     set_no_graphql = function()
       vim.fn.writefile({ "" }, home .. "/no-graphql")
     end,
+    set_threads = function(nodes)
+      vim.fn.writefile({
+        vim.json.encode({ data = { repository = { pullRequest = { reviewThreads = { nodes = nodes } } } } }),
+      }, home .. "/threads.json")
+    end,
   }
 end
 
@@ -364,6 +369,33 @@ describe("manicule review sources", function()
       local records = require("manicule.store").all(root)
       assert.are.equal(1, #records)
       assert.are.equal("range comment", records[1].body)
+    end)
+
+    it("backfills thread data onto existing records on re-import", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s15" }))
+      local store = require("manicule.store")
+      local records = store.all(root)
+      assert.are.equal(1, #records)
+      assert.is_nil(records[1].meta.github.thread_node)
+
+      gh.set_threads({
+        { id = "RT_9", isResolved = true, comments = { nodes = { { databaseId = 1002 } } } },
+      })
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s16" }))
+
+      records = store.all(root)
+      assert.are.equal(1, #records)
+      assert.are.equal("RT_9", records[1].meta.github.thread_node)
+      assert.is_true(records[1].meta.github.resolved)
+
+      -- Resolve now works on the backfilled record: RT_9 is resolved, so
+      -- gr sends unresolveReviewThread and flips the local flag.
+      require("manicule.review.github").toggle_resolve({ id = records[1].id, project_root = root })
+      assert.is_false(store.get(root, records[1].id).meta.github.resolved)
     end)
 
     it("re-resolving the same PR does not duplicate imported records", function()

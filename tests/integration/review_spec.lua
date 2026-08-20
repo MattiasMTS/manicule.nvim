@@ -860,6 +860,10 @@ describe("manicule review session", function()
     vim.notify = original_notify
 
     assert.is_truthy(warned, "expected a WARN")
+    assert.is_truthy(
+      warned:find(":ManiculeReview pr", 1, true),
+      "WARN must point at re-running :ManiculeReview pr <n>, got: " .. tostring(warned)
+    )
   end)
 
   it(":ManiculeToggle hides the panel during a session and keeps it running", function()

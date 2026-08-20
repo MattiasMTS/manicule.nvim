@@ -5,7 +5,11 @@
 -- `meta.github = { id, url, imported = true }`, which (a) dedupes
 -- re-imports on `meta.github.id` and (b) excludes them from
 -- `review.finish()` and the github sink so GitHub's own comments are
--- never echoed back as a new review.
+-- never echoed back as a new review. A dedupe hit still BACKFILLS
+-- thread data (thread_id/thread_node/resolved) onto the existing
+-- record, so re-running `:ManiculeReview pr N` refreshes resolve
+-- support on records imported before the thread query existed (or
+-- when it previously failed).
 
 local M = {}
 
@@ -37,7 +41,8 @@ end
 ---project records anchored to worktree files under `root` (the PR head
 ---must be checked out so `comment.path` names real files). Dedupes on
 ---`meta.github.id`, so re-running `:ManiculeReview pr N` never
----duplicates.
+---duplicates — but a dedupe hit backfills missing/changed thread data
+---onto the existing record so resolve support can be refreshed.
 ---@param root string git worktree root with the PR head checked out
 ---@param number string|integer PR number
 function M.github_pr(root, number)
@@ -172,19 +177,55 @@ function M.github_pr(root, number)
   local id_mod = require("manicule.id")
 
   -- Dedupe against every record already carrying a GitHub comment id.
+  -- Map id -> record (not a boolean) so a dedupe hit can backfill.
   local existing = {}
   for _, record in ipairs(store.all(root)) do
     local meta = type(record.meta) == "table" and record.meta or nil
     local gh = meta and type(meta.github) == "table" and meta.github or nil
     if gh and gh.id ~= nil then
-      existing[tostring(gh.id)] = true
+      existing[tostring(gh.id)] = record
     end
   end
 
+  ---Backfill thread data onto a deduped record. Returns true when a
+  ---`meta.github` field actually changed (caller persists).
+  ---@param record table existing record for this comment id
+  ---@param comment table incoming REST comment payload
+  ---@return boolean changed
+  local function backfill(record, comment)
+    local gh = record.meta.github
+    local thread_id = num(comment.in_reply_to_id) or comment.id
+    local thread = threads[thread_id]
+    local changed = false
+    if gh.thread_id ~= thread_id then
+      gh.thread_id = thread_id
+      changed = true
+    end
+    if thread then
+      if gh.thread_node ~= thread.thread_node then
+        gh.thread_node = thread.thread_node
+        changed = true
+      end
+      if gh.resolved ~= thread.resolved then
+        gh.resolved = thread.resolved
+        changed = true
+      end
+    end
+    return changed
+  end
+
   local imported = 0
+  local updated = 0
   local now = os.time()
   for _, comment in ipairs(comments) do
-    if type(comment) == "table" and type(comment.path) == "string" and not existing[tostring(comment.id)] then
+    local prior = type(comment) == "table" and existing[tostring(comment.id)] or nil
+    if prior then
+      if backfill(prior, comment) then
+        prior.updated_at = now
+        store.put_record(prior)
+        updated = updated + 1
+      end
+    elseif type(comment) == "table" and type(comment.path) == "string" then
       -- Comments without a line (outdated/resolved positions) are
       -- skipped: there is nothing to anchor them to in the worktree.
       local line = num(comment.line) or num(comment.original_line)
@@ -224,14 +265,19 @@ function M.github_pr(root, number)
       end
     end
   end
-  if imported == 0 then
+  if imported == 0 and updated == 0 then
     return
   end
   local save_ok, err = store.save(root)
   if not save_ok then
     return warn("failed to persist imported comments: " .. tostring(err))
   end
-  vim.notify(("manicule: imported %d PR comment%s"):format(imported, imported == 1 and "" or "s"), vim.log.levels.INFO)
+  if imported > 0 then
+    vim.notify(
+      ("manicule: imported %d PR comment%s"):format(imported, imported == 1 and "" or "s"),
+      vim.log.levels.INFO
+    )
+  end
 end
 
 return M

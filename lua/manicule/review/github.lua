@@ -126,7 +126,8 @@ end
 ---mutations. On success `meta.github.resolved` flips locally and a
 ---ManiculeEdited event refreshes every open surface. Requires
 ---`meta.github.thread_node` (captured at import time); records imported
----before resolve support need a re-import.
+---before resolve support gain it when `:ManiculeReview pr <n>` is
+---re-run — import backfills thread data onto deduped records.
 ---@param locator {id: string, scope?: string, project_root?: string}|nil
 function M.toggle_resolve(locator)
   local record, save = find(locator)
@@ -140,7 +141,10 @@ function M.toggle_resolve(locator)
     return
   end
   if type(gh.thread_node) ~= "string" or gh.thread_node == "" then
-    vim.notify("manicule: comment has no review-thread id; re-import the PR to enable resolve", vim.log.levels.WARN)
+    vim.notify(
+      "manicule: comment has no review-thread id; re-run :ManiculeReview pr <n> to refresh thread data",
+      vim.log.levels.WARN
+    )
     return
   end
   local resolving = gh.resolved ~= true

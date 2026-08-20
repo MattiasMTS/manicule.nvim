@@ -23,6 +23,10 @@ local function fake_gh(dir)
     'elif [ "$1 $2" = "repo view" ]; then',
     '  echo \'{"nameWithOwner":"acme/widgets"}\';',
     'elif [ "$1" = "api" ]; then',
+    '  case "$2" in',
+    "  */replies)",
+    '    if [ -f "$dir/fail-reply" ]; then rm "$dir/fail-reply"; echo "reply boom" >&2; exit 1; fi;;',
+    "  esac;",
     '  while [ "$#" -gt 0 ]; do',
     '    if [ "$1" = "--input" ]; then shift; cp "$1" "$dir/api-input.json"; fi;',
     "    shift;",
@@ -45,6 +49,19 @@ local function fake_gh(dir)
     end,
     set_no_pr = function()
       vim.fn.writefile({ "" }, home .. "/no-pr")
+    end,
+    set_fail_reply = function()
+      vim.fn.writefile({ "" }, home .. "/fail-reply")
+    end,
+    count = function(needle)
+      local n = 0
+      local ok, lines = pcall(vim.fn.readfile, home .. "/argv.log")
+      for _, line in ipairs(ok and lines or {}) do
+        if line:find(needle, 1, true) then
+          n = n + 1
+        end
+      end
+      return n
     end,
   }
 end
@@ -254,6 +271,70 @@ describe("manicule github sink", function()
       argv:find("api repos/acme/widgets/pulls/42/comments/9001/replies --method POST -f body=will do", 1, true)
     )
     assert.is_nil(argv:find("/reviews", 1, true))
+  end)
+
+  it("marks records sent so a re-send posts nothing new", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({})
+    local store = require("manicule.store")
+    local rec = record()
+    rec.id = "sent-1"
+    rec.scope = "project"
+    store.put(ctx.root, rec)
+    assert(store.save(ctx.root))
+
+    local ok, err = send(spec, { rec })
+
+    assert.is_true(ok, err)
+    assert.are.equal("number", type(store.get(ctx.root, "sent-1").meta.github_sent))
+
+    local notified
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if level == vim.log.levels.INFO then
+        notified = msg
+      end
+    end
+    local ok2, err2 = send(spec, { rec })
+    vim.notify = original_notify
+
+    assert.is_true(ok2, err2)
+    assert.is_truthy(notified and notified:find("already sent", 1, true), "expected an 'already sent' report")
+    assert.are.equal(1, gh.count("/reviews"))
+  end)
+
+  it("retries only the unsent remainder after a partial reply failure", function()
+    local gh = fake_gh(ctx.artifact_root)
+    gh.set_fail_reply()
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({})
+    local store = require("manicule.store")
+    local rev = record({ body = "needs a guard" })
+    rev.id = "rev-1"
+    rev.scope = "project"
+    local reply = record({ body = "sounds good" })
+    reply.id = "rep-1"
+    reply.scope = "project"
+    reply.meta = { github_reply = { to = 9001, pr = 7 } }
+    store.put(ctx.root, rev)
+    store.put(ctx.root, reply)
+    assert(store.save(ctx.root))
+
+    local ok, err = send(spec, { rev, reply })
+
+    assert.is_false(ok)
+    assert.is_truthy(err:find("reply boom", 1, true), err)
+    assert.is_truthy(err:find("marked sent", 1, true), err)
+    assert.are.equal("number", type(store.get(ctx.root, "rev-1").meta.github_sent))
+    assert.is_nil(store.get(ctx.root, "rep-1").meta.github_sent)
+
+    local ok2, err2 = send(spec, { rev, reply })
+
+    assert.is_true(ok2, err2)
+    assert.are.equal(1, gh.count("/reviews"), "review must not repost on retry")
+    assert.are.equal(2, gh.count("/replies"), "retry posts only the failed reply")
+    assert.are.equal("number", type(store.get(ctx.root, "rep-1").meta.github_sent))
   end)
 
   it("fails when no record resolves to a repository path", function()

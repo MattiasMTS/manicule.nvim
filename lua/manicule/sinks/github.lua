@@ -106,22 +106,30 @@ end
 ---a project-relative path (session-scope temp buffers, files outside the
 ---root) are skipped; the skip count is noted in the review body. Records
 ---carrying `meta.github_reply` are returned separately — they post to
----the thread-replies endpoint, never inside the review.
+---the thread-replies endpoint, never inside the review. Records already
+---posted by an earlier send (`meta.github_sent`) are excluded so a
+---re-send — after full success or a partial failure — never duplicates.
 ---@param event string the review verdict for this send
 local function build_review(comments, opts, event)
   local review_comments = {}
+  local review_records = {}
   local replies = {}
   local skipped = 0
   local skipped_imported = 0
+  local already_sent = 0
   local is_import = require("manicule.review.import").is_import
   for _, comment in ipairs(comments) do
     local path = helpers.relative_path(comment)
     local reply = reply_meta(comment)
-    if is_import(comment) then
+    local meta = type(comment.meta) == "table" and comment.meta or nil
+    if meta and meta.github_sent ~= nil then
+      -- Posted by a previous send (full or partial): never repost.
+      already_sent = already_sent + 1
+    elseif is_import(comment) then
       -- Never echo comments imported FROM GitHub back as a new review.
       skipped_imported = skipped_imported + 1
     elseif reply then
-      table.insert(replies, { to = reply.to, pr = tonumber(reply.pr), body = comment.body or "" })
+      table.insert(replies, { to = reply.to, pr = tonumber(reply.pr), body = comment.body or "", record = comment })
     elseif not path or path == "." then
       skipped = skipped + 1
     else
@@ -137,6 +145,7 @@ local function build_review(comments, opts, event)
         entry.start_side = "RIGHT"
       end
       table.insert(review_comments, entry)
+      table.insert(review_records, comment)
     end
   end
 
@@ -147,6 +156,9 @@ local function build_review(comments, opts, event)
   if skipped_imported > 0 then
     summary = summary .. (" (%d skipped: imported from GitHub)"):format(skipped_imported)
   end
+  if already_sent > 0 then
+    summary = summary .. (" (%d already sent)"):format(already_sent)
+  end
   if #replies > 0 then
     summary = summary .. (" (%d thread repl%s posted separately)"):format(#replies, #replies == 1 and "y" or "ies")
   end
@@ -155,11 +167,47 @@ local function build_review(comments, opts, event)
     body = vim.trim(opts.pre_text) .. "\n\n" .. summary
   end
 
-  return {
+  local payload = {
     event = event,
     body = body,
     comments = review_comments,
-  }, skipped + skipped_imported, replies
+  }
+  return payload, skipped + skipped_imported, replies, review_records, already_sent
+end
+
+---Mark each record as posted (`meta.github_sent = os.time()`) and
+---persist through the owning store — the same put+save path record
+---mutations like review resolve use. Ad-hoc tables without a store home
+---(no id / no root) still get the in-memory marker. Marking happens
+---per posted unit, so a partial failure retries only the remainder.
+local function mark_sent(records)
+  local store = require("manicule.store")
+  local roots = {}
+  local session = false
+  local now = os.time()
+  for _, record in ipairs(records) do
+    if type(record) == "table" then
+      if type(record.meta) ~= "table" then
+        record.meta = {}
+      end
+      record.meta.github_sent = now
+      if record.id ~= nil then
+        if record.scope == "session" then
+          store.session_put(record)
+          session = true
+        elseif type(record.project_root) == "string" and record.project_root ~= "" then
+          store.put(record.project_root, record)
+          roots[record.project_root] = true
+        end
+      end
+    end
+  end
+  if session then
+    store.session_save()
+  end
+  for root in pairs(roots) do
+    store.save(root)
+  end
 end
 
 local function post_review(opts, repo, pr, review, cwd)
@@ -259,8 +307,16 @@ function M.setup(opts)
         event = ctx.event
       end
       local cwd = resolve_cwd(ctx, comments)
-      local review, skipped, replies = build_review(comments, opts, event)
+      local review, skipped, replies, review_records, already_sent = build_review(comments, opts, event)
       if #review.comments == 0 and #replies == 0 then
+        if already_sent > 0 then
+          vim.notify(
+            ("manicule: github sink: %d already sent; nothing new to post"):format(already_sent),
+            vim.log.levels.INFO
+          )
+          cb(true, nil)
+          return
+        end
         cb(
           false,
           ("manicule: github sink found no comments with a resolvable repository path (%d skipped)"):format(skipped)
@@ -283,13 +339,26 @@ function M.setup(opts)
           cb(false, err)
           return
         end
+        mark_sent(review_records)
       end
+      -- Replies post independently: mark each success immediately and
+      -- collect failures, so a retry re-attempts ONLY what failed.
+      local errors = {}
       for _, reply in ipairs(replies) do
         local ok, err = post_reply(opts, repo, pr, reply, cwd)
-        if not ok then
-          cb(false, err)
-          return
+        if ok then
+          mark_sent({ reply.record })
+        else
+          table.insert(errors, err)
         end
+      end
+      if #errors > 0 then
+        cb(
+          false,
+          table.concat(errors, "; ")
+            .. " (already-posted items were marked sent and will not repost; retry sends only the remainder)"
+        )
+        return
       end
       cb(true, nil)
     end,
