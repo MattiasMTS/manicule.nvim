@@ -181,6 +181,22 @@ describe("manicule github sink", function()
     assert.is_truthy(body.body:find("1 skipped", 1, true))
   end)
 
+  it("skips imported GitHub comments and counts them in the summary", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({})
+
+    local imported = record({ body = "from github" })
+    imported.meta = { github = { id = 9, url = "https://example.test/r/9", imported = true } }
+    local ok, err = send(spec, { record(), imported })
+
+    assert.is_true(ok, err)
+    local body = gh.api_input()
+    assert.are.equal(1, #body.comments)
+    assert.are.equal("needs a guard", body.comments[1].body)
+    assert.is_truthy(body.body:find("1 skipped: imported from GitHub", 1, true))
+  end)
+
   it("fails when no record resolves to a repository path", function()
     local gh = fake_gh(ctx.artifact_root)
     vim.env.PATH = gh.bin .. ":" .. saved_path

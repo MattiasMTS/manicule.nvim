@@ -14,6 +14,77 @@ local function fake_gh(dir, base_oid, head_oid)
   return bin
 end
 
+---Fake gh on PATH answering `pr view`, `repo view`, and the PR review
+---comments endpoint (`api .../comments --paginate`). Drop a
+---`<home>/no-repo` marker to make `repo view` fail like gh does outside
+---a GitHub remote.
+local function fake_gh_pr(dir, opts)
+  local home = dir .. "/gh-import"
+  local bin = home .. "/bin"
+  vim.fn.mkdir(bin, "p")
+  vim.fn.writefile({ opts.comments_json or "[]" }, home .. "/comments.json")
+  local script = bin .. "/gh"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    "dir=" .. vim.fn.shellescape(home),
+    'if [ "$1 $2" = "pr view" ]; then',
+    ('  echo \'{"baseRefOid":"%s","headRefOid":"%s"}\';'):format(opts.base_oid, opts.head_oid),
+    'elif [ "$1 $2" = "repo view" ]; then',
+    '  if [ -f "$dir/no-repo" ]; then echo "gh: no GitHub remote" >&2; exit 1; fi;',
+    '  echo \'{"nameWithOwner":"acme/widgets"}\';',
+    'elif [ "$1" = "api" ]; then',
+    '  cat "$dir/comments.json";',
+    "else",
+    "  exit 2;",
+    "fi",
+  }, script)
+  vim.fn.system({ "chmod", "+x", script })
+  return {
+    bin = bin,
+    home = home,
+    set_no_repo = function()
+      vim.fn.writefile({ "" }, home .. "/no-repo")
+    end,
+  }
+end
+
+---A git repo with a checked-out PR branch plus a fake gh answering the
+---comments endpoint with `comments` (default: one range comment and one
+---outdated comment with line=null).
+local function pr_repo_with_comments(comments)
+  local root, git = H.git_repo(ctx, { ["a.lua"] = { "return 1", "-- two", "-- three", "-- four", "-- five" } })
+  local base_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+  git("checkout", "-q", "-b", "pr-branch")
+  vim.fn.writefile({ "return 2", "-- two", "-- three", "-- four", "-- five" }, root .. "/a.lua")
+  git("commit", "-aqm", "pr change")
+  local head_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+  local gh = fake_gh_pr(ctx.artifact_root, {
+    base_oid = base_oid,
+    head_oid = head_oid,
+    comments_json = vim.json.encode(comments or {
+      {
+        id = 1002,
+        path = "a.lua",
+        line = 4,
+        start_line = 2,
+        body = "range comment",
+        html_url = "https://example.test/r/1002",
+        user = { login = "octocat" },
+      },
+      {
+        id = 1003,
+        path = "a.lua",
+        line = vim.NIL,
+        original_line = vim.NIL,
+        body = "outdated comment",
+        html_url = "https://example.test/r/1003",
+        user = { login = "ghost" },
+      },
+    }),
+  })
+  return root, git, gh
+end
+
 describe("manicule review sources", function()
   before_each(function()
     ctx = H.setup()
@@ -120,5 +191,115 @@ describe("manicule review sources", function()
     assert.are.equal(1, #job.files)
     assert.are.equal("a.lua", job.files[1].path)
     assert.are.equal(root .. "/a.lua", job.files[1].right)
+  end)
+
+  describe("pr comment import", function()
+    local saved_path
+
+    before_each(function()
+      saved_path = vim.env.PATH
+    end)
+    after_each(function()
+      vim.env.PATH = saved_path
+      pcall(function()
+        require("manicule.review").stop()
+      end)
+    end)
+
+    it("imports PR review comments as records and skips line=null comments", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s5" })
+
+      assert.is_nil(err)
+      assert.is_truthy(job)
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      local r = records[1]
+      assert.are.equal(require("manicule.uri").for_path(root .. "/a.lua"), r.uri)
+      assert.are.same({ start = { 1, 0 }, end_ = { 3, 0 } }, r.range)
+      assert.are.equal("range comment", r.body)
+      assert.are.equal("octocat", r.author)
+      assert.are.equal("project", r.scope)
+      assert.are.equal(root, r.project_root)
+      assert.are.equal(1002, r.meta.github.id)
+      assert.are.equal("https://example.test/r/1002", r.meta.github.url)
+      assert.is_true(r.meta.github.imported)
+    end)
+
+    it("re-resolving the same PR does not duplicate imported records", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s6" }))
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s7" }))
+
+      assert.are.equal(1, #require("manicule.store").all(root))
+    end)
+
+    it("still returns a job when the comment fetch fails", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      gh.set_no_repo()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s8" })
+
+      assert.is_nil(err)
+      assert.is_truthy(job)
+      assert.are.equal(1, #job.files)
+      assert.are.equal(0, #require("manicule.store").all(root))
+    end)
+
+    it("finish() batch excludes imported records", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      local job = assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s9" }))
+      assert.are.equal(1, #require("manicule.store").all(root))
+
+      local sent
+      require("manicule").register_sink({
+        name = "capture",
+        send = function(comments, _, cb)
+          sent = comments
+          cb(true)
+        end,
+      })
+
+      local R = require("manicule.review")
+      assert.is_true(R.start({ files = job.files, label = job.label, sink = "capture" }))
+
+      -- Focus the right (worktree) window and add one local comment.
+      for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        local bufnr = vim.api.nvim_win_get_buf(winid)
+        if vim.bo[bufnr].buftype ~= "quickfix" and vim.bo[bufnr].modifiable then
+          vim.api.nvim_set_current_win(winid)
+          break
+        end
+      end
+      vim.api.nvim_win_set_cursor(0, { 1, 0 })
+      local ui = require("manicule.ui")
+      local original_prompt = ui.prompt
+      ui.prompt = function(_opts, cb)
+        cb("local comment")
+      end
+      require("manicule").add()
+      ui.prompt = original_prompt
+
+      R.finish()
+      vim.wait(500, function()
+        return sent ~= nil
+      end)
+      R.stop()
+
+      assert.is_truthy(sent)
+      assert.are.equal(1, #sent)
+      assert.are.equal("local comment", sent[1].body)
+    end)
   end)
 end)

@@ -98,9 +98,14 @@ end
 local function build_review(comments, opts)
   local review_comments = {}
   local skipped = 0
+  local skipped_imported = 0
+  local is_import = require("manicule.review.import").is_import
   for _, comment in ipairs(comments) do
     local path = helpers.relative_path(comment)
-    if not path or path == "." then
+    if is_import(comment) then
+      -- Never echo comments imported FROM GitHub back as a new review.
+      skipped_imported = skipped_imported + 1
+    elseif not path or path == "." then
       skipped = skipped + 1
     else
       local start_lnum, end_lnum = helpers.line_span(comment)
@@ -122,6 +127,9 @@ local function build_review(comments, opts)
   if skipped > 0 then
     summary = summary .. (" (%d skipped: no repository-relative path)"):format(skipped)
   end
+  if skipped_imported > 0 then
+    summary = summary .. (" (%d skipped: imported from GitHub)"):format(skipped_imported)
+  end
   local body = summary
   if type(opts.pre_text) == "string" and vim.trim(opts.pre_text) ~= "" then
     body = vim.trim(opts.pre_text) .. "\n\n" .. summary
@@ -131,7 +139,7 @@ local function build_review(comments, opts)
     event = opts.event,
     body = body,
     comments = review_comments,
-  }, skipped
+  }, skipped + skipped_imported
 end
 
 local function post_review(opts, repo, pr, review, cwd)

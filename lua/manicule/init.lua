@@ -1375,10 +1375,15 @@ end
 ---List comments, optionally filtered. Results are always sorted by
 ---`uri → start line → id` so the ordering seen in `:ManiculeList`,
 ---the picker, and the positional-number completer is identical.
----@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, _root?: string}|nil
+---@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean, _root?: string}|nil
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
+  -- `exclude_imported` drops records imported from an external review
+  -- system (meta.github.imported). Used by review.finish() so GitHub's
+  -- own comments are never echoed back; a plain :ManiculeSend still
+  -- includes them (explicit user action).
+  local is_import = filter.exclude_imported and require("manicule.review.import").is_import or nil
   sync_all_loaded_positions()
   local store = require("manicule.store")
   local anchor = require("manicule.anchor")
@@ -1428,6 +1433,9 @@ function M.list(filter)
         return false
       end
       if filter.author and r.author ~= filter.author then
+        return false
+      end
+      if is_import and is_import(r) then
         return false
       end
       if filter.orphaned then

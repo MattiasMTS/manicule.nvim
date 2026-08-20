@@ -187,12 +187,14 @@ local function session_uris()
   return uris
 end
 
----Count the session's pending comments without side effects.
+---Count the session's pending comments without side effects. Records
+---imported FROM GitHub (meta.github.imported) are excluded: finish()
+---must never echo GitHub's own comments back through the sink.
 local function pending_comments()
   if not session then
     return {}
   end
-  return require("manicule").list({ _quiet = true, uris = session_uris() })
+  return require("manicule").list({ _quiet = true, uris = session_uris(), exclude_imported = true })
 end
 
 ---Dispatch the session's comments to the configured sink.
@@ -213,7 +215,7 @@ function M.finish(opts)
     vim.notify("manicule: review has no comments to send", vim.log.levels.INFO)
     return
   end
-  require("manicule").send(sink, { uris = session_uris() }, session.sink_ctx)
+  require("manicule").send(sink, { uris = session_uris(), exclude_imported = true }, session.sink_ctx)
 end
 
 ---Start a review from a JSON job file written by an external driver

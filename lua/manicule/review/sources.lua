@@ -192,11 +192,20 @@ M.register({
       if #changed == 0 then
         return nil, ("manicule: no changes in %s"):format(label)
       end
+      -- Right side = real worktree files, so existing PR review comments
+      -- can anchor to them. Best-effort: failures notify and continue.
+      require("manicule.review.import").github_pr(root, number)
       return { files = G.stage_baseline(root, base, changed, stage_dir), label = label }
     end
 
     -- Head not checked out: stage BOTH sides (comments land on staged
     -- right files as session-scope records; documented limitation).
+    -- Existing PR comments are NOT imported here: both sides are temp
+    -- paths with session-scope identity, not worth anchoring to.
+    vim.notify(
+      ("manicule: %s head is not checked out; skipping GitHub comment import"):format(label),
+      vim.log.levels.INFO
+    )
     local diff = G.run({ "git", "-C", root, "diff", "--name-status", "--no-renames", base, meta.headRefOid })
     if diff.code ~= 0 then
       return nil, ("manicule: git diff failed: %s"):format(vim.trim(diff.stderr))

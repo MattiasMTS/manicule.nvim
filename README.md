@@ -139,6 +139,16 @@ with live comment counts. Press `<Tab>` in the panel to toggle between
 files view and comments view; press `<CR>` on a file to switch the diff
 to that pair.
 
+When you review a PR with its head checked out (`:ManiculeReview pr 123`
+on the PR branch), existing GitHub review comments are imported as
+manicule records and render inline during the review. Imported comments
+are read-only-ish: they live in the normal project store, so you can edit
+or delete them locally, but those changes never sync back to GitHub. They
+are also excluded from `:ManiculeReviewFinish` and the `github` sink, so
+GitHub's own comments are never echoed back as a new review; re-running
+`:ManiculeReview pr N` never duplicates them. When the PR head is not
+checked out (both sides staged from temp files), the import is skipped.
+
 External tools can drive a review session by writing a JSON job file and
 calling `require("manicule.review").start_from_job(path)`; comments return
 through the bundled `socket` sink as JSONL over a unix socket.

@@ -277,6 +277,13 @@ worktree right). One active session at a time, in its own tab page.
   (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI).
 - `register(resolver)` prepends to registry → user resolvers shadow builtins.
 - All resolvers return `{files: [{left, right, status, path}], label}`.
+- `pr <n>` with the head checked out also imports existing PR review comments
+  (`lua/manicule/review/import.lua`): `gh api .../pulls/<n>/comments --paginate`
+  → project records with `meta.github = {id, url, imported = true}`. Best-effort
+  (failure → WARN, review still opens), deduped on `meta.github.id`, skipped
+  entirely on the both-sides-staged path. Imported records are excluded from
+  `finish()` (`M.list`'s `exclude_imported` filter) and skipped by the github
+  sink so GitHub's own comments are never echoed back.
 
 **GitHub sink** (`lua/manicule/sinks/github.lua`): posts the batch as a PR
 review via `gh api` (PR from `ctx.pr` or `gh pr view`, repo from
