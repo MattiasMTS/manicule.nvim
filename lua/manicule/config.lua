@@ -12,7 +12,7 @@ local M = {}
 ---@field cancel_keys string[] Keys that cancel the editor
 ---@field opacity number Floating-window transparency (0.0 = opaque, 1.0 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
----@field display "float"|"eol"|"inline"|"hidden" Startup comment display mode. "float" anchored popups, "eol" end-of-line virtual text expanding to the popup on the cursor line, "inline" (falls back to float until implemented), "hidden" anchors only. Runtime changes via `:ManiculeDisplay`.
+---@field display "float"|"eol"|"inline"|"hidden" Startup comment display mode. "float" anchored popups, "eol" end-of-line virtual text expanding to the popup on the cursor line, "inline" bordered virtual-line boxes below commented lines (code pushed down, never covered), "hidden" anchors only. Runtime changes via `:ManiculeDisplay`.
 ---@field sink_picker? manicule.SinkPicker Custom picker for choosing a send sink
 
 ---@class manicule.StoreConfig
@@ -94,10 +94,11 @@ M.defaults = {
     sticky = false, -- true = always show popups for visible records; false = only when in viewport
     -- How comment records paint: "float" anchored popups, "eol"
     -- end-of-line virtual text that expands to the full popup while the
-    -- cursor is on the line, "inline" (falls back to float until
-    -- implemented), "hidden" anchors/line-number tint only. "eol" is the
-    -- default because floats cover code on long lines; this is only the
-    -- startup mode — cycle live with `:ManiculeDisplay`.
+    -- cursor is on the line, "inline" bordered virtual-line boxes below
+    -- commented lines (code pushed down, never covered), "hidden"
+    -- anchors/line-number tint only. "eol" is the default because floats
+    -- cover code on long lines; this is only the startup mode — cycle
+    -- live with `:ManiculeDisplay`.
     display = "eol",
   },
 }

@@ -85,6 +85,50 @@ local function has_any_eol_virt_text(bufnr)
   return false
 end
 
+---Rendered text of the virt_lines block(s) below `row` (0-indexed) in
+---the manicule namespace: one string per virtual line (chunks joined).
+---Empty list when the row carries none.
+local function inline_virt_lines(bufnr, row)
+  local ns = require("manicule.anchor").ns
+  local marks = vim.api.nvim_buf_get_extmarks(bufnr, ns, { row, 0 }, { row, -1 }, { details = true })
+  local out = {}
+  for _, mark in ipairs(marks) do
+    local details = mark[4] or {}
+    for _, vline in ipairs(details.virt_lines or {}) do
+      local parts = {}
+      for _, chunk in ipairs(vline) do
+        table.insert(parts, chunk[1])
+      end
+      table.insert(out, table.concat(parts, ""))
+    end
+  end
+  return out
+end
+
+---Number of extmarks on `row` that carry a virt_lines block.
+local function inline_block_count(bufnr, row)
+  local ns = require("manicule.anchor").ns
+  local marks = vim.api.nvim_buf_get_extmarks(bufnr, ns, { row, 0 }, { row, -1 }, { details = true })
+  local count = 0
+  for _, mark in ipairs(marks) do
+    local details = mark[4] or {}
+    if details.virt_lines and #details.virt_lines > 0 then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+---True when any row of `bufnr` carries a virt_lines block.
+local function has_any_inline_virt_lines(bufnr)
+  for row = 0, vim.api.nvim_buf_line_count(bufnr) - 1 do
+    if #inline_virt_lines(bufnr, row) > 0 then
+      return true
+    end
+  end
+  return false
+end
+
 ---Move the cursor and deliver the CursorMoved event the plugin's
 ---viewport autocmd listens for. `nvim_win_set_cursor` alone does not
 ---fire autocmds, so tests deliver the event explicitly — same contract
@@ -174,16 +218,21 @@ describe("manicule display command", function()
     assert.is_true(wait_for_popup_count("cycle note", 0))
     assert.is_truthy(eol_virt_text(bufnr, 0):find("cycle note", 1, true))
 
-    -- eol → inline (falls back to float popups for now).
+    -- eol → inline: bordered virt_lines box below the anchor, no popup,
+    -- no eol marker.
     vim.cmd("ManiculeDisplay")
     assert.are.equal("inline", render.display_mode())
-    assert.is_true(wait_for_popup_count("cycle note", 1))
+    assert.is_true(wait_for_popup_count("cycle note", 0))
+    assert.are.equal("", eol_virt_text(bufnr, 0))
+    assert.is_truthy(table.concat(inline_virt_lines(bufnr, 0), "\n"):find("cycle note", 1, true))
 
-    -- inline → hidden: no popups, no virt text, anchors survive.
+    -- inline → hidden: no popups, no virt text, no virt lines, anchors
+    -- survive.
     vim.cmd("ManiculeDisplay")
     assert.are.equal("hidden", render.display_mode())
     assert.is_true(wait_for_popup_count("cycle note", 0))
     assert.is_false(has_any_eol_virt_text(bufnr))
+    assert.is_false(has_any_inline_virt_lines(bufnr))
     assert.is_true(next(render.mark_ids_for_buffer(bufnr)) ~= nil)
 
     -- hidden → float: wraparound, popup returns.
@@ -345,5 +394,160 @@ describe("manicule eol display mode", function()
 
     local text = eol_virt_text(bufnr, 0)
     assert.are.equal("● c" .. short, text)
+  end)
+end)
+
+describe("manicule inline display mode", function()
+  before_each(function()
+    setup_env()
+    require("manicule.ui.render").set_display_mode("inline")
+  end)
+  after_each(teardown_env)
+
+  it("renders a bordered virt_lines box below the anchor, no popup", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    local before = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    require("manicule").add({
+      body = "boxed body first\nboxed body second",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    local records = require("manicule").list({ _quiet = true })
+    local short = tostring(records[1].id):sub(1, 6)
+
+    local lines = inline_virt_lines(bufnr, 0)
+    -- Top border (title), two body lines, footer, bottom border.
+    assert.are.equal(5, #lines)
+    assert.is_truthy(lines[1]:find("┌", 1, true))
+    assert.is_truthy(lines[1]:find("c" .. short .. " 1/1", 1, true))
+    assert.is_truthy(lines[2]:find("boxed body first", 1, true))
+    assert.is_truthy(lines[3]:find("boxed body second", 1, true))
+    assert.is_truthy(lines[4]:find("edit gca | delete gcd", 1, true))
+    assert.is_truthy(lines[#lines]:find("└", 1, true))
+    for _, line in ipairs(lines) do
+      assert.is_truthy(line:find("│", 1, true) or line:find("─", 1, true))
+    end
+
+    -- The code lines themselves are untouched — the box is virtual only.
+    assert.are.same(before, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
+    -- No eol marker and no popup window in inline mode.
+    assert.are.equal("", eol_virt_text(bufnr, 0))
+    assert.is_true(wait_for_popup_count("boxed body first", 0))
+  end)
+
+  it("renders a same-line stack as one block, in stack order with 1/2 2/2", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "stack alpha",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+    require("manicule").add({
+      body = "stack beta",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+
+    -- Expected order = the shared stack comparator (created_at, then id).
+    local records = require("manicule").list({ _quiet = true })
+    table.sort(records, function(a, b)
+      local ac = tonumber(a.created_at) or 0
+      local bc = tonumber(b.created_at) or 0
+      if ac ~= bc then
+        return ac < bc
+      end
+      return tostring(a.id or "") < tostring(b.id or "")
+    end)
+    local first_short = tostring(records[1].id):sub(1, 6)
+    local second_short = tostring(records[2].id):sub(1, 6)
+
+    -- ONE virt_lines block on the anchor line carries both boxes.
+    assert.are.equal(1, inline_block_count(bufnr, 1))
+    local joined = table.concat(inline_virt_lines(bufnr, 1), "\n")
+    local first_title = joined:find("c" .. first_short .. " 1/2", 1, true)
+    local second_title = joined:find("c" .. second_short .. " 2/2", 1, true)
+    assert.is_truthy(first_title)
+    assert.is_truthy(second_title)
+    assert.is_true(first_title < second_title)
+    local first_body = joined:find(records[1].body, 1, true)
+    local second_body = joined:find(records[2].body, 1, true)
+    assert.is_true(first_body > first_title and first_body < second_title)
+    assert.is_true(second_body > second_title)
+    assert.is_true(wait_for_popup_count("stack alpha", 0))
+  end)
+
+  it("keeps edit/delete reachable from the anchor line without a popup", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "act on me",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+
+    -- Cursor onto the commented line: unlike eol, NO popup expands — the
+    -- box already shows the full body + footer hints.
+    move_cursor(bufnr, 2)
+    vim.wait(200, function()
+      return #floating_windows_containing("act on me") > 0
+    end, 10)
+    assert.are.equal(0, #floating_windows_containing("act on me"))
+
+    -- The `<Plug>` edit/delete keymaps route through the same cursor
+    -- hit-test as float/eol mode and still resolve the record here.
+    local records = require("manicule").list({ _quiet = true })
+    assert.are.equal(records[1].id, require("manicule.ui.render").record_at_cursor(bufnr))
+  end)
+
+  it("wraps a long body line to the box width", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    local body = ("wrap "):rep(40):gsub("%s+$", "")
+    require("manicule").add({
+      body = body,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    local win_width = vim.api.nvim_win_get_width(0)
+    local lines = inline_virt_lines(bufnr, 0)
+    assert.is_true(#lines > 0)
+    local body_line_count = 0
+    for _, line in ipairs(lines) do
+      -- Every rendered virtual line fits the window (no clipping).
+      assert.is_true(vim.fn.strdisplaywidth(line) <= win_width)
+      if line:find("wrap", 1, true) then
+        body_line_count = body_line_count + 1
+      end
+    end
+    -- The single long body line wrapped across several box lines.
+    assert.is_true(body_line_count >= 2)
+  end)
+
+  it("anchors a multi-line record's box at the range start line", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "range note",
+      range = { start = { 0, 0 }, end_ = { 1, 0 } },
+    })
+
+    assert.is_truthy(table.concat(inline_virt_lines(bufnr, 0), "\n"):find("range note", 1, true))
+    assert.are.same({}, inline_virt_lines(bufnr, 1))
+  end)
+
+  it("clears the boxes on :ManiculeToggle and restores them on toggle back", function()
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "toggle me away",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(has_any_inline_virt_lines(bufnr))
+
+    render.toggle()
+    assert.is_false(has_any_inline_virt_lines(bufnr))
+
+    render.toggle()
+    assert.is_true(has_any_inline_virt_lines(bufnr))
+    assert.is_truthy(table.concat(inline_virt_lines(bufnr, 0), "\n"):find("toggle me away", 1, true))
   end)
 end)

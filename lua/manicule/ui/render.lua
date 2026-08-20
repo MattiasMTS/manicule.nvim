@@ -31,7 +31,25 @@
 --                 per-buffer pending flag already coalesces the burst.
 --                 Sticky is a float-mode concern: eol renders markers
 --                 for every record regardless (extmarks are cheap).
---   * "inline" -> reserved; falls back to "float" (TODO(display-inline))
+--   * "inline" -> each record renders as a bordered `virt_lines` box
+--                 below its anchor line — code is pushed down, never
+--                 covered. The box reuses the float popup's content
+--                 (title with short-id + n/m counter, body, date/actions
+--                 footer) via the shared `build_popup_content`, with
+--                 body lines word-wrapped to the box width instead of
+--                 ellipsis-truncated (there is no popup to reveal the
+--                 rest). Same-line stacks render sequentially inside ONE
+--                 virt_lines block owned by the stack head's handle
+--                 (`record_stack_less` order), so box order never
+--                 depends on sibling-extmark creation order. Like eol,
+--                 boxes render for every record — no viewport/sticky
+--                 gating. Unlike eol, NO popup expands under the cursor:
+--                 the box already shows the full body and footer hints,
+--                 and the popup is `focusable = false` anyway, so
+--                 expansion would only duplicate visible content.
+--                 Edit/delete stay reachable through the anchor-line
+--                 cursor hit-test (`record_at_cursor`) exactly as in
+--                 every other mode.
 --   * "hidden" -> anchor extmarks + line-number tint only; no popups,
 --                 no virtual text
 --
@@ -51,6 +69,7 @@ local str = require("manicule.str")
 ---@field extmark_id integer
 ---@field number_extmark_ids? integer[] Decoration-only extmarks per row for multi-line number tint
 ---@field eol_extmark_id? integer Decoration-only extmark carrying the collapsed marker ("eol" display mode)
+---@field inline_extmark_id? integer Decoration-only extmark carrying the below-line box block ("inline" display mode)
 ---@field popup_winid? integer
 ---@field popup_bufnr? integer
 
@@ -93,18 +112,6 @@ local function current_display_mode()
     return configured
   end
   return "eol"
-end
-
----Map the user-facing mode onto the renderer behavior it drives today.
----@return "float"|"eol"|"hidden"
-local function effective_display_mode()
-  local mode = current_display_mode()
-  if mode == "inline" then
-    -- TODO(display-inline): dedicated inline rendering. Falls back to
-    -- float popups until the follow-up task implements it.
-    return "float"
-  end
-  return mode
 end
 
 -- ---------------------------------------------------------------------------
@@ -163,6 +170,12 @@ local function setup_comment_highlights()
   vim.api.nvim_set_hl(0, "ManiculeEolBullet", { link = "DiagnosticSignInfo", default = true })
   vim.api.nvim_set_hl(0, "ManiculeEolMeta", { link = "NonText", default = true })
   vim.api.nvim_set_hl(0, "ManiculeEolBody", { link = "Comment", default = true })
+  -- "inline" display-mode box: border/meta reuse the float popup's
+  -- computed groups so both modes share one look; body text sits on the
+  -- float's NormalFloat. `default` links so user overrides win.
+  vim.api.nvim_set_hl(0, "ManiculeInlineBorder", { link = "ManiculeCommentBorder", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeInlineMeta", { link = "ManiculeCommentMeta", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeInlineBody", { link = "NormalFloat", default = true })
 end
 
 -- ---------------------------------------------------------------------------
@@ -179,6 +192,85 @@ end
 -- floating editor via `manicule.str`.
 local split_lines = str.split_lines
 local truncate_text = str.truncate
+
+---Truncate `text` to at most `max_cells` display cells, appending a
+---single-cell ellipsis when cut. `str.truncate` is byte-based; fitting
+---virtual text into leftover window columns needs display width
+---(`strdisplaywidth` — tabs, doublewidth glyphs), hence the char walk.
+---@param text string
+---@param max_cells integer
+---@return string
+local function truncate_display(text, max_cells)
+  if max_cells <= 0 then
+    return ""
+  end
+  if vim.fn.strdisplaywidth(text) <= max_cells then
+    return text
+  end
+  local budget = max_cells - 1 -- reserve the ellipsis cell
+  local out = ""
+  for i = 0, vim.fn.strchars(text) - 1 do
+    local next_out = out .. vim.fn.strcharpart(text, i, 1)
+    if vim.fn.strdisplaywidth(next_out) > budget then
+      break
+    end
+    out = next_out
+  end
+  return out .. "…"
+end
+
+---Word-wrap `text` into lines of at most `max_cells` display cells.
+---Breaks at spaces when possible; a single word wider than the whole
+---budget is hard-broken with the same char walk `truncate_display`
+---uses. Always returns at least one line.
+---@param text string
+---@param max_cells integer
+---@return string[]
+local function wrap_display(text, max_cells)
+  if max_cells <= 0 or vim.fn.strdisplaywidth(text) <= max_cells then
+    return { text }
+  end
+  local lines = {}
+  local current = ""
+  for word in text:gmatch("%S+") do
+    local candidate = current == "" and word or (current .. " " .. word)
+    if vim.fn.strdisplaywidth(candidate) <= max_cells then
+      current = candidate
+    else
+      if current ~= "" then
+        table.insert(lines, current)
+        current = ""
+      end
+      -- Hard-break a word longer than the whole budget.
+      while vim.fn.strdisplaywidth(word) > max_cells do
+        local head = ""
+        local taken = 0
+        for i = 0, vim.fn.strchars(word) - 1 do
+          local next_head = head .. vim.fn.strcharpart(word, i, 1)
+          if vim.fn.strdisplaywidth(next_head) > max_cells then
+            break
+          end
+          head = next_head
+          taken = i + 1
+        end
+        if head == "" then
+          -- Budget below one glyph: bail rather than spin.
+          break
+        end
+        table.insert(lines, head)
+        word = vim.fn.strcharpart(word, taken)
+      end
+      current = word
+    end
+  end
+  if current ~= "" then
+    table.insert(lines, current)
+  end
+  if #lines == 0 then
+    lines = { text }
+  end
+  return lines
+end
 
 ---Short display id from the record's string id (first 6 chars).
 ---@param record_id string
@@ -465,6 +557,19 @@ local function clear_eol_extmark(handle)
   handle.eol_extmark_id = nil
 end
 
+---Tear down the decoration-only virt_lines extmark (the "inline"
+---display mode's below-line box block).
+---@param handle manicule.ui.render.Handle
+local function clear_inline_extmark(handle)
+  if not handle.inline_extmark_id then
+    return
+  end
+  if vim.api.nvim_buf_is_valid(handle.bufnr) then
+    pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.inline_extmark_id)
+  end
+  handle.inline_extmark_id = nil
+end
+
 ---@param handle manicule.ui.render.Handle
 local function close_handle(handle)
   if handle.popup_winid and vim.api.nvim_win_is_valid(handle.popup_winid) then
@@ -479,6 +584,7 @@ local function close_handle(handle)
 
   clear_number_extmarks(handle)
   clear_eol_extmark(handle)
+  clear_inline_extmark(handle)
 
   if handle.extmark_id and handle.extmark_id ~= 0 and vim.api.nvim_buf_is_valid(handle.bufnr) then
     pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.extmark_id)
@@ -518,13 +624,14 @@ end
 ---extmark itself alive (but stripped of its `number_hl_group`). The
 ---anchor must persist so `invalidate = true` keeps tracking line
 ---deletions for orphan detection; only the popup + decoration extmarks
----(extra number-column tints, eol marker, start-line number_hl_group)
----are removed.
+---(extra number-column tints, eol marker, inline box block, start-line
+---number_hl_group) are removed.
 ---@param handle manicule.ui.render.Handle
 local function strip_handle_visuals(handle)
   hide_popup(handle)
   clear_number_extmarks(handle)
   clear_eol_extmark(handle)
+  clear_inline_extmark(handle)
 
   if not handle.extmark_id or handle.extmark_id == 0 then
     return
@@ -643,6 +750,58 @@ end
 -- Popup rendering
 -- ---------------------------------------------------------------------------
 
+---@class manicule.ui.render.PopupContent
+---@field title string Title: " c<short-id> <n>/<m> "
+---@field footer string? Timestamp + edit/delete hint (nil when both absent)
+---@field lines string[] Body lines fitted to `width` display cells
+---@field width integer Content width in display cells
+
+---Build the formatted comment content shared by the float popup and the
+---inline virt_lines box: the title (short id + display counter), body
+---lines fitted to a width cap, and the date/actions footer. The content
+---width is the widest body/footer line clamped to `max_width` — so a
+---short comment stays narrow. `wrap = false` ellipsis-truncates each
+---body line (float popups keep one row per body line); `wrap = true`
+---word-wraps long lines across rows instead (the inline box has no
+---expanded popup to reveal the rest, so it must show the whole body).
+---@param record table
+---@param max_width integer Content-width cap in display cells
+---@param display_index integer
+---@param display_total integer
+---@param wrap boolean
+---@return manicule.ui.render.PopupContent
+local function build_popup_content(record, max_width, display_index, display_total, wrap)
+  local footer = comment_footer_text(record)
+  local body_lines = split_lines(record.body)
+
+  local max_line_width = 0
+  for _, line in ipairs(body_lines) do
+    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(line))
+  end
+  if max_line_width == 0 then
+    max_line_width = 1
+  end
+
+  local footer_width = footer and vim.fn.strdisplaywidth(footer) or 0
+  local content_width = math.min(math.max(max_line_width, footer_width), math.max(1, max_width))
+
+  local fitted = {}
+  for _, line in ipairs(body_lines) do
+    if wrap then
+      vim.list_extend(fitted, wrap_display(line, content_width))
+    else
+      table.insert(fitted, truncate_text(line, content_width))
+    end
+  end
+
+  return {
+    title = string.format(" c%s %d/%d ", short_id(record.id), display_index, display_total),
+    footer = footer,
+    lines = fitted,
+    width = content_width,
+  }
+end
+
 ---Render (or reconfigure) the comment popup for `record`. Returns true
 ---when the handle is healthy (regardless of whether the popup ended up
 ---visible — a missing anchor window hides the popup but keeps the
@@ -668,26 +827,19 @@ local function render_comment_popup(record, handle, records, counter_records, la
     return true
   end
 
-  local footer = comment_footer_text(record)
-  local body_lines = split_lines(record.body)
-
-  local max_line_width = 0
-  for _, line in ipairs(body_lines) do
-    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(line))
-  end
-  if max_line_width == 0 then
-    max_line_width = 1
+  -- Title counter position: reuse the caller's precomputed value when it
+  -- threaded one through (`update_viewport_popups` builds them once for
+  -- the whole viewport), otherwise compute it for this single record.
+  local display_index, display_total
+  if layout.display then
+    display_index, display_total = layout.display.index, layout.display.total
+  else
+    display_index, display_total = record_display_position(record, counter_records or records)
   end
 
   local win_width = vim.api.nvim_win_get_width(anchor_win)
   local max_popup_width = math.max(24, math.floor(win_width * 0.52))
-  local footer_width = footer and vim.fn.strdisplaywidth(footer) or 0
-  local content_width = math.min(math.max(max_line_width, footer_width), max_popup_width)
-
-  local display_lines = {}
-  for _, line in ipairs(body_lines) do
-    table.insert(display_lines, truncate_text(line, content_width))
-  end
+  local content = build_popup_content(record, max_popup_width, display_index, display_total, false)
 
   local my_line = record_start_line(record)
   local my_id = tostring(record.id or "")
@@ -717,15 +869,6 @@ local function render_comment_popup(record, handle, records, counter_records, la
       stack_offset = stack_offset + math.max(1, #split_lines(other.body)) + 2
     end
   end
-  -- Title counter position: reuse the caller's precomputed value when it
-  -- threaded one through (`update_viewport_popups` builds them once for
-  -- the whole viewport), otherwise compute it for this single record.
-  local display_index, display_total
-  if layout.display then
-    display_index, display_total = layout.display.index, layout.display.total
-  else
-    display_index, display_total = record_display_position(record, counter_records or records)
-  end
   local popup_bufnr = handle.popup_bufnr
   if not popup_bufnr or not vim.api.nvim_buf_is_valid(popup_bufnr) then
     popup_bufnr = float.create_scratch_buf()
@@ -737,9 +880,9 @@ local function render_comment_popup(record, handle, records, counter_records, la
     win = anchor_win,
     bufpos = { my_line - 1, 0 },
     row = layout.row or stack_offset,
-    col = math.max(2, win_width - content_width - 6 - (layout.col_shift or math.min((stack_index - 1) * 2, 12))),
-    width = content_width,
-    height = math.max(1, #display_lines),
+    col = math.max(2, win_width - content.width - 6 - (layout.col_shift or math.min((stack_index - 1) * 2, 12))),
+    width = content.width,
+    height = math.max(1, #content.lines),
     style = "minimal",
     focusable = false,
     zindex = 210,
@@ -749,14 +892,7 @@ local function render_comment_popup(record, handle, records, counter_records, la
   local border = "rounded"
   win_config.border = border
 
-  float.apply_title_footer(
-    win_config,
-    border,
-    string.format(" c%s %d/%d ", short_id(record.id), display_index, display_total),
-    "left",
-    footer or nil,
-    "left"
-  )
+  float.apply_title_footer(win_config, border, content.title, "left", content.footer or nil, "left")
 
   local popup_winid = float.open_or_reconfigure(handle.popup_winid, popup_bufnr, false, win_config)
 
@@ -780,7 +916,7 @@ local function render_comment_popup(record, handle, records, counter_records, la
   pcall(vim.api.nvim_win_set_var, popup_winid, "manicule_popup", true)
 
   vim.bo[popup_bufnr].modifiable = true
-  vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, display_lines)
+  vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, content.lines)
   vim.bo[popup_bufnr].modifiable = false
 
   float.set_float_win_options(popup_winid, comment_winhighlight())
@@ -960,32 +1096,6 @@ end
 -- truncate the body into unreadable noise.
 local EOL_MIN_WIDTH = 20
 
----Truncate `text` to at most `max_cells` display cells, appending a
----single-cell ellipsis when cut. `str.truncate` is byte-based; fitting
----virtual text into leftover window columns needs display width
----(`strdisplaywidth` — tabs, doublewidth glyphs), hence the char walk.
----@param text string
----@param max_cells integer
----@return string
-local function truncate_display(text, max_cells)
-  if max_cells <= 0 then
-    return ""
-  end
-  if vim.fn.strdisplaywidth(text) <= max_cells then
-    return text
-  end
-  local budget = max_cells - 1 -- reserve the ellipsis cell
-  local out = ""
-  for i = 0, vim.fn.strchars(text) - 1 do
-    local next_out = out .. vim.fn.strcharpart(text, i, 1)
-    if vim.fn.strdisplaywidth(next_out) > budget then
-      break
-    end
-    out = next_out
-  end
-  return out .. "…"
-end
-
 ---Render (or refresh) the collapsed end-of-line marker for `record`:
 ---`● <short-id> <n>/<m> · <body first line>` as eol virtual text on the
 ---anchor's current line, via a sibling decoration-only extmark tracked
@@ -1066,6 +1176,147 @@ local function render_eol_virt_text(record, handle, records)
 end
 
 -- ---------------------------------------------------------------------------
+-- Inline virt_lines rendering ("inline" display mode's below-line boxes)
+-- ---------------------------------------------------------------------------
+
+-- One-cell gutter between the text column and the box's left edge.
+local INLINE_INDENT = " "
+
+-- Display cells the box frame consumes around the content on every
+-- rendered line: indent (1) + left border (1) + inner padding (1 each
+-- side) + right border (1). The content-width budget subtracts this so
+-- the whole box fits the window.
+local INLINE_FRAME_CELLS = 5
+
+---Append one record's bordered box to `out` (a virt_lines list — each
+---entry is one virtual line as `[text, hl]` chunks):
+---  ┌ c<short-id> <n>/<m> ─────────────┐
+---  │ body line (wrapped to width)     │
+---  │ <Mon DD HH:MM> · edit … | delete…│
+---  └──────────────────────────────────┘
+---@param content manicule.ui.render.PopupContent
+---@param out table[]
+local function append_inline_box(content, out)
+  local inner = content.width + 2
+  local title = truncate_display(content.title, inner)
+  table.insert(out, {
+    { INLINE_INDENT, "NonText" },
+    { "┌", "ManiculeInlineBorder" },
+    { title, "ManiculeInlineMeta" },
+    { string.rep("─", math.max(0, inner - vim.fn.strdisplaywidth(title))) .. "┐", "ManiculeInlineBorder" },
+  })
+
+  local function body_row(text, hl)
+    local pad = math.max(0, content.width - vim.fn.strdisplaywidth(text))
+    table.insert(out, {
+      { INLINE_INDENT, "NonText" },
+      { "│", "ManiculeInlineBorder" },
+      { " " .. text .. string.rep(" ", pad) .. " ", hl },
+      { "│", "ManiculeInlineBorder" },
+    })
+  end
+  for _, line in ipairs(content.lines) do
+    body_row(line, "ManiculeInlineBody")
+  end
+  if content.footer then
+    body_row(truncate_display(content.footer, content.width), "ManiculeInlineMeta")
+  end
+
+  table.insert(out, {
+    { INLINE_INDENT, "NonText" },
+    { "└" .. string.rep("─", inner) .. "┘", "ManiculeInlineBorder" },
+  })
+end
+
+---Render (or refresh) the below-line box block for `record`'s anchor
+---line, as `virt_lines` on a sibling decoration-only extmark tracked as
+---`handle.inline_extmark_id`. Renders for every record — no viewport or
+---sticky gating (extmarks are cheap, like the eol marker).
+---
+---Same-line stacks: only the stack HEAD (first record on the line in
+---`record_stack_less` order) owns the block — it renders every stack
+---member's box sequentially in ONE virt_lines extmark, so box order is
+---the comparator's, never sibling-extmark creation order. Non-head
+---records get their inline extmark cleared. `M.reconcile` feeds every
+---record of the buffer through here, so the head re-renders whenever
+---any member changes, and deleting the head promotes the next record on
+---the same reconcile pass.
+---
+---Anchoring: the block follows the live anchor extmark (mid-edit line
+---moves) and sits at the record's range START line — a multi-line
+---(visual-range) comment shows its box between the first commented line
+---and the rest of the range, matching where the eol marker sits.
+---@param record table
+---@param handle manicule.ui.render.Handle
+---@param records table[] Current record snapshot (stack + counter fallback)
+---@param counter_records? table[] Current project/session snapshot (title count)
+local function render_inline_virt_lines(record, handle, records, counter_records)
+  if not vim.api.nvim_buf_is_valid(handle.bufnr) then
+    return
+  end
+
+  local my_line = record_start_line(record)
+  local my_id = tostring(record.id or "")
+  local stack = {}
+  for _, other in ipairs(records or {}) do
+    if other.uri == record.uri and record_start_line(other) == my_line then
+      table.insert(stack, other)
+    end
+  end
+  table.sort(stack, record_stack_less)
+  if #stack == 0 then
+    stack = { record }
+  end
+  if tostring(stack[1].id or "") ~= my_id then
+    -- Not the stack head: the head's handle owns the line's block.
+    clear_inline_extmark(handle)
+    return
+  end
+
+  -- Follow the live anchor rather than the stored range so the block
+  -- tracks mid-edit line moves the same way popups and eol markers do.
+  local row = my_line - 1
+  local live = sync_handle_position(handle)
+  if live then
+    row = live.start_line - 1
+  end
+  local line_count = vim.api.nvim_buf_line_count(handle.bufnr)
+  row = math.max(0, math.min(row, math.max(0, line_count - 1)))
+
+  -- Content width: the float popup's width logic, additionally capped so
+  -- the box frame fits the window that shows the buffer (falls back to
+  -- the full screen width for hidden buffers — the next reconcile after
+  -- the buffer surfaces re-fits).
+  local win_width = vim.o.columns
+  local anchor_win = find_window_for_buffer(handle.bufnr)
+  if anchor_win then
+    win_width = vim.api.nvim_win_get_width(anchor_win)
+  end
+  local max_width = math.max(8, math.min(math.max(24, math.floor(win_width * 0.52)), win_width - INLINE_FRAME_CELLS))
+
+  local virt_lines = {}
+  for _, member in ipairs(stack) do
+    local display_index, display_total = record_display_position(member, counter_records or records)
+    append_inline_box(build_popup_content(member, max_width, display_index, display_total, true), virt_lines)
+  end
+
+  local opts = {
+    virt_lines = virt_lines,
+    priority = 220,
+    -- Pure decoration — no `invalidate`, no `undo_restore`, no end
+    -- range. Orphan detection stays on the primary anchor; this mark
+    -- only carries the box block.
+  }
+  if handle.inline_extmark_id then
+    opts.id = handle.inline_extmark_id
+  end
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, handle.bufnr, anchor.ns, row, 0, opts)
+  if ok then
+    handle.inline_extmark_id = id
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- Per-record reconcile helper
 -- ---------------------------------------------------------------------------
 
@@ -1119,12 +1370,19 @@ local function reconcile_record(bufnr, record, records, counter_records, tab)
   --   eol    -> collapsed marker here (for every record — viewport /
   --             sticky is a float concern); the full popup expands from
   --             the viewport pass while the cursor sits on the line
+  --   inline -> below-line box block here (for every record, like eol);
+  --             no popups ever — see the header
   --   hidden -> nothing beyond the anchor
-  local mode = effective_display_mode()
+  local mode = current_display_mode()
   if mode == "eol" then
     render_eol_virt_text(record, handle, records)
   else
     clear_eol_extmark(handle)
+  end
+  if mode == "inline" then
+    render_inline_virt_lines(record, handle, records, counter_records)
+  else
+    clear_inline_extmark(handle)
   end
 
   if mode == "float" and is_sticky() then
@@ -1242,9 +1500,10 @@ end
 --- the viewport have their popup hidden (the handle + extmark survive).
 ---
 --- Display-mode aware: under "eol" the visibility test is the cursor
---- line instead of the viewport (expand-on-demand — see the header),
---- and under "hidden" every popup is torn down. "float"/"inline" keep
---- the viewport behavior.
+--- line instead of the viewport (expand-on-demand — see the header);
+--- under "inline" and "hidden" every popup is torn down (inline's boxes
+--- already show the full comment and are owned by reconcile, not this
+--- pass). "float" keeps the viewport behavior.
 ---
 --- Gated on `M.is_hidden()` — returns immediately so scroll / resize
 --- autocmds that fire while visuals are suppressed don't re-paint.
@@ -1264,10 +1523,14 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     return
   end
 
-  local mode = effective_display_mode()
-  if mode == "hidden" then
-    -- Anchors only: no popups in hidden mode, ever. Sweep untracked
-    -- tagged floats too so a mode switch clears strays.
+  local mode = current_display_mode()
+  if mode == "hidden" or mode == "inline" then
+    -- No popups in these modes, ever: hidden renders anchors only, and
+    -- inline's virt_lines boxes (rendered by reconcile) already show the
+    -- full comment — a cursor-line popup would only duplicate visible
+    -- content (and, being `focusable = false`, add no interaction;
+    -- edit/delete go through `record_at_cursor` on the anchor line).
+    -- Sweep untracked tagged floats too so a mode switch clears strays.
     for _, handle in pairs(tab) do
       hide_popup(handle)
     end
