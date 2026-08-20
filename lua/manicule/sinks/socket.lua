@@ -59,6 +59,12 @@ function M.setup(opts)
     type = "integration",
     label = "socket (JSONL)",
     description = "send structured comments to a local unix socket",
+    -- Only a review job supplies ctx.socket, so an interactive pick can
+    -- never validate. Register (a review dispatches to "socket" by name
+    -- with sink_ctx) but keep the sink out of pickers, single-sink
+    -- auto-dispatch, and completion. `is_available` would unregister it
+    -- entirely and break the review-driven dispatch, hence `hidden`.
+    hidden = true,
     clear_on_success = opts.clear_on_success ~= false,
     validate = function(ctx)
       if type(ctx.socket) ~= "string" or ctx.socket == "" then

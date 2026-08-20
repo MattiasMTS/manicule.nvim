@@ -75,7 +75,11 @@ describe("manicule sink helpers", function()
     })
 
     local names = require("manicule.sinks").list()
-    assert.are.same({ "clipboard", "cmux", "socket" }, names)
+    assert.are.same({ "clipboard", "cmux" }, names)
+    -- The socket sink registers (dispatchable by name from a review job)
+    -- but is hidden from selection listing: it can never validate without
+    -- a caller-supplied ctx.socket.
+    assert.is_truthy(require("manicule.sinks").get("socket"))
     assert.are.equal("sink", require("manicule.sinks").get("clipboard").type)
     assert.are.equal("integration", require("manicule.sinks").get("cmux").type)
     assert.is_false(require("manicule.sinks").get("cmux").clear_on_success)
@@ -261,7 +265,25 @@ describe("manicule sink helpers", function()
       },
     })
 
-    assert.are.same({ "socket" }, require("manicule.sinks").list())
+    assert.is_nil(require("manicule.sinks").get("cmux"))
+    -- Socket stays registered but hidden, so nothing is listed for selection.
+    assert.are.same({}, require("manicule.sinks").list())
+    assert.is_truthy(require("manicule.sinks").get("socket"))
+  end)
+
+  it("hides the socket sink from selection listing but keeps it registered", function()
+    require("manicule.sinks")._reset()
+    require("manicule.sinks").setup({
+      clipboard = false,
+      github = false,
+      cmux = false,
+    })
+
+    local sinks = require("manicule.sinks")
+    assert.are.same({}, sinks.list())
+    local socket = sinks.get("socket")
+    assert.is_truthy(socket)
+    assert.is_true(socket.hidden)
   end)
 
   it("discovers Pi from cmux resume metadata before scanning stale screen content", function()
@@ -435,6 +457,7 @@ describe("manicule sink helpers", function()
     local internal = require("manicule.sinks.cmux")._internal
     assert.are.equal("Pi", internal.detect_agent_from_command("node /nix/store/abc/pi-coding-agent/dist/main.js"))
     assert.are.equal("Pi", internal.detect_agent_from_command("/usr/local/bin/pi --resume"))
+    assert.are.equal("Pi", internal.detect_agent_from_command("pi"))
   end)
 
   it("does not detect pi from bare pi substrings in commands", function()
@@ -442,6 +465,14 @@ describe("manicule sink helpers", function()
     assert.is_nil(internal.detect_agent_from_command("pip install requests"))
     assert.is_nil(internal.detect_agent_from_command("spotify"))
     assert.is_nil(internal.detect_agent_from_command("vim pi.txt"))
+  end)
+
+  it("does not detect pi from argument tokens of unrelated commands", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.is_nil(internal.detect_agent_from_command("sudo -u pi bash"))
+    assert.is_nil(internal.detect_agent_from_command("chown pi file"))
+    assert.is_nil(internal.detect_agent_from_command("ssh -l pi host"))
+    assert.is_nil(internal.detect_agent_from_command("ls /home/pi"))
   end)
 
   it("detects pi from screen contents", function()

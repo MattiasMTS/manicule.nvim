@@ -132,16 +132,18 @@ local function detect_agent_from_command(command)
   if lower:find("sourcegraph/amp", 1, true) or lower:find("/amp", 1, true) then
     return "Amp"
   end
-  -- Pi is often launched behind wrappers (e.g. `node /nix/.../pi-coding-agent/...`),
-  -- so match the path segment or any argv token whose basename is exactly `pi`.
-  -- Bare "pi" substrings (pip, spotify, pi.txt) must not match.
+  -- Pi is often launched behind wrappers (e.g. `node /nix/.../pi-coding-agent/...`);
+  -- the `pi-coding-agent` path check covers those. For direct launches only the
+  -- invoked program (the FIRST argv token) may match by basename: scanning
+  -- every token misclassifies commands that merely mention pi in an argument
+  -- (`sudo -u pi bash`, `chown pi file`, `ssh -l pi host`). Bare "pi"
+  -- substrings (pip, spotify, pi.txt) must not match either.
   if lower:find("pi-coding-agent", 1, true) then
     return "Pi"
   end
-  for token in lower:gmatch("%S+") do
-    if token:match("([^/]+)$") == "pi" then
-      return "Pi"
-    end
+  local program = lower:match("%S+")
+  if program and program:match("([^/]+)$") == "pi" then
+    return "Pi"
   end
   return nil
 end

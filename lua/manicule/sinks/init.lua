@@ -71,7 +71,7 @@ local function load_spec(module_name, opts)
 end
 
 ---Register a sink adapter.
----@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, pre_text?: string, post_text?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean}
+---@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, pre_text?: string, post_text?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean, hidden?: boolean}
 ---
 ---Spec fields:
 ---  name              string     unique sink identifier
@@ -87,6 +87,12 @@ end
 ---  clear_on_success  boolean?   if true, core deletes every record in the batch
 ---                               after the sink's send callback reports ok=true.
 ---                               default: false (records persist).
+---  hidden            boolean?   if true, the sink stays registered (dispatchable
+---                               by name via `get`/`dispatch`) but is excluded
+---                               from `list()`, i.e. from interactive pickers,
+---                               single-sink auto-dispatch, and completion.
+---                               For sinks that only work with a caller-supplied
+---                               ctx (e.g. socket). default: false.
 function M.register(spec)
   vim.validate({
     name = { spec.name, "string" },
@@ -100,6 +106,7 @@ function M.register(spec)
     validate = { spec.validate, "function", true },
     health = { spec.health, "function", true },
     clear_on_success = { spec.clear_on_success, "boolean", true },
+    hidden = { spec.hidden, "boolean", true },
   })
   spec.type = spec.type or "sink"
   sinks[spec.name] = spec
@@ -149,10 +156,21 @@ function M.integrations()
   return names
 end
 
----List all registered sink names.
+---List sink names offered for interactive selection.
+---
+---Hidden sinks (`spec.hidden`) stay registered — `get`/`dispatch` by name
+---keep working, e.g. a review job dispatching to "socket" with sink_ctx —
+---but are excluded here so pickers, single-sink auto-dispatch, and cmdline
+---completion never offer a sink that cannot validate without a
+---caller-supplied ctx.
 ---@return string[]
 function M.list()
-  local names = vim.tbl_keys(sinks)
+  local names = {}
+  for name, spec in pairs(sinks) do
+    if not spec.hidden then
+      table.insert(names, name)
+    end
+  end
   table.sort(names)
   return names
 end

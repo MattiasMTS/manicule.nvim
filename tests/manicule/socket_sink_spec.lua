@@ -119,6 +119,39 @@ describe("manicule socket sink", function()
     assert.is_truthy(err)
   end)
 
+  it("is hidden from selection listing but dispatchable by name with ctx.socket", function()
+    local sinks = require("manicule.sinks")
+    sinks._reset()
+    sinks.setup({ clipboard = false, github = false, cmux = false })
+
+    -- Hidden from picker / single-sink auto-dispatch listing: without a
+    -- review-supplied ctx.socket the sink can never validate interactively.
+    assert.are.same({}, sinks.list())
+
+    -- ...but a review-driven dispatch by name still reaches the sink.
+    local server = pipe_server(true)
+    local record = {
+      body = "review-driven dispatch",
+      project_root = ctx.root,
+      uri = "file://" .. ctx.root .. "/src/b.lua",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    }
+
+    local got_ok, got_err
+    sinks.dispatch("socket", { record }, { socket = server.path, job = "job-2", label = "review" }, function(ok, err)
+      got_ok, got_err = ok, err
+    end)
+    vim.wait(2000, function()
+      return got_ok ~= nil
+    end)
+    server.close()
+
+    assert.is_true(got_ok, got_err)
+    assert.are.equal("hello", server.messages[1].type)
+    assert.are.equal("submit", server.messages[2].type)
+    assert.are.equal("src/b.lua", server.messages[2].comments[1].path)
+  end)
+
   it("succeeds when server sends ack and immediately closes", function()
     local server = pipe_server("close")
     local spec = require("manicule.sinks.socket").setup({})
