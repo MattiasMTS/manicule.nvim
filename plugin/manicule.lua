@@ -186,15 +186,8 @@ vim.api.nvim_create_user_command("ManiculeReview", function(opts)
   end
 end, {
   nargs = "*",
-  complete = function(_, cmdline)
-    -- Complete local branch names for the common `:ManiculeReview <ref>` case.
-    if cmdline:match("ManiculeReview%s+%S*$") then
-      local result = vim.system({ "git", "branch", "--format=%(refname:short)" }, { text = true }):wait()
-      if result.code == 0 then
-        return vim.split(vim.trim(result.stdout or ""), "\n", { trimempty = true })
-      end
-    end
-    return {}
+  complete = function(arglead, cmdline)
+    return require("manicule.review.complete").candidates(arglead, cmdline)
   end,
 })
 

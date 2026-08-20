@@ -77,6 +77,21 @@ describe("manicule review sources", function()
     assert.is_nil(by_path["same.txt"])
   end)
 
+  it("resolves a remote-tracking ref via merge-base", function()
+    local S = require("manicule.review.sources")
+    local root, git = H.git_repo(ctx, { ["a.lua"] = { "return 1" } })
+    -- Simulate a fetched remote branch with a ref under refs/remotes.
+    git("update-ref", "refs/remotes/origin/main", vim.trim(git("rev-parse", "HEAD").stdout))
+    git("checkout", "-q", "-b", "feature")
+    vim.fn.writefile({ "return 2" }, root .. "/a.lua")
+    git("commit", "-aqm", "feature work")
+
+    local job = assert(S.resolve({ "origin/main" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s4" }))
+    assert.are.equal("origin/main", job.label)
+    assert.are.equal(1, #job.files)
+    assert.are.equal("a.lua", job.files[1].path)
+  end)
+
   it("errors outside a git repo for ref arguments", function()
     local S = require("manicule.review.sources")
     local job, err = S.resolve({ "main" }, { cwd = ctx.artifact_root })
