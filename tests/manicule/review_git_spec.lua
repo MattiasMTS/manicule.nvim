@@ -33,6 +33,51 @@ describe("manicule review git plumbing", function()
     assert.are.equal("A", by_path["src/new.lua"])
   end)
 
+  it("returns literal paths for names git would C-quote and stages their baselines", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, {
+      ["å.txt"] = { "base umlaut" },
+      ["a b.txt"] = { "base space" },
+    })
+    vim.fn.writefile({ "changed umlaut" }, root .. "/å.txt")
+    vim.fn.writefile({ "changed space" }, root .. "/a b.txt")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local changed = assert(G.changed_files(root, base))
+    local by_path = {}
+    for _, entry in ipairs(changed) do
+      by_path[entry.path] = entry.status
+    end
+    -- With core.quotePath=true (the default) a non -z diff reports
+    -- `"\303\245.txt"`; the entry must carry the literal path instead.
+    assert.are.equal("M", by_path["å.txt"])
+    assert.are.equal("M", by_path["a b.txt"])
+
+    local files = G.stage_baseline(root, base, changed, ctx.artifact_root .. "/quoted-staged")
+    local pair_by_path = {}
+    for _, pair in ipairs(files) do
+      pair_by_path[pair.path] = pair
+    end
+    assert.are.equal("base umlaut", table.concat(vim.fn.readfile(pair_by_path["å.txt"].left), "\n"))
+    assert.are.equal("base space", table.concat(vim.fn.readfile(pair_by_path["a b.txt"].left), "\n"))
+  end)
+
+  it("keeps the record stream aligned across two-path rename records", function()
+    local G = require("manicule.review.git")
+    -- `--no-renames` means R/C records never appear today, but the parser
+    -- must not corrupt the stream if the flags ever change: R/C statuses
+    -- carry a score suffix and TWO paths (source, destination).
+    local out = table.concat({ "M", "a.txt", "R100", "old name.txt", "new name.txt", "D", "gone.txt" }, "\0") .. "\0"
+    local entries = G.parse_name_status(out)
+    assert.are.equal(3, #entries)
+    assert.are.equal("a.txt", entries[1].path)
+    assert.are.equal("M", entries[1].status)
+    assert.are.equal("new name.txt", entries[2].path)
+    assert.are.equal("M", entries[2].status)
+    assert.are.equal("gone.txt", entries[3].path)
+    assert.are.equal("D", entries[3].status)
+  end)
+
   it("stages baseline file versions into a directory", function()
     local G = require("manicule.review.git")
     local root = H.git_repo(ctx, { ["src/a.lua"] = { "return 1" } })

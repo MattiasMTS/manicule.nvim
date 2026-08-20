@@ -97,6 +97,40 @@ local function untracked_from_status(root, stdout)
   return paths
 end
 
+---Entries from NUL-separated `git diff --name-status -z` output
+---(`STATUS\0path\0STATUS\0path\0...`). Without `-z`, core.quotePath=true
+---(the default) C-quotes non-ASCII paths (`"\303\245.txt"`) and the
+---quoted string would leak into entry.path, so callers MUST pass `-z`.
+---Rename/copy statuses (`R<score>`/`C<score>`) carry TWO paths
+---(`old\0new\0`); the destination is kept so the stream stays aligned
+---even though callers pass `--no-renames` today.
+---Rare statuses (T, R, C, ...) collapse into "M"; we only branch on A/D.
+---@param stdout string
+---@return {path: string, status: "M"|"A"|"D"}[]
+function M.parse_name_status(stdout)
+  local tokens = {}
+  for token in (stdout or ""):gmatch("[^%z]+") do
+    tokens[#tokens + 1] = token
+  end
+  local entries = {}
+  local i = 1
+  while i < #tokens do
+    local status = tokens[i]:sub(1, 1)
+    local path = tokens[i + 1]
+    i = i + 2
+    if (status == "R" or status == "C") and i <= #tokens then
+      -- Two-path record: source first, then the destination.
+      path = tokens[i]
+      i = i + 1
+    end
+    if status ~= "A" and status ~= "D" then
+      status = "M"
+    end
+    entries[#entries + 1] = { path = path, status = status }
+  end
+  return entries
+end
+
 ---Changed files vs `base`, including untracked files as "A".
 ---@param root string
 ---@param base string
@@ -104,7 +138,10 @@ end
 function M.changed_files(root, base)
   -- Run diff and status concurrently; each costs ~100ms on large repos
   -- and they are independent.
-  local diff_job = vim.system({ "git", "-C", root, "diff", "--name-status", "--no-renames", base }, { text = true })
+  local diff_job = vim.system(
+    { "git", "-C", root, "diff", "--name-status", "--no-renames", "-z", base },
+    { text = true }
+  )
   local status_job = vim.system(
     { "git", "-C", root, "status", "--porcelain=v1", "-z", "--no-renames" },
     { text = true }
@@ -116,15 +153,10 @@ function M.changed_files(root, base)
   end
   local entries = {}
   local seen = {}
-  for line in (result.stdout or ""):gmatch("[^\n]+") do
-    local status, path = line:match("^(%a)%s+(.+)$")
-    if status and path and not seen[path] then
-      seen[path] = true
-      -- Collapse rare statuses (T, etc.) into "M"; we only branch on A/D.
-      if status ~= "A" and status ~= "D" then
-        status = "M"
-      end
-      table.insert(entries, { path = path, status = status })
+  for _, entry in ipairs(M.parse_name_status(result.stdout)) do
+    if not seen[entry.path] then
+      seen[entry.path] = true
+      table.insert(entries, entry)
     end
   end
   if untracked.code == 0 then
