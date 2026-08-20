@@ -428,4 +428,28 @@ describe("manicule sink helpers", function()
     assert.is_false(send_result.ok)
     assert.is_truthy(send_result.err:find("send failed", 1, true))
   end)
+
+  it("detects pi from wrapped process commands", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.are.equal("Pi", internal.detect_agent_from_command("node /nix/store/abc/pi-coding-agent/dist/main.js"))
+    assert.are.equal("Pi", internal.detect_agent_from_command("/usr/local/bin/pi --resume"))
+  end)
+
+  it("does not detect pi from bare pi substrings in commands", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.is_nil(internal.detect_agent_from_command("pip install requests"))
+    assert.is_nil(internal.detect_agent_from_command("spotify"))
+    assert.is_nil(internal.detect_agent_from_command("vim pi.txt"))
+  end)
+
+  it("detects pi from screen contents", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.are.equal("Pi", internal.detect_agent_from_screen("π  dotfiles\nready for input"))
+    assert.are.equal("Pi", internal.detect_agent_from_screen("node running pi-coding-agent v1"))
+  end)
+
+  it("does not detect pi from plain prose containing pi in screens", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.is_nil(internal.detect_agent_from_screen("we computed pi to 10 digits\nnothing agent-like here"))
+  end)
 end)

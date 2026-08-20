@@ -132,9 +132,16 @@ local function detect_agent_from_command(command)
   if lower:find("sourcegraph/amp", 1, true) or lower:find("/amp", 1, true) then
     return "Amp"
   end
-  local executable = lower:match("^%s*([^%s]+)")
-  if executable and executable:match("([^/]+)$") == "pi" then
+  -- Pi is often launched behind wrappers (e.g. `node /nix/.../pi-coding-agent/...`),
+  -- so match the path segment or any argv token whose basename is exactly `pi`.
+  -- Bare "pi" substrings (pip, spotify, pi.txt) must not match.
+  if lower:find("pi-coding-agent", 1, true) then
     return "Pi"
+  end
+  for token in lower:gmatch("%S+") do
+    if token:match("([^/]+)$") == "pi" then
+      return "Pi"
+    end
   end
   return nil
 end
@@ -158,6 +165,16 @@ local function detect_agent_from_screen(screen)
   end
   if lower:find("pi coding agent", 1, true) or lower:find("π coding agent", 1, true) then
     return "Pi"
+  end
+  if lower:find("pi-coding-agent", 1, true) then
+    return "Pi"
+  end
+  -- Pi's TUI header shows a standalone π glyph even when no textual agent
+  -- name appears on screen. Plain prose "pi" must not match.
+  for token in lower:gmatch("%S+") do
+    if token == "π" then
+      return "Pi"
+    end
   end
   return nil
 end
@@ -857,5 +874,11 @@ end
 function M._clear_cache()
   agent_surface_cache = {}
 end
+
+-- Exposed for unit tests only.
+M._internal = {
+  detect_agent_from_command = detect_agent_from_command,
+  detect_agent_from_screen = detect_agent_from_screen,
+}
 
 return M
