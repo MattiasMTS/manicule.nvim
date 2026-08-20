@@ -3,18 +3,47 @@
 -- Auto-opens a bottom quickfix window on session start, showing the
 -- review's file pairs with live comment counts. <Tab> toggles between
 -- files view (default) and comments view (session-scoped manicule list).
--- In files view, <CR> calls review.open(idx) instead of default qf jump.
+-- In files view, <CR> drills into a commented pair's comments (or opens
+-- the pair when it has none); `o` always opens the pair. In a scoped
+-- comments view, <Esc> returns to files and <Tab> widens to ALL comments.
 
 local M = {}
 
 ---@type "files"|"comments"
 local current_view = "files"
 
+---URI scoping the comments view to a single file (set by drill-down
+---from the files view); nil means ALL session comments.
+---@type string|nil
+local file_filter = nil
+
 ---@type integer|nil winid of the panel qf window
 local panel_winid = nil
 
 ---@type integer|nil autocmd group for the panel's live refresh
 local augroup = nil
+
+---Project root the session's worktree files live under. list() resolves
+---the root from the CURRENT buffer, and the panel's unnamed quickfix
+---buffer falls back to cwd — which can miss the reviewed project
+---entirely. Pass this as `_root` on every list() call made from panel
+---keymaps so queries hit the right store.
+---@return string|nil
+local function session_root()
+  local state = require("manicule.review").state()
+  if not state then
+    return nil
+  end
+  local markers = require("manicule.config").current.store.root_markers
+  for _, pair in ipairs(state.files) do
+    local path = pair.status == "D" and pair.left or pair.right
+    local root = vim.fs.root(path, markers)
+    if root then
+      return root
+    end
+  end
+  return nil
+end
 
 local function session_uris()
   local review = require("manicule.review")
@@ -49,7 +78,7 @@ local function build_files_items()
   end
 
   local counts = {}
-  local records = require("manicule").list({ _quiet = true, uris = session_uri_set })
+  local records = require("manicule").list({ _quiet = true, uris = session_uri_set, _root = session_root() })
   for _, record in ipairs(records) do
     counts[record.uri] = (counts[record.uri] or 0) + 1
   end
@@ -68,8 +97,40 @@ local function build_files_items()
 end
 
 local function build_comments_items()
-  local records = require("manicule").list({ _quiet = true, uris = session_uris() })
+  local uris = file_filter and { [file_filter] = true } or session_uris()
+  local records = require("manicule").list({ _quiet = true, uris = uris, _root = session_root() })
   return require("manicule.ui.quickfix").build_items(records)
+end
+
+---URI a pair's comments anchor to (right side; left for deletions),
+---matching how build_files_items counts them.
+---@param pair {left: string, right: string, status: string}
+---@return string
+local function pair_uri(pair)
+  local path = pair.status == "D" and pair.left or pair.right
+  return require("manicule.uri").for_path(path)
+end
+
+---Pair index under the cursor in the CURRENT (panel) window. Reads the
+---list displayed in this window, not the global current stack entry,
+---so qf history can't desync row -> pair mapping.
+---@return integer|nil
+local function pair_index_at_cursor()
+  local winid = vim.api.nvim_get_current_win()
+  local row = vim.api.nvim_win_get_cursor(winid)[1]
+  local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
+  if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
+    return nil
+  end
+  local item = info.items[row]
+  if not item then
+    return nil
+  end
+  local data = item.user_data
+  if type(data) == "table" and type(data.pair_index) == "number" then
+    return data.pair_index
+  end
+  return nil
 end
 
 local function get_panel_title()
@@ -148,36 +209,69 @@ end
 local function setup_panel_keymaps(bufnr)
   local map_opts = { buffer = bufnr, nowait = true, silent = true }
 
-  -- <CR> in files view calls review.open(idx)
+  -- <CR> in files view drills into the pair's comments when it has
+  -- any, otherwise opens the pair.
   vim.keymap.set("n", "<CR>", function()
     if current_view == "files" then
-      local winid = vim.api.nvim_get_current_win()
-      local row = vim.api.nvim_win_get_cursor(winid)[1]
-      -- Read the list displayed in THIS window, not the global current
-      -- stack entry, so qf history can't desync row -> pair mapping.
-      local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
-      if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
+      local idx = pair_index_at_cursor()
+      if not idx then
         return
       end
-      local item = info.items[row]
-      if not item then
-        return
+      local state = require("manicule.review").state()
+      local pair = state and state.files[idx]
+      if pair then
+        local uri = pair_uri(pair)
+        local records = require("manicule").list({ _quiet = true, uris = { [uri] = true }, _root = session_root() })
+        if #records > 0 then
+          current_view = "comments"
+          file_filter = uri
+          refresh_current_view()
+          return
+        end
       end
-      local data = item.user_data
-      if type(data) == "table" and type(data.pair_index) == "number" then
-        require("manicule.review").open(data.pair_index)
-      end
+      require("manicule.review").open(idx)
     else
       -- Comments view: default (unmapped) qf <CR> jumps to the entry.
       local cr = vim.api.nvim_replace_termcodes("<CR>", true, false, true)
       vim.api.nvim_feedkeys(cr, "n", false)
     end
-  end, vim.tbl_extend("keep", { desc = "Manicule review: open pair or jump to comment" }, map_opts))
+  end, vim.tbl_extend("keep", { desc = "Manicule review: drill into comments or open pair" }, map_opts))
 
-  -- <Tab> toggles views
+  -- `o` in files view always opens the pair — the escape hatch when
+  -- <CR> would drill into comments instead.
+  vim.keymap.set("n", "o", function()
+    if current_view ~= "files" then
+      local o = vim.api.nvim_replace_termcodes("o", true, false, true)
+      vim.api.nvim_feedkeys(o, "n", false)
+      return
+    end
+    local idx = pair_index_at_cursor()
+    if idx then
+      require("manicule.review").open(idx)
+    end
+  end, vim.tbl_extend("keep", { desc = "Manicule review: open pair (skip drill-down)" }, map_opts))
+
+  -- <Esc> in a comments view returns to files (clearing any file
+  -- filter); in files view it falls through to the default behavior.
+  vim.keymap.set("n", "<Esc>", function()
+    if current_view == "comments" then
+      current_view = "files"
+      file_filter = nil
+      refresh_current_view()
+    else
+      local esc = vim.api.nvim_replace_termcodes("<Esc>", true, false, true)
+      vim.api.nvim_feedkeys(esc, "n", false)
+    end
+  end, vim.tbl_extend("keep", { desc = "Manicule review: back to files view" }, map_opts))
+
+  -- <Tab> toggles files <-> ALL comments. From a drilled-down (scoped)
+  -- comments view it first widens to all comments.
   vim.keymap.set("n", "<Tab>", function()
     if current_view == "files" then
       current_view = "comments"
+      file_filter = nil
+    elseif file_filter then
+      file_filter = nil
     else
       current_view = "files"
     end
@@ -197,6 +291,7 @@ function M.open()
 
   -- Always start in files view
   current_view = "files"
+  file_filter = nil
   local items = build_files_items()
   local title = get_panel_title()
 
@@ -234,7 +329,9 @@ function M.open()
     group = augroup,
     pattern = { "ManiculeAdded", "ManiculeDeleted", "ManiculeEdited", "ManiculeResolved" },
     callback = function()
-      if current_view == "files" and find_panel_window() then
+      -- Refresh both views: files for live counts, comments so dd/ce
+      -- in a (scoped) comments view update the list in place.
+      if find_panel_window() then
         refresh_current_view()
       end
     end,
@@ -254,6 +351,7 @@ function M.close()
   panel_winid = nil
   augroup = nil
   current_view = "files"
+  file_filter = nil
 end
 
 return M

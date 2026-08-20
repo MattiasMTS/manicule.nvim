@@ -466,6 +466,110 @@ describe("manicule review session", function()
     assert.is_truthy(items[1].text:find("comments"))
   end)
 
+  local function add_comment(path, body)
+    vim.cmd.edit(vim.fn.fnameescape(path))
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb(body)
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+  end
+
+  local function panel_win()
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].buftype == "quickfix" then
+        return winid
+      end
+    end
+  end
+
+  ---Press `lhs` in the panel window on `row` THROUGH buffer-local maps.
+  local function press_in_panel(row, lhs)
+    local winid = panel_win()
+    assert.is_truthy(winid, "panel window not found")
+    vim.api.nvim_set_current_win(winid)
+    vim.api.nvim_win_set_cursor(winid, { row, 0 })
+    local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
+    vim.api.nvim_feedkeys(keys, "x", false)
+  end
+
+  it("<CR> on a commented file scopes the comments view to that file", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "drill" }))
+    add_comment(files[1].right, "first file comment")
+    add_comment(files[2].right, "second file comment")
+
+    press_in_panel(1, "<CR>")
+
+    local items = vim.fn.getqflist()
+    assert.are.equal(1, #items)
+    assert.is_truthy(items[1].text:find("first file comment", 1, true))
+  end)
+
+  it("<Esc> in scoped comments view returns to files view", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "drill" }))
+    add_comment(files[1].right, "first file comment")
+
+    press_in_panel(1, "<CR>")
+    assert.are.equal(1, #vim.fn.getqflist())
+
+    press_in_panel(1, "<Esc>")
+    local items = vim.fn.getqflist()
+    assert.are.equal(2, #items)
+    assert.is_truthy(items[1].text:find("(1 comments)", 1, true))
+    assert.is_truthy(items[2].text:find("(0 comments)", 1, true))
+  end)
+
+  it("<CR> on a file without comments opens the pair", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "drill" }))
+    add_comment(files[1].right, "first file comment")
+
+    press_in_panel(2, "<CR>")
+
+    assert.are.equal(2, R.state().index)
+    -- Still files view.
+    assert.is_truthy(vim.fn.getqflist()[1].text:find("comments)", 1, true))
+  end)
+
+  it("o on a commented file opens the pair anyway", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "drill" }))
+    add_comment(files[2].right, "second file comment")
+
+    press_in_panel(2, "o")
+
+    assert.are.equal(2, R.state().index)
+    assert.is_truthy(vim.fn.getqflist()[1].text:find("comments)", 1, true))
+  end)
+
+  it("<Tab> from a scoped comments view widens to ALL comments", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "drill" }))
+    add_comment(files[1].right, "first file comment")
+    add_comment(files[2].right, "second file comment")
+
+    press_in_panel(1, "<CR>")
+    assert.are.equal(1, #vim.fn.getqflist())
+
+    press_in_panel(1, "<Tab>")
+    local items = vim.fn.getqflist()
+    assert.are.equal(2, #items)
+    local texts = table.concat({ items[1].text, items[2].text }, "\n")
+    assert.is_truthy(texts:find("first file comment", 1, true))
+    assert.is_truthy(texts:find("second file comment", 1, true))
+  end)
+
   it("stop() closes the panel and clears autocmds", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))

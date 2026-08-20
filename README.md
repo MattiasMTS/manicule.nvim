@@ -136,8 +136,13 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
 Diffs render as side-by-side `:diffsplit` pairs (baseline left, read-only;
 worktree right). A bottom panel opens automatically showing the file list
 with live comment counts. Press `<Tab>` in the panel to toggle between
-files view and comments view; press `<CR>` on a file to switch the diff
-to that pair.
+files view and comments view. `<CR>` on a commented file drills into a
+comments view scoped to that file (`<CR>` jumps to a comment, `dd`
+deletes, `ce` edits, `<Esc>` goes back to the file list); `<CR>` on a
+file without comments switches the diff to that pair, and `o` always
+opens the pair regardless of comment count. From a scoped comments view
+`<Tab>` widens to all session comments. Running `:ManiculeReview pr`
+with no number opens a picker over the repository's open PRs.
 
 When you review a PR with its head checked out (`:ManiculeReview pr 123`
 on the PR branch), existing GitHub review comments are imported as
