@@ -3,7 +3,9 @@ local H = require("helpers")
 local ctx
 
 local function setup_env()
-  ctx = H.setup()
+  -- These specs exercise float-popup behavior; the shipped default is
+  -- `ui.display = "eol"`, so opt into float mode explicitly.
+  ctx = H.setup({ ui = { display = "float" } })
   H.edit_project_file(ctx, "src/render.lua", {
     "local value = 1",
     "value = value + 1",
@@ -455,7 +457,9 @@ end)
 -- `H.setup`.
 describe("manicule sticky render", function()
   before_each(function()
-    ctx = H.setup({ ui = { sticky = true } })
+    -- Sticky is a float-mode concern; pin the display mode like the
+    -- non-sticky describe above.
+    ctx = H.setup({ ui = { sticky = true, display = "float" } })
     H.edit_project_file(ctx, "src/sticky.lua", {
       "local value = 1",
       "value = value + 1",

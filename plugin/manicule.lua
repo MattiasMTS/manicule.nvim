@@ -127,6 +127,23 @@ end
 
 vim.api.nvim_create_user_command("ManiculeToggle", toggle, {})
 
+-- `:ManiculeDisplay <mode>` sets the comment display mode; with no
+-- argument it cycles float → eol → inline → hidden → float.
+vim.api.nvim_create_user_command("ManiculeDisplay", function(opts)
+  require("manicule.ui.render").set_display_mode(opts.args ~= "" and opts.args or nil)
+end, {
+  nargs = "?",
+  complete = function(arglead)
+    local out = {}
+    for _, mode in ipairs({ "float", "eol", "inline", "hidden" }) do
+      if mode:find(arglead, 1, true) == 1 then
+        table.insert(out, mode)
+      end
+    end
+    return out
+  end,
+})
+
 local function dispatch_jump(direction, opts)
   local count = 1
   if opts.args ~= nil and opts.args ~= "" then
@@ -195,6 +212,12 @@ end, { silent = true })
 -- review panel during a session). No default binding — the command is
 -- enough for most users; expose the <Plug> for anyone who wants a keymap.
 vim.keymap.set("n", "<Plug>(manicule-toggle)", toggle, { silent = true })
+
+-- Cycle the comment display mode (float → eol → inline → hidden). No
+-- default binding — same policy as <Plug>(manicule-toggle).
+vim.keymap.set("n", "<Plug>(manicule-display-cycle)", function()
+  require("manicule.ui.render").set_display_mode()
+end, { silent = true })
 
 -- Default keymaps. The popup footer advertises `gca` / `gcd` so users
 -- expect them to work out of the box. Set `vim.g.manicule_no_default_keymaps = 1`

@@ -15,6 +15,29 @@
 --                        the buffer (reconcile renders them)
 --   * sticky  = false -> popups are only shown for records whose line
 --                        is in the current viewport (update_viewport_popups)
+--
+-- Display modes (`config.get().ui.display` is the startup default; the
+-- live mode is module state, switched via `M.set_display_mode` /
+-- `:ManiculeDisplay`):
+--   * "float"  -> anchored popups, exactly the original behavior (the
+--                 sticky/viewport gating above applies)
+--   * "eol"    -> one collapsed end-of-line virt-text marker per record
+--                 on its anchor line; the full popup(s) for a line
+--                 expand while the cursor sits on it and close when it
+--                 leaves. Expansion is fed by CursorMoved through
+--                 init.lua's coalesced viewport refresh — chosen over
+--                 CursorHold so expanding doesn't wait 'updatetime',
+--                 and over a new debounced autocmd because the existing
+--                 per-buffer pending flag already coalesces the burst.
+--                 Sticky is a float-mode concern: eol renders markers
+--                 for every record regardless (extmarks are cheap).
+--   * "inline" -> reserved; falls back to "float" (TODO(display-inline))
+--   * "hidden" -> anchor extmarks + line-number tint only; no popups,
+--                 no virtual text
+--
+-- The editor focus exception (BufLeave/WinLeave skip while the comment
+-- editor is opening) applies in every mode, so editing from an expanded
+-- eol popup does not close it mid-edit.
 
 local M = {}
 
@@ -27,6 +50,7 @@ local str = require("manicule.str")
 ---@field bufnr integer Buffer the extmark is placed in
 ---@field extmark_id integer
 ---@field number_extmark_ids? integer[] Decoration-only extmarks per row for multi-line number tint
+---@field eol_extmark_id? integer Decoration-only extmark carrying the collapsed marker ("eol" display mode)
 ---@field popup_winid? integer
 ---@field popup_bufnr? integer
 
@@ -40,6 +64,48 @@ local handles = {}
 -- simply don't toggle; users who want a quiet session run `:ManiculeToggle`
 -- and carry on. See `M.hide` / `M.show` / `M.toggle`.
 local hidden = false
+
+-- Display modes in :ManiculeDisplay cycle order.
+local DISPLAY_MODES = { "float", "eol", "inline", "hidden" }
+
+---@type table<string, true>
+local VALID_DISPLAY_MODES = {}
+for _, mode in ipairs(DISPLAY_MODES) do
+  VALID_DISPLAY_MODES[mode] = true
+end
+
+-- Live display mode. `config.get().ui.display` is only the startup
+-- default; runtime switches (`M.set_display_mode` / :ManiculeDisplay)
+-- land here. In-memory only, like `hidden` — resets on nvim restart.
+---@type string?
+local display_mode = nil
+
+---Resolve the live display mode: the runtime override when set,
+---otherwise the configured startup default, otherwise "eol".
+---@return "float"|"eol"|"inline"|"hidden"
+local function current_display_mode()
+  if display_mode then
+    return display_mode
+  end
+  local cfg = config.get() or {}
+  local configured = (cfg.ui or {}).display
+  if VALID_DISPLAY_MODES[configured] then
+    return configured
+  end
+  return "eol"
+end
+
+---Map the user-facing mode onto the renderer behavior it drives today.
+---@return "float"|"eol"|"hidden"
+local function effective_display_mode()
+  local mode = current_display_mode()
+  if mode == "inline" then
+    -- TODO(display-inline): dedicated inline rendering. Falls back to
+    -- float popups until the follow-up task implements it.
+    return "float"
+  end
+  return mode
+end
 
 -- ---------------------------------------------------------------------------
 -- Highlights
@@ -92,6 +158,11 @@ local function setup_comment_highlights()
   vim.api.nvim_set_hl(0, "ManiculeCommentBorder", border_hl)
   vim.api.nvim_set_hl(0, "ManiculeCommentMeta", meta_hl)
   vim.api.nvim_set_hl(0, "ManiculeLineNr", { link = "DiagnosticSignInfo", default = true })
+  -- "eol" display-mode marker: accent bullet, dim id/counter, dim body.
+  -- `default` links so user overrides win.
+  vim.api.nvim_set_hl(0, "ManiculeEolBullet", { link = "DiagnosticSignInfo", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeEolMeta", { link = "NonText", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeEolBody", { link = "Comment", default = true })
 end
 
 -- ---------------------------------------------------------------------------
@@ -236,6 +307,46 @@ local function record_counter_less(a, b)
   return record_layout_less(a, b)
 end
 
+---Ordering of a same-line popup stack: creation time, then id. Shared
+---by the float stack layout and the eol marker's n/m counter so both
+---agree on which comment is "2/3" on a line.
+---@param a table
+---@param b table
+---@return boolean
+local function record_stack_less(a, b)
+  local ac = tonumber(a.created_at) or 0
+  local bc = tonumber(b.created_at) or 0
+  if ac ~= bc then
+    return ac < bc
+  end
+  return tostring(a.id or "") < tostring(b.id or "")
+end
+
+---Same-line stack position for `record`: 1-based index among the
+---records sharing its uri + start line (in `record_stack_less` order)
+---and the stack's total size — the n/m the popup title and the eol
+---marker show.
+---@param record table
+---@param records table[]
+---@return integer index, integer total
+local function same_line_stack_position(record, records)
+  local my_line = record_start_line(record)
+  local my_id = tostring(record.id or "")
+  local stack = {}
+  for _, other in ipairs(records or {}) do
+    if other.uri == record.uri and record_start_line(other) == my_line then
+      table.insert(stack, other)
+    end
+  end
+  table.sort(stack, record_stack_less)
+  for index, other in ipairs(stack) do
+    if tostring(other.id or "") == my_id then
+      return index, #stack
+    end
+  end
+  return 1, math.max(1, #stack)
+end
+
 ---@param record table
 ---@param candidate table
 ---@return boolean
@@ -341,6 +452,19 @@ local function clear_number_extmarks(handle)
   handle.number_extmark_ids = nil
 end
 
+---Tear down the decoration-only eol virt-text extmark (the "eol"
+---display mode's collapsed marker).
+---@param handle manicule.ui.render.Handle
+local function clear_eol_extmark(handle)
+  if not handle.eol_extmark_id then
+    return
+  end
+  if vim.api.nvim_buf_is_valid(handle.bufnr) then
+    pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.eol_extmark_id)
+  end
+  handle.eol_extmark_id = nil
+end
+
 ---@param handle manicule.ui.render.Handle
 local function close_handle(handle)
   if handle.popup_winid and vim.api.nvim_win_is_valid(handle.popup_winid) then
@@ -354,6 +478,7 @@ local function close_handle(handle)
   handle.popup_bufnr = nil
 
   clear_number_extmarks(handle)
+  clear_eol_extmark(handle)
 
   if handle.extmark_id and handle.extmark_id ~= 0 and vim.api.nvim_buf_is_valid(handle.bufnr) then
     pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.extmark_id)
@@ -393,11 +518,13 @@ end
 ---extmark itself alive (but stripped of its `number_hl_group`). The
 ---anchor must persist so `invalidate = true` keeps tracking line
 ---deletions for orphan detection; only the popup + decoration extmarks
----(extra number-column tints, start-line number_hl_group) are removed.
+---(extra number-column tints, eol marker, start-line number_hl_group)
+---are removed.
 ---@param handle manicule.ui.render.Handle
 local function strip_handle_visuals(handle)
   hide_popup(handle)
   clear_number_extmarks(handle)
+  clear_eol_extmark(handle)
 
   if not handle.extmark_id or handle.extmark_id == 0 then
     return
@@ -579,14 +706,7 @@ local function render_comment_popup(record, handle, records, counter_records, la
         table.insert(stack, other)
       end
     end
-    table.sort(stack, function(a, b)
-      local ac = tonumber(a.created_at) or 0
-      local bc = tonumber(b.created_at) or 0
-      if ac ~= bc then
-        return ac < bc
-      end
-      return tostring(a.id or "") < tostring(b.id or "")
-    end)
+    table.sort(stack, record_stack_less)
 
     for index, other in ipairs(stack) do
       local other_id = tostring(other.id or "")
@@ -832,6 +952,120 @@ local function is_sticky()
 end
 
 -- ---------------------------------------------------------------------------
+-- Eol virt-text rendering ("eol" display mode's collapsed marker)
+-- ---------------------------------------------------------------------------
+
+-- Minimum leftover cells the full marker form needs. Below this the
+-- marker degrades to just `● <short-id>` — a tighter budget would
+-- truncate the body into unreadable noise.
+local EOL_MIN_WIDTH = 20
+
+---Truncate `text` to at most `max_cells` display cells, appending a
+---single-cell ellipsis when cut. `str.truncate` is byte-based; fitting
+---virtual text into leftover window columns needs display width
+---(`strdisplaywidth` — tabs, doublewidth glyphs), hence the char walk.
+---@param text string
+---@param max_cells integer
+---@return string
+local function truncate_display(text, max_cells)
+  if max_cells <= 0 then
+    return ""
+  end
+  if vim.fn.strdisplaywidth(text) <= max_cells then
+    return text
+  end
+  local budget = max_cells - 1 -- reserve the ellipsis cell
+  local out = ""
+  for i = 0, vim.fn.strchars(text) - 1 do
+    local next_out = out .. vim.fn.strcharpart(text, i, 1)
+    if vim.fn.strdisplaywidth(next_out) > budget then
+      break
+    end
+    out = next_out
+  end
+  return out .. "…"
+end
+
+---Render (or refresh) the collapsed end-of-line marker for `record`:
+---`● <short-id> <n>/<m> · <body first line>` as eol virtual text on the
+---anchor's current line, via a sibling decoration-only extmark tracked
+---as `handle.eol_extmark_id`. n/m is the record's same-line stack
+---position; single-record lines omit it.
+---
+---Truncation: the marker's budget is the window width minus the line's
+---display width (minus one gap cell Neovim leaves before eol virt
+---text). The body is display-width truncated to fit; when the whole
+---budget drops below `EOL_MIN_WIDTH` the marker degrades to just
+---`● <short-id>` and the window edge clips whatever still overflows.
+---@param record table
+---@param handle manicule.ui.render.Handle
+---@param records table[] Current record snapshot (same-line stack counter)
+local function render_eol_virt_text(record, handle, records)
+  if not vim.api.nvim_buf_is_valid(handle.bufnr) then
+    return
+  end
+
+  -- Follow the live anchor rather than the stored range so the marker
+  -- tracks mid-edit line moves the same way popups do.
+  local row = record_start_line(record) - 1
+  local live = sync_handle_position(handle)
+  if live then
+    row = live.start_line - 1
+  end
+  local line_count = vim.api.nvim_buf_line_count(handle.bufnr)
+  row = math.max(0, math.min(row, math.max(0, line_count - 1)))
+
+  -- Budget: leftover cells after the line, in the window that shows the
+  -- buffer (falls back to the full screen width for hidden buffers —
+  -- the next reconcile after the buffer surfaces re-truncates).
+  local win_width = vim.o.columns
+  local anchor_win = find_window_for_buffer(handle.bufnr)
+  if anchor_win then
+    win_width = vim.api.nvim_win_get_width(anchor_win)
+  end
+  local line = vim.api.nvim_buf_get_lines(handle.bufnr, row, row + 1, false)[1] or ""
+  local avail = win_width - vim.fn.strdisplaywidth(line) - 1
+
+  local chunks = {
+    { "● ", "ManiculeEolBullet" },
+    { "c" .. short_id(record.id), "ManiculeEolMeta" },
+  }
+  if avail >= EOL_MIN_WIDTH then
+    local stack_index, stack_total = same_line_stack_position(record, records)
+    if stack_total > 1 then
+      table.insert(chunks, { (" %d/%d"):format(stack_index, stack_total), "ManiculeEolMeta" })
+    end
+    local prefix_width = 0
+    for _, chunk in ipairs(chunks) do
+      prefix_width = prefix_width + vim.fn.strdisplaywidth(chunk[1])
+    end
+    local separator = " · "
+    local body_budget = avail - prefix_width - vim.fn.strdisplaywidth(separator)
+    local body = truncate_display(split_lines(record.body)[1] or "", body_budget)
+    if body ~= "" then
+      table.insert(chunks, { separator, "ManiculeEolBody" })
+      table.insert(chunks, { body, "ManiculeEolBody" })
+    end
+  end
+
+  local opts = {
+    virt_text = chunks,
+    virt_text_pos = "eol",
+    priority = 220,
+    -- Pure decoration — no `invalidate`, no `undo_restore`, no end
+    -- range. Orphan detection stays on the primary anchor; this mark
+    -- only carries the collapsed marker text.
+  }
+  if handle.eol_extmark_id then
+    opts.id = handle.eol_extmark_id
+  end
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, handle.bufnr, anchor.ns, row, 0, opts)
+  if ok then
+    handle.eol_extmark_id = id
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- Per-record reconcile helper
 -- ---------------------------------------------------------------------------
 
@@ -878,7 +1112,22 @@ local function reconcile_record(bufnr, record, records, counter_records, tab)
     return
   end
 
-  if is_sticky() then
+  -- Display-mode dispatch. The anchor extmark above renders in every
+  -- mode; what else the record gets depends on the live mode:
+  --   float  -> sticky schedules the popup below; non-sticky popups
+  --             come from `update_viewport_popups` (today's behavior)
+  --   eol    -> collapsed marker here (for every record — viewport /
+  --             sticky is a float concern); the full popup expands from
+  --             the viewport pass while the cursor sits on the line
+  --   hidden -> nothing beyond the anchor
+  local mode = effective_display_mode()
+  if mode == "eol" then
+    render_eol_virt_text(record, handle, records)
+  else
+    clear_eol_extmark(handle)
+  end
+
+  if mode == "float" and is_sticky() then
     local hdl = handle
     vim.schedule(function()
       -- A stale scheduled render must do nothing if, by the time it
@@ -992,6 +1241,11 @@ end
 --- is currently visible in some window showing `bufnr`. Records outside
 --- the viewport have their popup hidden (the handle + extmark survive).
 ---
+--- Display-mode aware: under "eol" the visibility test is the cursor
+--- line instead of the viewport (expand-on-demand — see the header),
+--- and under "hidden" every popup is torn down. "float"/"inline" keep
+--- the viewport behavior.
+---
 --- Gated on `M.is_hidden()` — returns immediately so scroll / resize
 --- autocmds that fire while visuals are suppressed don't re-paint.
 ---@param bufnr integer
@@ -1007,6 +1261,17 @@ function M.update_viewport_popups(bufnr, records, counter_records)
 
   local tab = handles[bufnr]
   if not tab then
+    return
+  end
+
+  local mode = effective_display_mode()
+  if mode == "hidden" then
+    -- Anchors only: no popups in hidden mode, ever. Sweep untracked
+    -- tagged floats too so a mode switch clears strays.
+    for _, handle in pairs(tab) do
+      hide_popup(handle)
+    end
+    prune_orphan_popups()
     return
   end
 
@@ -1034,10 +1299,26 @@ function M.update_viewport_popups(bufnr, records, counter_records)
   local layouts = {}
   if active_range then
     local visible = {}
-    for _, record in ipairs(records or {}) do
-      local line = record_start_line(record)
-      if line >= active_range.top and line <= active_range.bot then
-        table.insert(visible, record)
+    if mode == "eol" then
+      -- Expand-on-demand: only records covering the cursor line (in the
+      -- window that owns this buffer's popups) show their full popup;
+      -- everything else stays a collapsed eol marker. CursorMoved feeds
+      -- this through init.lua's coalesced viewport refresh, so moving
+      -- onto a line expands and moving off closes.
+      local cursor_line = vim.api.nvim_win_get_cursor(active_range.winid)[1]
+      for _, record in ipairs(records or {}) do
+        local start_line = record_start_line(record)
+        local end_line = record_end_line(record) or start_line
+        if cursor_line >= start_line and cursor_line <= end_line then
+          table.insert(visible, record)
+        end
+      end
+    else
+      for _, record in ipairs(records or {}) do
+        local line = record_start_line(record)
+        if line >= active_range.top and line <= active_range.bot then
+          table.insert(visible, record)
+        end
       end
     end
     table.sort(visible, record_layout_less)
@@ -1258,15 +1539,12 @@ function M.hide()
   end
 end
 
---- Restore visuals across every loaded buffer by re-running the same
---- reconcile + viewport-refresh path used at setup. Safe to call even
---- when already visible (idempotent no-op). Lazy-requires `manicule.store`
---- so the render module doesn't grow a hard dep on persistence.
-function M.show()
-  if not hidden then
-    return
-  end
-  hidden = false
+---Re-render every loaded buffer from the store snapshot — the same
+---reconcile + viewport-refresh path used at setup. Shared by `M.show`
+---and `M.set_display_mode` so a visibility restore and a live mode
+---switch repaint identically. Lazy-requires `manicule.store` so the
+---render module doesn't grow a hard dep on persistence.
+local function repaint_all_loaded()
   local ok_store, store = pcall(require, "manicule.store")
   if not ok_store then
     return
@@ -1289,6 +1567,17 @@ function M.show()
   end
 end
 
+--- Restore visuals across every loaded buffer by re-running the same
+--- reconcile + viewport-refresh path used at setup. Safe to call even
+--- when already visible (idempotent no-op).
+function M.show()
+  if not hidden then
+    return
+  end
+  hidden = false
+  repaint_all_loaded()
+end
+
 --- Flip the visibility flag and apply. Fires a `User ManiculeVisibility`
 --- autocmd with `data = { hidden = <bool> }` so external observers can
 --- react (status line, etc).
@@ -1304,9 +1593,48 @@ function M.toggle()
   })
 end
 
+--- Return the live display mode (see the header for what each mode
+--- renders). Falls back to `config.get().ui.display` until the first
+--- runtime switch.
+---@return "float"|"eol"|"inline"|"hidden"
+function M.display_mode()
+  return current_display_mode()
+end
+
+--- Switch the display mode and repaint every loaded buffer so the
+--- change is visible immediately. `mode = nil`/`""` cycles
+--- float → eol → inline → hidden → float (`:ManiculeDisplay` bare /
+--- `<Plug>(manicule-display-cycle)`); an unknown mode is rejected with
+--- an ERROR notify and leaves the current mode untouched.
+---@param mode? "float"|"eol"|"inline"|"hidden"
+---@return string? mode, string? err
+function M.set_display_mode(mode)
+  if mode == nil or mode == "" then
+    local cur = current_display_mode()
+    for index, candidate in ipairs(DISPLAY_MODES) do
+      if candidate == cur then
+        mode = DISPLAY_MODES[index % #DISPLAY_MODES + 1]
+        break
+      end
+    end
+  end
+  if not VALID_DISPLAY_MODES[mode] then
+    local err = ('manicule: display mode must be "float", "eol", "inline", or "hidden", got %q'):format(tostring(mode))
+    vim.notify(err, vim.log.levels.ERROR)
+    return nil, err
+  end
+  display_mode = mode
+  -- Repaint no-ops while visuals are toggled off (`M.hide`); the mode
+  -- still sticks and the next `M.show` paints with it.
+  repaint_all_loaded()
+  vim.notify(("manicule: display = %s"):format(mode), vim.log.levels.INFO)
+  return mode
+end
+
 --- Internal: reset state. Used by tests.
 function M._reset_for_tests()
   hidden = false
+  display_mode = nil
   M.clear_all()
 end
 

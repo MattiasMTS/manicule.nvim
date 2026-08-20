@@ -12,6 +12,7 @@ local M = {}
 ---@field cancel_keys string[] Keys that cancel the editor
 ---@field opacity number Floating-window transparency (0.0 = opaque, 1.0 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
+---@field display "float"|"eol"|"inline"|"hidden" Startup comment display mode. "float" anchored popups, "eol" end-of-line virtual text expanding to the popup on the cursor line, "inline" (falls back to float until implemented), "hidden" anchors only. Runtime changes via `:ManiculeDisplay`.
 ---@field sink_picker? manicule.SinkPicker Custom picker for choosing a send sink
 
 ---@class manicule.StoreConfig
@@ -91,6 +92,13 @@ M.defaults = {
     cancel_keys = { "q" },
     opacity = 0.0,
     sticky = false, -- true = always show popups for visible records; false = only when in viewport
+    -- How comment records paint: "float" anchored popups, "eol"
+    -- end-of-line virtual text that expands to the full popup while the
+    -- cursor is on the line, "inline" (falls back to float until
+    -- implemented), "hidden" anchors/line-number tint only. "eol" is the
+    -- default because floats cover code on long lines; this is only the
+    -- startup mode — cycle live with `:ManiculeDisplay`.
+    display = "eol",
   },
 }
 
@@ -163,11 +171,16 @@ function M.setup(opts)
       ["ui.cancel_keys"] = { opts.ui.cancel_keys, "table", true },
       ["ui.opacity"] = { opts.ui.opacity, "number", true },
       ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
+      ["ui.display"] = { opts.ui.display, "string", true },
       ["ui.sink_picker"] = { opts.ui.sink_picker, "function", true },
     })
     local opacity = opts.ui.opacity
     if opacity ~= nil and (opacity ~= opacity or opacity < 0 or opacity > 1) then
       error(("manicule: ui.opacity must be between 0.0 and 1.0, got %s"):format(tostring(opacity)))
+    end
+    local display = opts.ui.display
+    if display ~= nil and display ~= "float" and display ~= "eol" and display ~= "inline" and display ~= "hidden" then
+      error(('manicule: ui.display must be "float", "eol", "inline", or "hidden", got %q'):format(tostring(display)))
     end
   end
   -- `tbl_deep_extend("force", …)` replaces list/array values wholesale

@@ -3,7 +3,9 @@ local H = require("helpers")
 local ctx
 
 local function setup_env()
-  ctx = H.setup()
+  -- Several workflows assert on float popups; the shipped default is
+  -- `ui.display = "eol"`, so opt into float mode explicitly.
+  ctx = H.setup({ ui = { display = "float" } })
   H.edit_project_file(ctx, "src/example.lua", {
     "local value = 1",
     "return value",

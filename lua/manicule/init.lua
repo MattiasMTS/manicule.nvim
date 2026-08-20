@@ -304,8 +304,11 @@ local function paint_buffer(bufnr, sticky)
   reconcile_records(bufnr, records, counter_records)
   -- Mirror `refresh_viewport`: the non-sticky viewport update is a no-op
   -- under sticky (reconcile already schedules the popups), so skip the
-  -- call entirely when sticky to match the old behavior.
-  if not sticky and vim.api.nvim_buf_is_valid(bufnr) then
+  -- call entirely when sticky to match the old behavior. The "eol"
+  -- display mode is the exception — its cursor-line popup expansion is
+  -- driven by this viewport pass, so it always runs (sticky is a
+  -- float-mode concern).
+  if (not sticky or render.display_mode() == "eol") and vim.api.nvim_buf_is_valid(bufnr) then
     render.update_viewport_popups(bufnr, records, counter_records)
   end
 end
@@ -424,7 +427,11 @@ function refresh_viewport(bufnr)
     return
   end
   local cfg = require("manicule.config").get()
-  if (cfg.ui or {}).sticky then
+  -- Sticky suppresses the viewport pass only for float-style popups
+  -- (reconcile already scheduled them all). The "eol" display mode
+  -- drives its cursor-line popup expansion through this pass, so it
+  -- keeps receiving CursorMoved-fed updates regardless of `ui.sticky`.
+  if (cfg.ui or {}).sticky and require("manicule.ui.render").display_mode() ~= "eol" then
     return
   end
   -- Single-pass: one identify + one store read derives both result sets,
