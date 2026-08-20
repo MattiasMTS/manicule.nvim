@@ -59,18 +59,64 @@ function M.merge_base(root, a, b)
   return trim(result.stdout), nil
 end
 
+---Untracked paths from NUL-separated `git status --porcelain=v1 -z`
+---output. Preferred over `ls-files --others`: status uses the untracked
+---cache and fsmonitor, ls-files always walks the worktree (~3x slower on
+---large repos). Status collapses fully-untracked directories to `dir/`;
+---those are expanded with a *scoped* ls-files, which is cheap because it
+---only walks the collapsed directory.
+---@param root string
+---@param stdout string
+---@return string[] paths
+local function untracked_from_status(root, stdout)
+  local paths = {}
+  local collapsed = {}
+  for record in stdout:gmatch("[^%z]+") do
+    local path = record:match("^%?%? (.+)$")
+    if path then
+      if path:sub(-1) == "/" then
+        table.insert(collapsed, path)
+      else
+        table.insert(paths, path)
+      end
+    end
+  end
+  -- Expand ALL collapsed directories with one scoped ls-files call; the
+  -- walk only descends into those directories, and one subprocess stays
+  -- cheap regardless of how many directories collapsed.
+  if #collapsed > 0 then
+    local argv = { "ls-files", "--others", "--exclude-standard", "--" }
+    vim.list_extend(argv, collapsed)
+    local expanded = git(root, unpack(argv))
+    if expanded.code == 0 then
+      for sub in expanded.stdout:gmatch("[^\n]+") do
+        table.insert(paths, sub)
+      end
+    end
+  end
+  return paths
+end
+
 ---Changed files vs `base`, including untracked files as "A".
 ---@param root string
 ---@param base string
 ---@return {path: string, status: "M"|"A"|"D"}[]|nil, string|nil err
 function M.changed_files(root, base)
-  local result = git(root, "diff", "--name-status", "--no-renames", base)
+  -- Run diff and status concurrently; each costs ~100ms on large repos
+  -- and they are independent.
+  local diff_job = vim.system({ "git", "-C", root, "diff", "--name-status", "--no-renames", base }, { text = true })
+  local status_job = vim.system(
+    { "git", "-C", root, "status", "--porcelain=v1", "-z", "--no-renames" },
+    { text = true }
+  )
+  local result = diff_job:wait()
+  local untracked = status_job:wait()
   if result.code ~= 0 then
-    return nil, ("manicule: git diff failed: %s"):format(trim(result.stderr))
+    return nil, ("manicule: git diff failed: %s"):format(trim(result.stderr or ""))
   end
   local entries = {}
   local seen = {}
-  for line in result.stdout:gmatch("[^\n]+") do
+  for line in (result.stdout or ""):gmatch("[^\n]+") do
     local status, path = line:match("^(%a)%s+(.+)$")
     if status and path and not seen[path] then
       seen[path] = true
@@ -81,9 +127,8 @@ function M.changed_files(root, base)
       table.insert(entries, { path = path, status = status })
     end
   end
-  local untracked = git(root, "ls-files", "--others", "--exclude-standard")
   if untracked.code == 0 then
-    for path in untracked.stdout:gmatch("[^\n]+") do
+    for _, path in ipairs(untracked_from_status(root, untracked.stdout or "")) do
       if not seen[path] then
         seen[path] = true
         table.insert(entries, { path = path, status = "A" })

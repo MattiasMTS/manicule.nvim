@@ -142,6 +142,26 @@ describe("manicule review git plumbing", function()
     assert.are.equal("target.txt", table.concat(vim.fn.readfile(files[1].left), "\n"))
   end)
 
+  it("expands untracked files inside fully untracked directories", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, { ["a.lua"] = { "return 1" } })
+    -- A fully untracked directory: `git status --porcelain` collapses it
+    -- to `?? newdir/`, so changed_files must expand it to real files.
+    vim.fn.mkdir(root .. "/newdir/sub", "p")
+    vim.fn.writefile({ "x" }, root .. "/newdir/one.lua")
+    vim.fn.writefile({ "y" }, root .. "/newdir/sub/two.lua")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local changed = assert(G.changed_files(root, base))
+    local by_path = {}
+    for _, entry in ipairs(changed) do
+      by_path[entry.path] = entry.status
+    end
+    assert.are.equal("A", by_path["newdir/one.lua"])
+    assert.are.equal("A", by_path["newdir/sub/two.lua"])
+    assert.is_nil(by_path["newdir/"])
+  end)
+
   it("computes merge-base", function()
     local G = require("manicule.review.git")
     local root, git = H.git_repo(ctx, { ["a.txt"] = { "one" } })
