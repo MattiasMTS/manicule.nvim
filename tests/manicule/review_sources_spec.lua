@@ -258,9 +258,42 @@ describe("manicule review sources", function()
 
     assert.is_nil(err)
     assert.are.equal("pr 42: Fix the frobnicator", job.label)
+    -- The PR number must reach the session's sink context, or
+    -- :ManiculeReviewFinish github falls back to `gh pr view` on the
+    -- current branch and posts to the wrong PR.
+    assert.are.same({ pr = 42 }, job.sink_ctx)
     assert.are.equal(1, #job.files)
     assert.are.equal("a.lua", job.files[1].path)
     assert.are.equal(root .. "/a.lua", job.files[1].right)
+  end)
+
+  it("resolves pr <n> with head not checked out, staging literal C-quotable paths", function()
+    local S = require("manicule.review.sources")
+    local root, git = H.git_repo(ctx, { ["å.txt"] = { "base content" } })
+    local base_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+    git("checkout", "-q", "-b", "pr-branch")
+    vim.fn.writefile({ "head content" }, root .. "/å.txt")
+    git("commit", "-aqm", "pr change")
+    local head_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+    -- Review the PR WITHOUT checking it out: both sides get staged.
+    git("checkout", "-q", "main")
+
+    local bin = fake_gh(ctx.artifact_root, base_oid, head_oid)
+    local saved_path = vim.env.PATH
+    vim.env.PATH = bin .. ":" .. saved_path
+
+    local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s19" })
+    vim.env.PATH = saved_path
+
+    assert.is_nil(err)
+    assert.are.same({ pr = 42 }, job.sink_ctx)
+    assert.are.equal(1, #job.files)
+    -- With core.quotePath=true a non -z diff reports `"\303\245.txt"`;
+    -- the staged pair must use the literal path on both sides.
+    assert.are.equal("å.txt", job.files[1].path)
+    assert.are.equal("M", job.files[1].status)
+    assert.are.equal("base content", table.concat(vim.fn.readfile(job.files[1].left), "\n"))
+    assert.are.equal("head content", table.concat(vim.fn.readfile(job.files[1].right), "\n"))
   end)
 
   describe("pr comment import", function()

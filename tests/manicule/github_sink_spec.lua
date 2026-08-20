@@ -179,6 +179,10 @@ describe("manicule github sink", function()
 
   it("ctx.pr overrides gh pr view", function()
     local gh = fake_gh(ctx.artifact_root)
+    -- Make `gh pr view` fail loudly: with ctx.pr set (as the pr review
+    -- source sets it via sink_ctx), the send must never consult the
+    -- current branch's PR.
+    gh.set_no_pr()
     vim.env.PATH = gh.bin .. ":" .. saved_path
     local spec = require("manicule.sinks.github").setup({})
 

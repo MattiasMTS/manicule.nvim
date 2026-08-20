@@ -182,6 +182,11 @@ M.register({
     if type(meta.title) == "string" and meta.title ~= "" then
       label = ("%s: %s"):format(label, meta.title)
     end
+    -- Carry the PR number into the session's sink context: without it,
+    -- `:ManiculeReviewFinish github` falls back to `gh pr view` on the
+    -- CURRENT branch and posts a non-checked-out PR's review to the
+    -- wrong PR (or fails confusingly).
+    local sink_ctx = { pr = tonumber(number) }
 
     if head == meta.headRefOid then
       -- PR head is checked out: right side = worktree, normal pairs.
@@ -198,7 +203,7 @@ M.register({
       -- Right side = real worktree files, so existing PR review comments
       -- can anchor to them. Best-effort: failures notify and continue.
       require("manicule.review.import").github_pr(root, number)
-      return { files = G.stage_baseline(root, base, changed, stage_dir), label = label }
+      return { files = G.stage_baseline(root, base, changed, stage_dir), label = label, sink_ctx = sink_ctx }
     end
 
     -- Head not checked out: stage BOTH sides (comments land on staged
@@ -209,32 +214,28 @@ M.register({
       ("manicule: %s head is not checked out; skipping GitHub comment import"):format(label),
       vim.log.levels.INFO
     )
-    local diff = G.run({ "git", "-C", root, "diff", "--name-status", "--no-renames", base, meta.headRefOid })
+    -- `-z` keeps paths literal: without it core.quotePath=true C-quotes
+    -- non-ASCII names and the quoted string would become entry.path.
+    local diff = G.run({ "git", "-C", root, "diff", "--name-status", "--no-renames", "-z", base, meta.headRefOid })
     if diff.code ~= 0 then
       return nil, ("manicule: git diff failed: %s"):format(vim.trim(diff.stderr))
     end
     local files = {}
-    for line in diff.stdout:gmatch("[^\n]+") do
-      local status, path = line:match("^(%a)%s+(.+)$")
-      if status and path then
-        if status ~= "A" and status ~= "D" then
-          status = "M"
-        end
-        local left = stage_dir .. "/base/" .. path
-        local right = stage_dir .. "/head/" .. path
-        for side, ref in pairs({ [left] = base, [right] = meta.headRefOid }) do
-          vim.fn.mkdir(vim.fn.fnamemodify(side, ":h"), "p")
-          local fd = assert(io.open(side, "wb"))
-          fd:write(G.show_file(root, ref, path) or "")
-          fd:close()
-        end
-        table.insert(files, { left = left, right = right, status = status, path = path })
+    for _, entry in ipairs(G.parse_name_status(diff.stdout)) do
+      local left = stage_dir .. "/base/" .. entry.path
+      local right = stage_dir .. "/head/" .. entry.path
+      for side, ref in pairs({ [left] = base, [right] = meta.headRefOid }) do
+        vim.fn.mkdir(vim.fn.fnamemodify(side, ":h"), "p")
+        local fd = assert(io.open(side, "wb"))
+        fd:write(G.show_file(root, ref, entry.path) or "")
+        fd:close()
       end
+      table.insert(files, { left = left, right = right, status = entry.status, path = entry.path })
     end
     if #files == 0 then
       return nil, ("manicule: no changes in %s"):format(label)
     end
-    return { files = files, label = label }
+    return { files = files, label = label, sink_ctx = sink_ctx }
   end,
 })
 
