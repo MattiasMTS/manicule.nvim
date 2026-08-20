@@ -11,6 +11,7 @@ local sinks = {}
 local builtin_integrations = {
   clipboard = "manicule.sinks.clipboard",
   cmux = "manicule.sinks.cmux",
+  github = "manicule.sinks.github",
   socket = "manicule.sinks.socket",
 }
 
@@ -19,6 +20,9 @@ local builtin_defaults = {
     enabled = true,
   },
   cmux = {
+    enabled = true,
+  },
+  github = {
     enabled = true,
   },
   socket = {

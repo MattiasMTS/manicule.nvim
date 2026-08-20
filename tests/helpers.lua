@@ -44,6 +44,7 @@ function H.setup(opts)
     sinks = {
       clipboard = false,
       cmux = false,
+      github = false,
       socket = false,
     },
   }

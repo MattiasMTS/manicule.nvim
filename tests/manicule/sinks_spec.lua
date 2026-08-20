@@ -60,6 +60,7 @@ describe("manicule sink helpers", function()
     require("manicule.sinks")._reset()
     local bin = H.fake_cmux(ctx)
     require("manicule.sinks").setup({
+      github = false,
       clipboard = {
         pre_text = "clipboard header",
         post_text = "clipboard footer",
@@ -252,6 +253,7 @@ describe("manicule sink helpers", function()
     require("manicule.sinks")._reset()
     require("manicule.sinks").setup({
       clipboard = false,
+      github = false,
       cmux = {
         enabled = true,
         command = ctx.state .. "/missing-cmux",

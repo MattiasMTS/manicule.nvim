@@ -216,6 +216,9 @@ Built-ins:
 - `clipboard` copies formatted comments to the `+` register.
 - `cmux` sends a markdown review batch to a cmux coding-agent surface and keeps
   comments in Manicule by default so you can verify fixes before resolving them.
+- `github` posts the batch as a pull-request review via the `gh` CLI (options:
+  `event`, `pre_text`, `clear_on_success`; PR taken from `ctx.pr` or the
+  current branch).
 
 `cmux.enabled` is boolean. When enabled, the integration registers only when a
 cmux workspace and usable cmux executable are available. Agent discovery

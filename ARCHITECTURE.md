@@ -38,7 +38,7 @@ lua/manicule/ui/quickfix.lua    quickfix formatting and refresh
 lua/manicule/review.lua         review session core (start/open/next/prev/finish/stop)
 lua/manicule/review/git.lua     git plumbing (rev-parse, merge-base, changed files, staging)
 lua/manicule/review/sources.lua resolver registry (dirs, git ref, pr via gh CLI)
-lua/manicule/sinks/             sink registry and bundled sinks (clipboard, cmux, socket)
+lua/manicule/sinks/             sink registry and bundled sinks (clipboard, cmux, github, socket)
 ```
 
 `init.lua` lazy-requires most modules so command/key based lazy-loading has
@@ -277,6 +277,11 @@ worktree right). One active session at a time, in its own tab page.
   (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI).
 - `register(resolver)` prepends to registry → user resolvers shadow builtins.
 - All resolvers return `{files: [{left, right, status, path}], label}`.
+
+**GitHub sink** (`lua/manicule/sinks/github.lua`): posts the batch as a PR
+review via `gh api` (PR from `ctx.pr` or `gh pr view`, repo from
+`gh repo view`; argv-only, JSON body via `--input` temp file; registers only
+when `gh` is executable; `clear_on_success = false` by default).
 
 **Socket sink** (`lua/manicule/sinks/socket.lua`):
 - Generic JSONL-over-unix-socket transport; bundled, enabled by default.

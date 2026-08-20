@@ -80,30 +80,48 @@ local function inferred_root(comment)
   return parts and parts.git_root or nil
 end
 
+---Return the project-relative path for a comment, or nil when the
+---comment's URI cannot be resolved against a project root (session-scope
+---temp buffers, files outside the root, unparseable URIs).
+---@param comment table
+---@return string|nil
+function M.relative_path(comment)
+  local abs = uri_to_path(comment.uri)
+  local root = inferred_root(comment)
+  if not (abs and root) then
+    return nil
+  end
+  return relpath(root, abs)
+end
+
 ---Return an absolute or project-relative path for a comment.
 ---@param comment table
 ---@return string
 function M.display_path(comment)
-  local abs = uri_to_path(comment.uri)
-  local root = inferred_root(comment)
-  if abs and root then
-    local rel = relpath(root, abs)
-    if rel then
-      return rel
-    end
+  local rel = M.relative_path(comment)
+  if rel then
+    return rel
   end
-  return abs or comment.uri or "?"
+  return uri_to_path(comment.uri) or comment.uri or "?"
+end
+
+---Return the 1-indexed start and end lines for a comment.
+---@param comment table
+---@return integer start_lnum, integer end_lnum
+function M.line_span(comment)
+  local range = comment.range or {}
+  local start = range.start or { 0, 0 }
+  local finish = range["end_"] or start
+  local s = (start[1] or 0) + 1
+  local e = (finish[1] or start[1] or 0) + 1
+  return s, e
 end
 
 ---Return a 1-indexed display range for a comment.
 ---@param comment table
 ---@return string
 function M.display_range(comment)
-  local range = comment.range or {}
-  local start = range.start or { 0, 0 }
-  local finish = range["end_"] or start
-  local s = (start[1] or 0) + 1
-  local e = (finish[1] or start[1] or 0) + 1
+  local s, e = M.line_span(comment)
   return e ~= s and (s .. "-" .. e) or tostring(s)
 end
 
