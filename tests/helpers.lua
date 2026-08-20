@@ -52,6 +52,7 @@ function H.setup(opts)
 end
 
 function H.teardown(ctx)
+  pcall(vim.cmd, "silent! tabonly")
   pcall(vim.cmd, "silent! only")
   pcall(vim.cmd, "silent! %bwipeout!")
   pcall(function()

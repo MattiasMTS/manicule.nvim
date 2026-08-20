@@ -134,7 +134,10 @@ end
 ---@param title string
 ---@return boolean
 local function is_manicule_title(title)
-  return type(title) == "string" and title:match("^" .. state.title_prefix) ~= nil
+  -- Match the exact `make_title` shape (`<prefix> (N)`), not a bare
+  -- prefix: review-mode panels are titled `manicule-review (...)` and
+  -- must never be claimed (and stomped) by this module's refresh.
+  return type(title) == "string" and title:match("^" .. vim.pesc(state.title_prefix) .. " %(") ~= nil
 end
 
 ---Read the title of the list ACTUALLY displayed in `winid`. Unlike a

@@ -47,21 +47,6 @@ local function close_session_windows()
   end
 end
 
-local function set_quickfix(files, label)
-  local items = {}
-  for _, pair in ipairs(files) do
-    table.insert(items, {
-      filename = pair.status == "D" and pair.left or pair.right,
-      lnum = 1,
-      text = ("[%s] %s"):format(pair.status, pair.path),
-    })
-  end
-  vim.fn.setqflist({}, " ", {
-    title = ("manicule-review (%s)"):format(label),
-    items = items,
-  })
-end
-
 ---@param index integer
 function M.open(index)
   if not session then
@@ -129,8 +114,9 @@ function M.start(opts)
     index = 1,
     tab = vim.api.nvim_get_current_tabpage(),
   }
-  set_quickfix(session.files, session.label)
   M.open(1)
+  -- The panel owns the review quickfix list (files/comments views);
+  -- review.lua itself never writes the qf stack.
   require("manicule.review.panel").open()
   return true
 end
@@ -142,10 +128,18 @@ function M.stop()
   require("manicule.review.panel").close()
   local tab = session.tab
   session = nil
-  if vim.api.nvim_tabpage_is_valid(tab) and #vim.api.nvim_list_tabpages() > 1 then
-    vim.api.nvim_set_current_tabpage(tab)
-    vim.cmd("silent! diffoff!")
-    vim.cmd("tabclose")
+  if vim.api.nvim_tabpage_is_valid(tab) then
+    local tab_count = #vim.api.nvim_list_tabpages()
+    if tab_count > 1 then
+      vim.api.nvim_set_current_tabpage(tab)
+      vim.cmd("silent! diffoff!")
+      vim.cmd("tabclose")
+    else
+      -- Single tab: close all windows and buffers to clean up
+      vim.cmd("silent! diffoff!")
+      vim.cmd("silent! only")
+      vim.cmd("silent! enew")
+    end
   end
 end
 

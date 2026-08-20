@@ -249,7 +249,9 @@ describe("manicule review session", function()
       local bufnr = vim.api.nvim_win_get_buf(winid)
       if vim.bo[bufnr].buftype == "quickfix" then
         local ok, info = pcall(vim.fn.getqflist, { winid = winid, title = 1 })
-        if ok and info.title and info.title:find("manicule-review") then
+        -- Plain find: `-` is a Lua pattern quantifier and would never
+        -- match the literal hyphen in the title.
+        if ok and info.title and info.title:find("manicule-review", 1, true) then
           found_panel = true
           panel_winid = winid
           break
@@ -319,10 +321,12 @@ describe("manicule review session", function()
     end
     assert.is_truthy(panel_winid)
 
-    -- Switch to panel and press <CR> on row 2
+    -- Switch to panel and press <CR> on row 2 THROUGH buffer-local
+    -- mappings (normal! bypasses maps and "\\<CR>" is literal chars).
     vim.api.nvim_set_current_win(panel_winid)
     vim.api.nvim_win_set_cursor(panel_winid, { 2, 0 })
-    vim.cmd("normal! \\<CR>")
+    local cr = vim.api.nvim_replace_termcodes("<CR>", true, false, true)
+    vim.api.nvim_feedkeys(cr, "x", false)
 
     -- Session index should now be 2
     assert.are.equal(2, R.state().index)

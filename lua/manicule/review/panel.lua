@@ -107,6 +107,19 @@ local function find_panel_window()
   return nil
 end
 
+---Resolve the id of the list DISPLAYED in the panel window, so reads
+---and in-place replaces target the panel's list even when qf history
+---or another plugin moved the global current stack entry elsewhere.
+---@param winid integer
+---@return integer id 0 when unresolvable (falls back to current list)
+local function panel_list_id(winid)
+  local ok, info = pcall(vim.fn.getqflist, { winid = winid, id = 0 })
+  if ok and type(info) == "table" and type(info.id) == "number" then
+    return info.id
+  end
+  return 0
+end
+
 local function refresh_current_view()
   local winid = find_panel_window()
   if not winid then
@@ -119,7 +132,7 @@ local function refresh_current_view()
   else
     items = build_comments_items()
   end
-  vim.fn.setqflist({}, "r", { title = get_panel_title(), items = items })
+  vim.fn.setqflist({}, "r", { id = panel_list_id(winid), title = get_panel_title(), items = items })
   -- Restore cursor, clamped
   if vim.api.nvim_win_is_valid(winid) then
     local max_row = math.max(1, #items)
@@ -136,8 +149,11 @@ local function setup_panel_keymaps(bufnr)
   -- <CR> in files view calls review.open(idx)
   vim.keymap.set("n", "<CR>", function()
     if current_view == "files" then
-      local row = vim.api.nvim_win_get_cursor(0)[1]
-      local ok, info = pcall(vim.fn.getqflist, { items = 1 })
+      local winid = vim.api.nvim_get_current_win()
+      local row = vim.api.nvim_win_get_cursor(winid)[1]
+      -- Read the list displayed in THIS window, not the global current
+      -- stack entry, so qf history can't desync row -> pair mapping.
+      local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
       if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
         return
       end
@@ -150,8 +166,9 @@ local function setup_panel_keymaps(bufnr)
         require("manicule.review").open(data.pair_index)
       end
     else
-      -- Comments view: default qf <CR> behavior (jump to comment)
-      vim.cmd("normal! \\<CR>")
+      -- Comments view: default (unmapped) qf <CR> jumps to the entry.
+      local cr = vim.api.nvim_replace_termcodes("<CR>", true, false, true)
+      vim.api.nvim_feedkeys(cr, "n", false)
     end
   end, vim.tbl_extend("keep", { desc = "Manicule review: open pair or jump to comment" }, map_opts))
 
@@ -187,12 +204,17 @@ function M.open()
   local height = math.min(#items + 1, 8)
   vim.cmd(("botright %d copen"):format(height))
 
-  -- Setup keymaps
-  local bufnr = vim.api.nvim_win_get_buf(0)
-  setup_panel_keymaps(bufnr)
-
-  -- Store panel winid
-  panel_winid = vim.api.nvim_get_current_win()
+  -- Find and setup the qf window that was just opened
+  local qf_winid = nil
+  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local bufnr = vim.api.nvim_win_get_buf(winid)
+    if vim.bo[bufnr].buftype == "quickfix" then
+      qf_winid = winid
+      setup_panel_keymaps(bufnr)
+      panel_winid = winid
+      break
+    end
+  end
 
   -- Return focus to diff (right-side window)
   -- Find the first non-qf window in the tab
@@ -205,9 +227,7 @@ function M.open()
   end
 
   -- Setup live refresh on comment events (only when in files view)
-  if not augroup then
-    augroup = vim.api.nvim_create_augroup("ManiculeReviewPanel", { clear = true })
-  end
+  augroup = vim.api.nvim_create_augroup("ManiculeReviewPanel", { clear = true })
   vim.api.nvim_create_autocmd("User", {
     group = augroup,
     pattern = { "ManiculeAdded", "ManiculeDeleted", "ManiculeEdited", "ManiculeResolved" },
@@ -220,14 +240,17 @@ function M.open()
 end
 
 function M.close()
+  -- Close panel window if it exists
   if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
-    vim.api.nvim_win_close(panel_winid, true)
+    pcall(vim.api.nvim_win_close, panel_winid, true)
   end
-  panel_winid = nil
+  -- Clean up autocmds
   if augroup then
-    vim.api.nvim_del_augroup_by_id(augroup)
-    augroup = nil
+    pcall(vim.api.nvim_del_augroup_by_id, augroup)
   end
+  -- Reset module state
+  panel_winid = nil
+  augroup = nil
   current_view = "files"
 end
 
