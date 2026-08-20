@@ -172,7 +172,7 @@ local function build_review(comments, opts, event)
     body = body,
     comments = review_comments,
   }
-  return payload, skipped + skipped_imported, replies, review_records, already_sent
+  return payload, skipped, skipped_imported, replies, review_records, already_sent
 end
 
 ---Mark each record as posted (`meta.github_sent = os.time()`) and
@@ -272,6 +272,21 @@ function M.setup(opts)
     label = "GitHub PR review",
     description = "post comments as a pull-request review via gh",
     clear_on_success = opts.clear_on_success == true,
+    -- Delivery contract with core's `clear_on_success` handling: this
+    -- sink stamps `meta.github_sent` (via `mark_sent`) on exactly the
+    -- records it delivered, so on success core clears ONLY records
+    -- carrying that marker. Records `build_review` diverts out of the
+    -- payload (no repository-relative path, imported from GitHub)
+    -- never get the marker and therefore survive the auto-clear.
+    -- Records marked by an EARLIER send also carry it and are cleared
+    -- deliberately: they were delivered then, so clearing completes
+    -- that hand-off — keeping them would strand records that can
+    -- never post again.
+    sent_marker = "github_sent",
+    -- `:ManiculeSend github <verdict>` may pass a per-send review
+    -- event via ctx.event; the command layer refuses verdicts for
+    -- sinks without this flag.
+    accepts_verdict = true,
     pre_text = opts.pre_text,
     validate = function(ctx)
       if not helpers.executable(cli(opts)) then
@@ -307,19 +322,43 @@ function M.setup(opts)
         event = ctx.event
       end
       local cwd = resolve_cwd(ctx, comments)
-      local review, skipped, replies, review_records, already_sent = build_review(comments, opts, event)
+      local review, skipped, skipped_imported, replies, review_records, already_sent =
+        build_review(comments, opts, event)
+      -- Skipped records are withheld from GitHub but stay local (the
+      -- `sent_marker` contract keeps them out of any auto-clear); the
+      -- user must still SEE what was withheld, not just the count
+      -- buried in the posted review body.
+      local function notify_skipped()
+        if skipped == 0 and skipped_imported == 0 then
+          return
+        end
+        local parts = {}
+        if skipped > 0 then
+          table.insert(parts, ("%d without a repository-relative path"):format(skipped))
+        end
+        if skipped_imported > 0 then
+          table.insert(parts, ("%d imported from GitHub"):format(skipped_imported))
+        end
+        vim.notify(
+          "manicule: github sink skipped " .. table.concat(parts, ", ") .. " (kept locally)",
+          vim.log.levels.WARN
+        )
+      end
       if #review.comments == 0 and #replies == 0 then
         if already_sent > 0 then
           vim.notify(
             ("manicule: github sink: %d already sent; nothing new to post"):format(already_sent),
             vim.log.levels.INFO
           )
+          notify_skipped()
           cb(true, nil)
           return
         end
         cb(
           false,
-          ("manicule: github sink found no comments with a resolvable repository path (%d skipped)"):format(skipped)
+          ("manicule: github sink found no comments with a resolvable repository path (%d skipped)"):format(
+            skipped + skipped_imported
+          )
         )
         return
       end
@@ -360,6 +399,7 @@ function M.setup(opts)
         )
         return
       end
+      notify_skipped()
       cb(true, nil)
     end,
   }

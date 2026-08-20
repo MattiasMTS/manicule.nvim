@@ -70,6 +70,18 @@ vim.api.nvim_create_user_command("ManiculeSend", function(opts)
       )
       return
     end
+    -- A verdict only means something to a sink that consumes ctx.event
+    -- (`spec.accepts_verdict`, e.g. github). Refuse rather than silently
+    -- dropping the verdict and sending anyway. An unregistered sink name
+    -- falls through: dispatch reports its own "unknown sink" error.
+    local spec = require("manicule.sinks").get(sink)
+    if spec and not spec.accepts_verdict then
+      vim.notify(
+        ("manicule: sink %q does not accept a verdict; drop %q or send to github"):format(sink, opts.fargs[2]),
+        vim.log.levels.ERROR
+      )
+      return
+    end
     ctx = { event = event }
   end
   require("manicule").send(sink, nil, ctx)

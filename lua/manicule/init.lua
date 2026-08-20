@@ -1511,6 +1511,19 @@ function M.send(sink_name, filter, ctx)
       return
     end
     if sink and sink.clear_on_success and #records > 0 then
+      -- A sink may deliver only a SUBSET of the batch (github diverts
+      -- records with no repo-relative path and records imported from
+      -- GitHub out of the payload) yet still report overall success.
+      -- Such sinks declare `spec.sent_marker`: the `meta` key they
+      -- stamp on every record they actually delivered (github's
+      -- `mark_sent` sets `meta.github_sent` on the very record tables
+      -- dispatched here, so the marker is visible in-memory by the
+      -- time this callback runs). Clear only marked records; undelivered
+      -- ones must survive. Records marked by an EARLIER send also carry
+      -- the marker and are cleared deliberately — they were delivered
+      -- then, so clearing completes that hand-off. Sinks without
+      -- `sent_marker` keep the whole-batch behavior.
+      local marker = sink.sent_marker
       -- Reuse `M.delete` so each record goes through the full lifecycle
       -- — store.remove + save, render.reconcile per buffer, and one
       -- `User ManiculeDeleted` per record — exactly as if the user had
@@ -1519,14 +1532,24 @@ function M.send(sink_name, filter, ctx)
       -- becomes a no-op here. Pass `quiet` so already-removed records
       -- (e.g. a concurrent sync) don't spam a not-found WARN per id.
       for _, record in ipairs(records) do
-        M.delete(record.id, { scope = record.scope, project_root = record.project_root, quiet = true })
+        local delivered = marker == nil or (type(record.meta) == "table" and record.meta[marker] ~= nil)
+        if delivered then
+          M.delete(record.id, { scope = record.scope, project_root = record.project_root, quiet = true })
+        end
       end
     end
   end)
 end
 
 ---Register a sink adapter. Delegates to the sinks registry.
----@param spec {name: string, send: fun(comments: table, ctx: table, cb: fun(ok, err)), format?: fun(c): string, validate?: fun(ctx): boolean, string?}
+---
+---Optional delivery-contract fields consumed by `M.send`:
+---`sent_marker` (string) names the `meta` key the sink stamps on each
+---record it actually delivered — with `clear_on_success`, only marked
+---records are cleared. `accepts_verdict` (boolean) advertises that the
+---sink consumes a `:ManiculeSend <sink> <verdict>` argument (ctx.event);
+---the command layer rejects verdicts for sinks without it.
+---@param spec {name: string, send: fun(comments: table, ctx: table, cb: fun(ok, err)), format?: fun(c): string, validate?: fun(ctx): boolean, string?, sent_marker?: string, accepts_verdict?: boolean}
 function M.register_sink(spec)
   return require("manicule.sinks").register(spec)
 end

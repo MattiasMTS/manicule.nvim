@@ -109,6 +109,7 @@ function H.register_fake_sink(name, opts)
     label = opts.label,
     description = opts.description,
     clear_on_success = opts.clear_on_success,
+    accepts_verdict = opts.accepts_verdict,
     validate = opts.validate,
     send = function(comments, ctx, cb)
       table.insert(calls, {

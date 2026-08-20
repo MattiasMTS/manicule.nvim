@@ -337,6 +337,69 @@ describe("manicule github sink", function()
     assert.are.equal("number", type(store.get(ctx.root, "rep-1").meta.github_sent))
   end)
 
+  it("clears only delivered and already-sent records on a consuming send", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    -- A project buffer must be current so M.list resolves the project
+    -- root and sees the store-backed records below.
+    H.edit_project_file(ctx, "src/a.lua", {
+      "local one = 1",
+      "local two = 2",
+      "local three = 3",
+      "local four = 4",
+      "local five = 5",
+      "return one",
+    })
+    require("manicule").register_sink(require("manicule.sinks.github").setup({ clear_on_success = true }))
+    local store = require("manicule.store")
+
+    local posted = record({ body = "post me" })
+    posted.id, posted.scope = "posted-1", "project"
+    local already = record({ body = "sent earlier" })
+    already.id, already.scope = "already-1", "project"
+    already.meta = { github_sent = 1234567890 }
+    local imported = record({ body = "from github" })
+    imported.id, imported.scope = "imported-1", "project"
+    imported.meta = { github = { id = 9, url = "https://example.test/r/9", imported = true } }
+    local scratch = record({ body = "scratch note", uri = "term://scratch" })
+    scratch.id, scratch.scope = "scratch-1", "project"
+    for _, rec in ipairs({ posted, already, imported, scratch }) do
+      store.put(ctx.root, rec)
+    end
+    assert(store.save(ctx.root))
+
+    local notifications = {}
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      table.insert(notifications, { msg = tostring(msg), level = level })
+    end
+    require("manicule").send("github")
+    vim.notify = original_notify
+
+    -- Only the new record with a repository-relative path was posted.
+    local body = gh.api_input()
+    assert.are.equal(1, #body.comments)
+    assert.are.equal("post me", body.comments[1].body)
+
+    -- Delivered now + delivered by an earlier send: cleared. Records the
+    -- sink diverted out of the payload must survive the auto-clear.
+    assert.is_nil(store.get(ctx.root, "posted-1"))
+    assert.is_nil(store.get(ctx.root, "already-1"))
+    assert.is_truthy(store.get(ctx.root, "imported-1"), "imported record must survive clear_on_success")
+    assert.is_truthy(store.get(ctx.root, "scratch-1"), "no-path record must survive clear_on_success")
+
+    -- The user is told what was withheld from the review.
+    local skipped_msg
+    for _, note in ipairs(notifications) do
+      if note.msg:find("skipped", 1, true) then
+        skipped_msg = note.msg
+      end
+    end
+    assert.is_truthy(skipped_msg, "expected a notify about skipped records")
+    assert.is_truthy(skipped_msg:find("1 without a repository-relative path", 1, true), skipped_msg)
+    assert.is_truthy(skipped_msg:find("1 imported from GitHub", 1, true), skipped_msg)
+  end)
+
   it("fails when no record resolves to a repository path", function()
     local gh = fake_gh(ctx.artifact_root)
     vim.env.PATH = gh.bin .. ":" .. saved_path
@@ -383,6 +446,8 @@ describe("manicule github sink", function()
     local spec = require("manicule.sinks").get("github")
     assert.are.equal("integration", spec.type)
     assert.is_false(spec.clear_on_success)
+    assert.is_true(spec.accepts_verdict)
+    assert.are.equal("github_sent", spec.sent_marker)
   end)
 
   it("stays unregistered when gh is missing", function()
@@ -409,7 +474,7 @@ describe("manicule github sink", function()
   describe(":ManiculeSend verdicts", function()
     it("maps a verdict argument to ctx.event", function()
       vim.cmd("runtime plugin/manicule.lua")
-      local calls = H.register_fake_sink("github")
+      local calls = H.register_fake_sink("github", { accepts_verdict = true })
 
       vim.cmd("ManiculeSend github approve")
       vim.wait(200, function()
@@ -418,6 +483,26 @@ describe("manicule github sink", function()
 
       assert.are.equal(1, #calls)
       assert.are.equal("APPROVE", calls[1].ctx.event)
+    end)
+
+    it("errors when the sink does not consume verdicts, without dispatching", function()
+      vim.cmd("runtime plugin/manicule.lua")
+      local calls = H.register_fake_sink("clipboard")
+
+      local errored
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        if level == vim.log.levels.ERROR then
+          errored = msg
+        end
+      end
+      vim.cmd("ManiculeSend clipboard approve")
+      vim.notify = original_notify
+
+      assert.is_truthy(errored, "expected an ERROR notification")
+      assert.is_truthy(errored:find("clipboard", 1, true))
+      assert.is_truthy(errored:find("verdict", 1, true))
+      assert.are.equal(0, #calls)
     end)
 
     it("errors on an unknown verdict without dispatching", function()
