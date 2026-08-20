@@ -176,6 +176,16 @@ function M.state()
   return session
 end
 
+---Path of the buffer a pair is reviewed — and commented — in: the
+---worktree file (right side), except for deletions, where only the
+---staged baseline (left side) still exists to open and anchor
+---comments to.
+---@param pair {left: string, right: string, status: string}
+---@return string
+function M.pair_path(pair)
+  return pair.status == "D" and pair.left or pair.right
+end
+
 ---Switch the diff rendering used by review sessions. With no argument,
 ---flips between "split" and "unified". The setting lives on the merged
 ---config, so it also becomes the default for later sessions in this
@@ -256,14 +266,13 @@ function M.stop()
   end
 end
 
----URIs for every commentable buffer in the session (right side; left
----side for deletions), matching how adapter.identify keys records.
+---URIs for every commentable buffer in the session (see M.pair_path),
+---matching how adapter.identify keys records.
 local function session_uris()
   local uri_mod = require("manicule.uri")
   local uris = {}
   for _, pair in ipairs(session.files) do
-    local path = pair.status == "D" and pair.left or pair.right
-    uris[uri_mod.for_path(path)] = true
+    uris[uri_mod.for_path(M.pair_path(pair))] = true
   end
   return uris
 end
@@ -282,8 +291,7 @@ local function session_root()
   end
   local markers = require("manicule.config").current.store.root_markers
   for _, pair in ipairs(session.files) do
-    local path = pair.status == "D" and pair.left or pair.right
-    local root = vim.fs.root(path, markers)
+    local root = vim.fs.root(M.pair_path(pair), markers)
     if root then
       return root
     end

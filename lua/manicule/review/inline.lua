@@ -461,25 +461,4 @@ function M.is_active(bufnr)
   return state[bufnr] ~= nil
 end
 
----Hunks currently painted on `bufnr` (empty when inactive). Exposed for
----the panel, tests, and anyone building on top of a review session.
----@param bufnr integer
----@return manicule.review.InlineHunk[]
-function M.state(bufnr)
-  local entry = state[bufnr]
-  return entry and entry.hunks or {}
-end
-
----@param bufnr integer
----@return {hunks: integer, added: integer, removed: integer}
-function M.stats(bufnr)
-  local out = { hunks = 0, added = 0, removed = 0 }
-  for _, hunk in ipairs(M.state(bufnr)) do
-    out.hunks = out.hunks + 1
-    out.added = out.added + hunk.new_count
-    out.removed = out.removed + hunk.old_count
-  end
-  return out
-end
-
 return M

@@ -30,14 +30,14 @@ local augroup = nil
 ---keymaps so queries hit the right store.
 ---@return string|nil
 local function session_root()
-  local state = require("manicule.review").state()
+  local review = require("manicule.review")
+  local state = review.state()
   if not state then
     return nil
   end
   local markers = require("manicule.config").current.store.root_markers
   for _, pair in ipairs(state.files) do
-    local path = pair.status == "D" and pair.left or pair.right
-    local root = vim.fs.root(path, markers)
+    local root = vim.fs.root(review.pair_path(pair), markers)
     if root then
       return root
     end
@@ -54,8 +54,7 @@ local function session_uris()
   local uri_mod = require("manicule.uri")
   local uris = {}
   for _, pair in ipairs(state.files) do
-    local path = pair.status == "D" and pair.left or pair.right
-    uris[uri_mod.for_path(path)] = true
+    uris[uri_mod.for_path(review.pair_path(pair))] = true
   end
   return uris
 end
@@ -71,8 +70,7 @@ local function build_files_items()
   local pair_uris = {}
   local session_uri_set = {}
   for idx, pair in ipairs(state.files) do
-    local path = pair.status == "D" and pair.left or pair.right
-    local uri = uri_mod.for_path(path)
+    local uri = uri_mod.for_path(review.pair_path(pair))
     pair_uris[idx] = uri
     session_uri_set[uri] = true
   end
@@ -86,7 +84,7 @@ local function build_files_items()
   local items = {}
   for idx, pair in ipairs(state.files) do
     table.insert(items, {
-      filename = pair.status == "D" and pair.left or pair.right,
+      filename = review.pair_path(pair),
       lnum = 1,
       text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[pair_uris[idx]] or 0),
       -- Store index for <CR> mapping
@@ -125,12 +123,12 @@ local function build_comments_items()
   return items
 end
 
----URI a pair's comments anchor to (right side; left for deletions),
----matching how build_files_items counts them.
+---URI a pair's comments anchor to (see review.pair_path), matching how
+---build_files_items counts them.
 ---@param pair {left: string, right: string, status: string}
 ---@return string
 local function pair_uri(pair)
-  local path = pair.status == "D" and pair.left or pair.right
+  local path = require("manicule.review").pair_path(pair)
   return require("manicule.uri").for_path(path)
 end
 
