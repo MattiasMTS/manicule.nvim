@@ -99,7 +99,23 @@ end
 local function build_comments_items()
   local uris = file_filter and { [file_filter] = true } or session_uris()
   local records = require("manicule").list({ _quiet = true, uris = uris, _root = session_root() })
-  return require("manicule.ui.quickfix").build_items(records)
+  local items = require("manicule.ui.quickfix").build_items(records)
+  -- Carry each record's uri + line in user_data (mirroring the files
+  -- view's user_data.pair_index) so the panel's <CR> can map a comment
+  -- back to its session pair instead of doing a default qf jump.
+  local by_id = {}
+  for _, record in ipairs(records) do
+    by_id[record.id] = record
+  end
+  local range = require("manicule.range")
+  for _, item in ipairs(items) do
+    local record = type(item.user_data) == "table" and by_id[item.user_data.id] or nil
+    if record then
+      item.user_data.uri = record.uri
+      item.user_data.line = range.start_line(record)
+    end
+  end
+  return items
 end
 
 ---URI a pair's comments anchor to (right side; left for deletions),
@@ -131,6 +147,65 @@ local function pair_index_at_cursor()
     return data.pair_index
   end
   return nil
+end
+
+---Comment locator (uri + line) under the cursor in the CURRENT (panel)
+---window. Reads the list displayed in this window, like
+---pair_index_at_cursor, so qf history can't desync row -> comment.
+---@return {uri: string, line: integer}|nil
+local function comment_at_cursor()
+  local winid = vim.api.nvim_get_current_win()
+  local row = vim.api.nvim_win_get_cursor(winid)[1]
+  local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
+  if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
+    return nil
+  end
+  local item = info.items[row]
+  if not item then
+    return nil
+  end
+  local data = item.user_data
+  if type(data) == "table" and type(data.uri) == "string" and data.uri ~= "" then
+    return { uri = data.uri, line = tonumber(data.line) or item.lnum or 1 }
+  end
+  return nil
+end
+
+---Jump to the comment under the cursor in a comments view: resolve its
+---uri to the owning session pair, rebuild that pair's diff via
+---review.open (never the default qf jump, which picks its own target
+---window and can stomp a diff window's buffer), then put the cursor on
+---the comment's line in the commentable window (right side; the single
+---left window for D pairs). The panel stays open; focus moves to the
+---jump target.
+local function jump_to_comment()
+  local comment = comment_at_cursor()
+  if not comment then
+    return
+  end
+  local review = require("manicule.review")
+  local state = review.state()
+  if not state then
+    return
+  end
+  local pair_index
+  for idx, pair in ipairs(state.files) do
+    if pair_uri(pair) == comment.uri then
+      pair_index = idx
+      break
+    end
+  end
+  if not pair_index then
+    vim.notify("manicule: comment does not match any file in this review", vim.log.levels.WARN)
+    return
+  end
+  review.open(pair_index)
+  -- review.open leaves focus in the commentable window (right side;
+  -- the left buffer for D pairs).
+  local winid = vim.api.nvim_get_current_win()
+  local bufnr = vim.api.nvim_win_get_buf(winid)
+  local line = math.min(math.max(comment.line, 1), vim.api.nvim_buf_line_count(bufnr))
+  pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
 end
 
 local function get_panel_title()
@@ -231,9 +306,9 @@ local function setup_panel_keymaps(bufnr)
       end
       require("manicule.review").open(idx)
     else
-      -- Comments view: default (unmapped) qf <CR> jumps to the entry.
-      local cr = vim.api.nvim_replace_termcodes("<CR>", true, false, true)
-      vim.api.nvim_feedkeys(cr, "n", false)
+      -- Comments view: never the default qf jump — it picks its own
+      -- target window (possibly a diff window) and breaks the layout.
+      jump_to_comment()
     end
   end, vim.tbl_extend("keep", { desc = "Manicule review: drill into comments or open pair" }, map_opts))
 

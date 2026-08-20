@@ -570,6 +570,129 @@ describe("manicule review session", function()
     assert.is_truthy(texts:find("second file comment", 1, true))
   end)
 
+  ---Like add_comment, but places the comment on a specific line.
+  local function add_comment_at(path, line, body)
+    vim.cmd.edit(vim.fn.fnameescape(path))
+    vim.api.nvim_win_set_cursor(0, { line, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb(body)
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+  end
+
+  it("<CR> in comments view rebuilds the pair's diff and jumps to the comment", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    vim.fn.writefile({ "return 2 -- new", "-- pad", "-- target", "-- pad" }, files[2].right)
+    assert.is_true(R.start({ files = files, label = "jump" }))
+    add_comment_at(files[2].right, 3, "jump target")
+    -- add_comment_at edited pair 2's file into pair 1's diff window;
+    -- restore the pair 1 layout before exercising the jump.
+    R.open(1)
+
+    press_in_panel(1, "<Tab>") -- comments view (ALL)
+    press_in_panel(1, "<CR>")
+
+    assert.are.equal(2, R.state().index)
+
+    -- Focused window shows pair 2's RIGHT worktree file, cursor on the
+    -- comment's line.
+    local cur_win = vim.api.nvim_get_current_win()
+    local cur_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(cur_win))
+    assert.is_truthy(cur_name:find("/f2.lua", 1, true), "expected right file, got " .. cur_name)
+    assert.is_nil(cur_name:find("/left/", 1, true), "jump landed in the left buffer: " .. cur_name)
+    assert.are.equal(3, vim.api.nvim_win_get_cursor(cur_win)[1])
+
+    -- Panel window is still open.
+    local pwin = panel_win()
+    assert.is_truthy(pwin, "panel window closed by jump")
+
+    -- Regression: the OTHER diff window must show pair 2's LEFT staged
+    -- file — the default qf jump used to replace a diff window with the
+    -- target buffer, leaving a broken non-pair layout.
+    local left_seen = false
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if winid ~= cur_win and winid ~= pwin then
+        local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(winid))
+        assert.is_truthy(name:find("/left/f2.lua", 1, true), "other diff window shows " .. name)
+        left_seen = true
+      end
+    end
+    assert.is_true(left_seen, "no second diff window found")
+  end)
+
+  it("<CR> in comments view on a deleted-pair comment lands in the left buffer", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    -- Realpath the staged dir: records store canonical uris, and the
+    -- macOS TMPDIR symlink (/var -> /private/var) would otherwise make
+    -- the pair uri miss the record uri.
+    local uv = vim.uv or vim.loop
+    local left_dir = uv.fs_realpath(ctx.artifact_root .. "/left") or (ctx.artifact_root .. "/left")
+    local left = left_dir .. "/gone.lua"
+    vim.fn.writefile({ "return 0 -- deleted" }, left)
+    files[2] = { left = left, right = ctx.root .. "/gone.lua", status = "D", path = "gone.lua" }
+    assert.is_true(R.start({ files = files, label = "jump-d" }))
+    add_comment_at(left, 1, "note on deleted file")
+    R.open(1)
+
+    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "<CR>")
+
+    assert.are.equal(2, R.state().index)
+    local cur_name = vim.api.nvim_buf_get_name(0)
+    assert.is_truthy(cur_name:find("/left/gone.lua", 1, true), "expected left buffer, got " .. cur_name)
+    assert.are.equal(1, vim.api.nvim_win_get_cursor(0)[1])
+    assert.is_truthy(panel_win(), "panel window closed by jump")
+  end)
+
+  it("<CR> in comments view on an unmatched comment warns and keeps the layout", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "jump-warn" }))
+    add_comment_at(files[1].right, 1, "orphan-to-be")
+    R.open(1)
+
+    press_in_panel(1, "<Tab>")
+
+    -- Corrupt the item's uri so it matches no session pair (defensive path).
+    local pwin = panel_win()
+    local info = vim.fn.getqflist({ winid = pwin, id = 0, items = 1 })
+    info.items[1].user_data.uri = "file:///nonexistent/orphan.lua"
+    vim.fn.setqflist({}, "r", { id = info.id, items = info.items })
+
+    local warned
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if level == vim.log.levels.WARN then
+        warned = msg
+      end
+    end
+    press_in_panel(1, "<CR>")
+    vim.notify = original_notify
+
+    assert.is_truthy(warned, "expected a WARN notification")
+    assert.are.equal(1, R.state().index)
+    -- Layout unchanged: focus still in the panel, both pair 1 diff
+    -- windows intact.
+    assert.are.equal(pwin, vim.api.nvim_get_current_win())
+    local saw_left, saw_right = false, false
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if winid ~= pwin then
+        local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(winid))
+        if name:find("/left/f1.lua", 1, true) then
+          saw_left = true
+        elseif name:find("/f1.lua", 1, true) then
+          saw_right = true
+        end
+      end
+    end
+    assert.is_true(saw_left and saw_right, "pair 1 diff layout was disturbed")
+  end)
+
   it(":ManiculeToggle hides the panel during a session and keeps it running", function()
     vim.cmd("runtime plugin/manicule.lua")
     local R = require("manicule.review")
