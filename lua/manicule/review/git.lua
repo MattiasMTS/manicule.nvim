@@ -5,6 +5,8 @@
 
 local M = {}
 
+local uv = vim.uv or vim.loop
+
 ---@param argv string[]
 ---@param opts? {cwd?: string}
 ---@return {code: integer, stdout: string, stderr: string}
@@ -185,34 +187,64 @@ function M.show_file(root, ref, path)
   return result.stdout
 end
 
----Write baseline versions of `entries` under `dir`, mirroring relative
----paths. Returns diff pairs; `right` always names the worktree path even
----when the file was deleted (callers branch on `status == "D"`).
----@param root string
----@param base string
----@param entries {path: string, status: string}[]
----@param dir string
----@return {left: string, right: string, status: string, path: string}[]
-function M.stage_baseline(root, base, entries, dir)
-  local uv = vim.uv or vim.loop
-  local known_dirs = {}
-  local function mkdir_p(path)
-    if known_dirs[path] then
-      return
-    end
-    if uv.fs_stat(path) then
-      known_dirs[path] = true
-      return
-    end
-    local parent = path:match("^(.*)/[^/]+$")
-    if parent and parent ~= "" and parent ~= path then
-      mkdir_p(parent)
-    end
-    local ok, err = uv.fs_mkdir(path, 493) -- 0755, filtered by umask
-    assert(ok, ("manicule: cannot create staging directory %s: %s"):format(path, tostring(err)))
-    known_dirs[path] = true
+---mkdir -p via libuv; `known_dirs` caches directories already confirmed
+---to exist so repeated calls stay cheap.
+---@param path string
+---@param known_dirs table<string, boolean>
+local function mkdir_p(path, known_dirs)
+  if known_dirs[path] then
+    return
   end
-  mkdir_p(dir)
+  if uv.fs_stat(path) then
+    known_dirs[path] = true
+    return
+  end
+  local parent = path:match("^(.*)/[^/]+$")
+  if parent and parent ~= "" and parent ~= path then
+    mkdir_p(parent, known_dirs)
+  end
+  local ok, err = uv.fs_mkdir(path, 493) -- 0755, filtered by umask
+  assert(ok, ("manicule: cannot create staging directory %s: %s"):format(path, tostring(err)))
+  known_dirs[path] = true
+end
+
+---Write `content` to `path` as a regular file, creating parent
+---directories and replacing any non-file already there (e.g. a symlink
+---tar extracted from an archive).
+---@param path string
+---@param content string
+---@param known_dirs table<string, boolean>
+local function write_regular(path, content, known_dirs)
+  local parent = path:match("^(.*)/[^/]+$")
+  if parent then
+    mkdir_p(parent, known_dirs)
+  end
+  local stat = uv.fs_lstat(path)
+  if stat and stat.type ~= "file" then
+    local ok, err = uv.fs_unlink(path)
+    assert(ok, ("manicule: cannot replace staged baseline %s: %s"):format(path, tostring(err)))
+  end
+  local fd, err = uv.fs_open(path, "w", 438) -- 0666, filtered by umask
+  assert(fd, ("manicule: cannot stage baseline %s: %s"):format(path, tostring(err)))
+  local _, write_err = uv.fs_write(fd, content, 0)
+  uv.fs_close(fd)
+  assert(not write_err, ("manicule: cannot write staged baseline %s: %s"):format(path, tostring(write_err)))
+end
+
+---Materialize the blob contents of `paths` at `ref` under `dir`,
+---mirroring relative paths. Batched: chunked `git archive` + `tar`
+---subprocesses instead of one `git show` fork per file (numbers in
+---docs/performance.md), with a per-file `git show` self-heal for
+---anything archive missed. Paths absent at `ref` become empty regular
+---files; symlink blobs become regular files holding the link target.
+---Requires the `tar` executable and fails loudly when it is missing.
+---@param root string
+---@param ref string
+---@param paths string[]
+---@param dir string
+function M.materialize(root, ref, paths, dir)
+  local known_dirs = {}
+  mkdir_p(dir, known_dirs)
 
   -- `git archive` has no pathspec-from-file support (including Git 2.55),
   -- so keep each argv comfortably below platform ARG_MAX instead. Bound
@@ -220,12 +252,13 @@ function M.stage_baseline(root, base, entries, dir)
   -- flat argv even below ARG_MAX (200-path chunks benchmark faster).
   local max_argv_bytes = 64 * 1024
   local max_paths_per_chunk = 200
+  local base_bytes = #root + #ref + #dir + 1024
   local chunk = {}
-  local chunk_bytes = #root + #base + #dir + 1024
+  local chunk_bytes = base_bytes
   local failed_paths = {}
 
-  local function extract(paths)
-    if #paths == 0 then
+  local function extract(chunk_paths)
+    if #chunk_paths == 0 then
       return
     end
     local archive_path = vim.fn.tempname() .. ".tar"
@@ -237,62 +270,66 @@ function M.stage_baseline(root, base, entries, dir)
       "archive",
       "-o",
       archive_path,
-      base,
+      ref,
       "--",
     }
-    vim.list_extend(archive_argv, paths)
+    vim.list_extend(archive_argv, chunk_paths)
     local archive_result = M.run(archive_argv)
     local tar_result = M.run({ "tar", "-xf", archive_path, "-C", dir })
     pcall(uv.fs_unlink, archive_path)
 
     if archive_result.code ~= 0 or tar_result.code ~= 0 then
-      for _, path in ipairs(paths) do
+      for _, path in ipairs(chunk_paths) do
         failed_paths[path] = true
       end
     end
   end
 
-  for _, entry in ipairs(entries) do
-    if entry.status ~= "A" then
-      local path_bytes = #entry.path + 1
-      if #chunk > 0 and (chunk_bytes + path_bytes > max_argv_bytes or #chunk >= max_paths_per_chunk) then
-        extract(chunk)
-        chunk = {}
-        chunk_bytes = #root + #base + #dir + 1024
-      end
-      table.insert(chunk, entry.path)
-      chunk_bytes = chunk_bytes + path_bytes
+  for _, path in ipairs(paths) do
+    local path_bytes = #path + 1
+    if #chunk > 0 and (chunk_bytes + path_bytes > max_argv_bytes or #chunk >= max_paths_per_chunk) then
+      extract(chunk)
+      chunk = {}
+      chunk_bytes = base_bytes
     end
+    table.insert(chunk, path)
+    chunk_bytes = chunk_bytes + path_bytes
   end
   extract(chunk)
 
-  local function write_regular(path, content)
-    local parent = path:match("^(.*)/[^/]+$")
-    if parent then
-      mkdir_p(parent)
+  for _, path in ipairs(paths) do
+    local staged = dir .. "/" .. path
+    local stat = uv.fs_lstat(staged)
+    if failed_paths[path] or not stat or stat.type ~= "file" then
+      write_regular(staged, M.show_file(root, ref, path) or "", known_dirs)
     end
-    local stat = uv.fs_lstat(path)
-    if stat and stat.type ~= "file" then
-      local ok, err = uv.fs_unlink(path)
-      assert(ok, ("manicule: cannot replace staged baseline %s: %s"):format(path, tostring(err)))
-    end
-    local fd, err = uv.fs_open(path, "w", 438) -- 0666, filtered by umask
-    assert(fd, ("manicule: cannot stage baseline %s: %s"):format(path, tostring(err)))
-    local _, write_err = uv.fs_write(fd, content, 0)
-    uv.fs_close(fd)
-    assert(not write_err, ("manicule: cannot write staged baseline %s: %s"):format(path, tostring(write_err)))
   end
+end
 
+---Write baseline versions of `entries` under `dir`, mirroring relative
+---paths. Returns diff pairs; `right` always names the worktree path even
+---when the file was deleted (callers branch on `status == "D"`).
+---@param root string
+---@param base string
+---@param entries {path: string, status: string}[]
+---@param dir string
+---@return {left: string, right: string, status: string, path: string}[]
+function M.stage_baseline(root, base, entries, dir)
+  local tracked = {}
+  for _, entry in ipairs(entries) do
+    if entry.status ~= "A" then
+      table.insert(tracked, entry.path)
+    end
+  end
+  M.materialize(root, base, tracked, dir)
+
+  local known_dirs = {}
   local files = {}
   for _, entry in ipairs(entries) do
     local left = dir .. "/" .. entry.path
     if entry.status == "A" then
-      write_regular(left, "")
-    else
-      local stat = uv.fs_lstat(left)
-      if failed_paths[entry.path] or not stat or stat.type ~= "file" then
-        write_regular(left, M.show_file(root, base, entry.path) or "")
-      end
+      -- Added: stage an empty left so the diff shows all-added.
+      write_regular(left, "", known_dirs)
     end
     table.insert(files, {
       left = left,

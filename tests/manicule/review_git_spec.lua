@@ -142,6 +142,33 @@ describe("manicule review git plumbing", function()
     assert.are.equal(0, vim.fn.getfsize(files[3].left))
   end)
 
+  it("materializes a multi-file batch at a ref into a directory", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, {
+      ["src/a.lua"] = { "base a" },
+      ["src/sub/b.lua"] = { "base b" },
+    })
+    vim.fn.writefile({ "changed a" }, root .. "/src/a.lua")
+    vim.fn.writefile({ "changed b" }, root .. "/src/sub/b.lua")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local original_run = G.run
+    local calls = {}
+    G.run = function(argv, opts)
+      table.insert(calls, argv)
+      return original_run(argv, opts)
+    end
+    local dir = ctx.artifact_root .. "/materialized"
+    local ok, err = pcall(G.materialize, root, base, { "src/a.lua", "src/sub/b.lua" }, dir)
+    G.run = original_run
+
+    assert.is_true(ok, tostring(err))
+    -- One archive + one tar for the whole batch, no per-file git show.
+    assert.are.equal(2, #calls)
+    assert.are.equal("base a", table.concat(vim.fn.readfile(dir .. "/src/a.lua"), "\n"))
+    assert.are.equal("base b", table.concat(vim.fn.readfile(dir .. "/src/sub/b.lua"), "\n"))
+  end)
+
   it("self-heals an archive chunk containing a path absent from the base", function()
     local G = require("manicule.review.git")
     local uv = vim.uv or vim.loop

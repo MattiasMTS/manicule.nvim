@@ -220,20 +220,38 @@ M.register({
     if diff.code ~= 0 then
       return nil, ("manicule: git diff failed: %s"):format(vim.trim(diff.stderr))
     end
+    local entries = G.parse_name_status(diff.stdout)
+    if #entries == 0 then
+      return nil, ("manicule: no changes in %s"):format(label)
+    end
+    -- Stage each side with one batched materialize pass (chunked
+    -- `git archive` + `tar`, see docs/performance.md) instead of two
+    -- `git show` forks per file. The side a file does not exist on
+    -- (base for "A", head for "D") gets an empty staged file so the
+    -- diff shows all-added/all-removed.
+    local base_dir = stage_dir .. "/base"
+    local head_dir = stage_dir .. "/head"
+    local base_paths, head_paths = {}, {}
+    for _, entry in ipairs(entries) do
+      if entry.status ~= "A" then
+        table.insert(base_paths, entry.path)
+      end
+      if entry.status ~= "D" then
+        table.insert(head_paths, entry.path)
+      end
+    end
+    G.materialize(root, base, base_paths, base_dir)
+    G.materialize(root, meta.headRefOid, head_paths, head_dir)
     local files = {}
-    for _, entry in ipairs(G.parse_name_status(diff.stdout)) do
-      local left = stage_dir .. "/base/" .. entry.path
-      local right = stage_dir .. "/head/" .. entry.path
-      for side, ref in pairs({ [left] = base, [right] = meta.headRefOid }) do
-        vim.fn.mkdir(vim.fn.fnamemodify(side, ":h"), "p")
-        local fd = assert(io.open(side, "wb"))
-        fd:write(G.show_file(root, ref, entry.path) or "")
-        fd:close()
+    for _, entry in ipairs(entries) do
+      local left = base_dir .. "/" .. entry.path
+      local right = head_dir .. "/" .. entry.path
+      local empty = (entry.status == "A" and left) or (entry.status == "D" and right)
+      if empty then
+        vim.fn.mkdir(vim.fn.fnamemodify(empty, ":h"), "p")
+        vim.fn.writefile({}, empty)
       end
       table.insert(files, { left = left, right = right, status = entry.status, path = entry.path })
-    end
-    if #files == 0 then
-      return nil, ("manicule: no changes in %s"):format(label)
     end
     return { files = files, label = label, sink_ctx = sink_ctx }
   end,
