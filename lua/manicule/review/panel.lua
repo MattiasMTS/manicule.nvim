@@ -439,16 +439,16 @@ local function open_window()
   local height = math.min(#items + 1, 8)
   vim.cmd(("botright %d copen"):format(height))
 
-  -- Find and setup the qf window that was just opened
-  local qf_winid = nil
-  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local bufnr = vim.api.nvim_win_get_buf(winid)
-    if vim.bo[bufnr].buftype == "quickfix" then
-      qf_winid = winid
-      setup_panel_keymaps(bufnr)
-      panel_winid = winid
-      break
-    end
+  -- copen focuses the window it opened: bind the panel to it. Never
+  -- scan for buftype == "quickfix" — location-list windows share that
+  -- buftype, so a loclist open in the tab could be captured instead.
+  local qf_winid = vim.api.nvim_get_current_win()
+  if not is_panel_qf(qf_winid) then
+    qf_winid = find_panel_window()
+  end
+  if qf_winid then
+    panel_winid = qf_winid
+    setup_panel_keymaps(vim.api.nvim_win_get_buf(qf_winid))
   end
 
   -- Return focus to diff (right-side window)
