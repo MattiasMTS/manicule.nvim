@@ -234,6 +234,56 @@ describe("manicule review session", function()
     assert.are.equal("cmd.lua", state.files[1].path)
   end)
 
+  it(":ManiculeReview pr (bare) picks an open PR and labels with its title", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local root, git = H.git_repo(ctx, { ["a.lua"] = { "return 1" } })
+    local base_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+    git("checkout", "-q", "-b", "pr-branch")
+    vim.fn.writefile({ "return 2" }, root .. "/a.lua")
+    git("commit", "-aqm", "pr change")
+    local head_oid = vim.trim(git("rev-parse", "HEAD").stdout)
+
+    -- Fake gh answering `pr list` (picker), `pr view` (resolver), and the
+    -- comment-import endpoints.
+    local bin = ctx.artifact_root .. "/bin"
+    vim.fn.mkdir(bin, "p")
+    vim.fn.writefile({
+      "#!/bin/sh",
+      'if [ "$1 $2" = "pr list" ]; then',
+      '  echo \'[{"number":42,"title":"Add widgets","author":{"login":"octocat"}}]\';',
+      'elif [ "$1 $2" = "pr view" ]; then',
+      ('  echo \'{"baseRefOid":"%s","headRefOid":"%s","title":"Add widgets"}\';'):format(base_oid, head_oid),
+      'elif [ "$1 $2" = "repo view" ]; then',
+      '  echo \'{"nameWithOwner":"acme/widgets"}\';',
+      "else",
+      "  echo '[]';",
+      "fi",
+    }, bin .. "/gh")
+    vim.fn.system({ "chmod", "+x", bin .. "/gh" })
+
+    local saved_path = vim.env.PATH
+    vim.env.PATH = bin .. ":" .. saved_path
+    local saved_cwd = (vim.uv or vim.loop).cwd()
+    vim.cmd.cd(root)
+
+    local original_select = vim.ui.select
+    local seen_item
+    vim.ui.select = function(items, select_opts, on_choice)
+      seen_item = select_opts.format_item(items[1])
+      on_choice(items[1])
+    end
+    local ok, err = pcall(vim.cmd, "ManiculeReview pr")
+    vim.ui.select = original_select
+    vim.env.PATH = saved_path
+    vim.cmd.cd(saved_cwd)
+    assert.is_true(ok, err)
+
+    assert.are.equal("#42 Add widgets \u{2014} octocat", seen_item)
+    local state = require("manicule.review").state()
+    assert.is_truthy(state, "picker did not start a session")
+    assert.are.equal("pr 42: Add widgets", state.label)
+  end)
+
   it("deleted-file (D) pairs accept comments on the left buffer", function()
     vim.cmd("runtime plugin/manicule.lua")
     local root = H.git_repo(ctx, { ["gone.lua"] = { "return 1" } })

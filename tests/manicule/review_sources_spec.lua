@@ -2,7 +2,7 @@ local H = require("helpers")
 
 local ctx
 
-local function fake_gh(dir, base_oid, head_oid)
+local function fake_gh(dir, base_oid, head_oid, title)
   local bin = dir .. "/bin"
   vim.fn.mkdir(bin, "p")
   local script = bin .. "/gh"
@@ -13,7 +13,7 @@ local function fake_gh(dir, base_oid, head_oid)
     'elif [ "$1" = "api" ]; then',
     "  echo '[]';",
     "else",
-    ('  echo \'{"baseRefOid":"%s","headRefOid":"%s"}\';'):format(base_oid, head_oid),
+    ('  echo \'{"baseRefOid":"%s","headRefOid":"%s","title":"%s"}\';'):format(base_oid, head_oid, title or ""),
     "fi",
   }, script)
   vim.fn.system({ "chmod", "+x", script })
@@ -194,7 +194,7 @@ describe("manicule review sources", function()
     git("commit", "-aqm", "pr change")
     local head_oid = vim.trim(git("rev-parse", "HEAD").stdout)
 
-    local bin = fake_gh(ctx.artifact_root, base_oid, head_oid)
+    local bin = fake_gh(ctx.artifact_root, base_oid, head_oid, "Fix the frobnicator")
     local saved_path = vim.env.PATH
     vim.env.PATH = bin .. ":" .. saved_path
 
@@ -202,7 +202,7 @@ describe("manicule review sources", function()
     vim.env.PATH = saved_path
 
     assert.is_nil(err)
-    assert.are.equal("pr 42", job.label)
+    assert.are.equal("pr 42: Fix the frobnicator", job.label)
     assert.are.equal(1, #job.files)
     assert.are.equal("a.lua", job.files[1].path)
     assert.are.equal(root .. "/a.lua", job.files[1].right)

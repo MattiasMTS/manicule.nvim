@@ -174,16 +174,29 @@ vim.api.nvim_create_user_command("ManiculeReview", function(opts)
       vim.notify(msg, vim.log.levels.ERROR)
     end)
   end
-  local sources = require("manicule.review.sources")
-  local job, err = sources.resolve(opts.fargs, {})
-  if not job then
-    notify_error(err or "manicule: cannot resolve review")
+  local function resolve_and_start(fargs)
+    local sources = require("manicule.review.sources")
+    local job, err = sources.resolve(fargs, {})
+    if not job then
+      notify_error(err or "manicule: cannot resolve review")
+      return
+    end
+    local ok, start_err = require("manicule.review").start(job)
+    if not ok then
+      notify_error(start_err)
+    end
+  end
+  -- Bare `pr`: pick an open PR via vim.ui.select, then proceed as if
+  -- `:ManiculeReview pr <n>` was typed. Intercepted BEFORE resolve —
+  -- resolve is synchronous, the picker is async, and the git resolver
+  -- would otherwise try (and fail) to treat "pr" as a ref.
+  if #opts.fargs == 1 and opts.fargs[1] == "pr" then
+    require("manicule.review.pr_picker").pick(function(number)
+      resolve_and_start({ "pr", number })
+    end)
     return
   end
-  local ok, start_err = require("manicule.review").start(job)
-  if not ok then
-    notify_error(start_err)
-  end
+  resolve_and_start(opts.fargs)
 end, {
   nargs = "*",
   complete = function(arglead, cmdline)

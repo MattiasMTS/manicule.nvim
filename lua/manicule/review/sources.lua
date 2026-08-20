@@ -155,7 +155,7 @@ M.register({
       return nil, "manicule: not a git repository"
     end
     local number = fargs[2]
-    local result = G.run({ "gh", "pr", "view", number, "--json", "baseRefOid,headRefOid" }, { cwd = root })
+    local result = G.run({ "gh", "pr", "view", number, "--json", "baseRefOid,headRefOid,title" }, { cwd = root })
     if result.code ~= 0 then
       return nil, ("manicule: gh pr view failed: %s"):format(vim.trim(result.stderr))
     end
@@ -179,6 +179,9 @@ M.register({
     local stage_dir = opts.stage_dir or make_stage_dir()
     local head = G.rev_parse(root, "HEAD")
     local label = ("pr %s"):format(number)
+    if type(meta.title) == "string" and meta.title ~= "" then
+      label = ("%s: %s"):format(label, meta.title)
+    end
 
     if head == meta.headRefOid then
       -- PR head is checked out: right side = worktree, normal pairs.
