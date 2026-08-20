@@ -156,6 +156,13 @@ GitHub's own comments are never echoed back as a new review; re-running
 `:ManiculeReview pr N` never duplicates them. When the PR head is not
 checked out (both sides staged from temp files), the import is skipped.
 
+Imported comments support two GitHub interactions from the panel's
+comments view: `r` replies to the comment's thread — it opens the normal
+comment editor and stores the reply as a regular local record that the
+next `github` send posts to the thread (instead of the review payload) —
+and `gr` toggles the thread's resolved state on GitHub directly.
+GitHub-resolved threads are prefixed with `✓` in the comments view.
+
 External tools can drive a review session by writing a JSON job file and
 calling `require("manicule.review").start_from_job(path)`; comments return
 through the bundled `socket` sink as JSONL over a unix socket.
@@ -235,7 +242,10 @@ Built-ins:
   comments in Manicule by default so you can verify fixes before resolving them.
 - `github` posts the batch as a pull-request review via the `gh` CLI (options:
   `event`, `pre_text`, `clear_on_success`; PR taken from `ctx.pr` or the
-  current branch).
+  current branch). `:ManiculeSend github [comment|approve|request-changes]`
+  picks the review verdict for that send, overriding the configured `event`.
+  Records created with the review panel's `r` reply action are posted as
+  thread replies instead of review comments.
 
 `cmux.enabled` is boolean. When enabled, the integration registers only when a
 cmux workspace and usable cmux executable are available. Agent discovery

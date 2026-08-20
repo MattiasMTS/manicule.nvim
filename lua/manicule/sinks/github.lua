@@ -107,7 +107,8 @@ end
 ---root) are skipped; the skip count is noted in the review body. Records
 ---carrying `meta.github_reply` are returned separately — they post to
 ---the thread-replies endpoint, never inside the review.
-local function build_review(comments, opts)
+---@param event string the review verdict for this send
+local function build_review(comments, opts, event)
   local review_comments = {}
   local replies = {}
   local skipped = 0
@@ -155,12 +156,10 @@ local function build_review(comments, opts)
   end
 
   return {
-    event = opts.event,
+    event = event,
     body = body,
     comments = review_comments,
-  },
-    skipped + skipped_imported,
-    replies
+  }, skipped + skipped_imported, replies
 end
 
 local function post_review(opts, repo, pr, review, cwd)
@@ -244,8 +243,23 @@ function M.setup(opts)
       }
     end,
     send = function(comments, ctx, cb)
+      -- Per-send verdict: ctx.event (from `:ManiculeSend github <verdict>`)
+      -- overrides the configured opts.event.
+      local event = opts.event
+      if ctx.event ~= nil then
+        if not VALID_EVENTS[ctx.event] then
+          cb(
+            false,
+            ('manicule: github sink ctx.event must be "COMMENT", "REQUEST_CHANGES", or "APPROVE", got %q'):format(
+              tostring(ctx.event)
+            )
+          )
+          return
+        end
+        event = ctx.event
+      end
       local cwd = resolve_cwd(ctx, comments)
-      local review, skipped, replies = build_review(comments, opts)
+      local review, skipped, replies = build_review(comments, opts, event)
       if #review.comments == 0 and #replies == 0 then
         cb(
           false,

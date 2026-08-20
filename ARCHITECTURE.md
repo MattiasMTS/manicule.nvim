@@ -324,6 +324,9 @@ Mocks are avoided except for costly or external systems.
 
 - Hosted storage or network sync.
 - Multi-user realtime collaboration.
-- Threads, replies, or reactions.
+- Threads, replies, or reactions in the core record model. GitHub thread
+  interactions (replies, resolve/unresolve) exist, but they live entirely in
+  the sink/meta layer (`meta.github`, `meta.github_reply`) — the record
+  schema itself stays flat and host-agnostic.
 - A pluggable render backend.
 - Fuzzy re-anchoring by line text.

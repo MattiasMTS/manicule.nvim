@@ -130,6 +130,28 @@ describe("manicule github sink", function()
     assert.is_truthy(body.body:find("Please fix", 1, true))
   end)
 
+  it("ctx.event overrides opts.event", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({ event = "COMMENT" })
+
+    local ok, err = send(spec, { record() }, { event = "APPROVE" })
+
+    assert.is_true(ok, err)
+    assert.are.equal("APPROVE", gh.api_input().event)
+  end)
+
+  it("rejects an invalid ctx.event", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({})
+
+    local ok, err = send(spec, { record() }, { event = "SHIP_IT" })
+
+    assert.is_false(ok)
+    assert.is_truthy(err:find("event", 1, true))
+  end)
+
   it("rejects an invalid event at setup", function()
     local ok, err = pcall(function()
       require("manicule.sinks.github").setup({ event = "SHIP_IT" })
@@ -301,5 +323,57 @@ describe("manicule github sink", function()
 
     assert.is_true(health.available)
     assert.is_truthy(tostring(health.gh):find("/gh", 1, true))
+  end)
+
+  describe(":ManiculeSend verdicts", function()
+    it("maps a verdict argument to ctx.event", function()
+      vim.cmd("runtime plugin/manicule.lua")
+      local calls = H.register_fake_sink("github")
+
+      vim.cmd("ManiculeSend github approve")
+      vim.wait(200, function()
+        return #calls > 0
+      end)
+
+      assert.are.equal(1, #calls)
+      assert.are.equal("APPROVE", calls[1].ctx.event)
+    end)
+
+    it("errors on an unknown verdict without dispatching", function()
+      vim.cmd("runtime plugin/manicule.lua")
+      local calls = H.register_fake_sink("github")
+
+      local errored
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        if level == vim.log.levels.ERROR then
+          errored = msg
+        end
+      end
+      vim.cmd("ManiculeSend github ship-it")
+      vim.notify = original_notify
+
+      assert.is_truthy(errored, "expected an ERROR notification")
+      assert.is_truthy(errored:find("ship-it", 1, true))
+      assert.are.equal(0, #calls)
+    end)
+
+    it("completes the verdict words after `github `", function()
+      vim.cmd("runtime plugin/manicule.lua")
+
+      local comps = vim.fn.getcompletion("ManiculeSend github ", "cmdline")
+      table.sort(comps)
+
+      assert.are.same({ "approve", "comment", "request-changes" }, comps)
+    end)
+
+    it("still completes sink names for the first argument", function()
+      vim.cmd("runtime plugin/manicule.lua")
+      H.register_fake_sink("github")
+
+      local comps = vim.fn.getcompletion("ManiculeSend ", "cmdline")
+
+      assert.are.same({ "github" }, comps)
+    end)
   end)
 end)

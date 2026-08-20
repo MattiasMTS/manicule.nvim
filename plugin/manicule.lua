@@ -49,11 +49,44 @@ vim.api.nvim_create_user_command("ManiculeList", function()
   require("manicule").list()
 end, {})
 
+---Verdict words accepted as the optional second argument of
+---`:ManiculeSend github`, mapped to the GitHub review event they pick
+---for that send (overriding the sink's configured `event`).
+local send_verdicts = {
+  comment = "COMMENT",
+  approve = "APPROVE",
+  ["request-changes"] = "REQUEST_CHANGES",
+}
+
 vim.api.nvim_create_user_command("ManiculeSend", function(opts)
-  require("manicule").send(opts.args)
+  local sink = opts.fargs[1]
+  local ctx
+  if opts.fargs[2] ~= nil then
+    local event = send_verdicts[opts.fargs[2]]
+    if not event then
+      vim.notify(
+        ("manicule: unknown verdict %q (expected comment, approve, or request-changes)"):format(opts.fargs[2]),
+        vim.log.levels.ERROR
+      )
+      return
+    end
+    ctx = { event = event }
+  end
+  require("manicule").send(sink, nil, ctx)
 end, {
-  nargs = "?",
-  complete = function()
+  nargs = "*",
+  complete = function(arglead, cmdline)
+    -- Second argument after `github`: complete the verdict words.
+    local sink = cmdline:match("ManiculeSend%s+(%S+)%s")
+    if sink == "github" then
+      local out = {}
+      for _, verdict in ipairs({ "approve", "comment", "request-changes" }) do
+        if verdict:find(arglead, 1, true) == 1 then
+          table.insert(out, verdict)
+        end
+      end
+      return out
+    end
     return require("manicule.sinks").list()
   end,
 })
