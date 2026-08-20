@@ -16,7 +16,9 @@ a review batch.
 
 - Anchored comments on normal files, unrooted files, scratch buffers,
   terminals, and help buffers.
-- Floating popups on commented lines, with optional sticky display.
+- Four comment display modes — end-of-line virtual text (default), floating
+  popups, inline boxes, or hidden anchors — cycled live with
+  `:ManiculeDisplay`.
 - Quickfix list for scanning, jumping, editing, and deleting comments.
 - Project-scoped and session-scoped persistence.
 - Pluggable sinks for sending comments elsewhere.
@@ -71,15 +73,16 @@ records to loaded buffers.
 ## Usage
 
 ```vim
-:ManiculeAdd           " add a comment on the current line or visual range
-:ManiculeList          " open project comments in quickfix
-:ManiculeEdit          " pick a comment to edit, or pass a list position
-:ManiculeDelete        " pick a comment to delete, or pass a list position
-:ManiculeResolve       " pick a comment to mark resolved
-:ManiculeToggle        " hide or restore all comment visuals; during a review session, shows/hides the review panel
-:ManiculeNext [count]  " jump to the next comment in the current buffer
-:ManiculePrev [count]  " jump to the previous comment in the current buffer
-:ManiculeSend [sink]   " send comments to a sink
+:ManiculeAdd            " add a comment on the current line or visual range
+:ManiculeList           " open project comments in quickfix
+:ManiculeEdit           " pick a comment to edit, or pass a list position
+:ManiculeDelete         " pick a comment to delete, or pass a list position
+:ManiculeResolve        " pick a comment to mark resolved
+:ManiculeToggle         " hide or restore all comment visuals; during a review session, shows/hides the review panel
+:ManiculeDisplay [mode] " set the comment display mode; bare command cycles
+:ManiculeNext [count]   " jump to the next comment in the current buffer
+:ManiculePrev [count]   " jump to the previous comment in the current buffer
+:ManiculeSend [sink]    " send comments to a sink
 ```
 
 `:ManiculeAdd` opens a small markdown buffer in insert mode. Press `<CR>` to
@@ -104,6 +107,65 @@ vim.keymap.set("n", "<leader>cl", "<Plug>(manicule-list)")
 vim.keymap.set("n", "]c", "<Plug>(manicule-next)")
 vim.keymap.set("n", "[c", "<Plug>(manicule-prev)")
 ```
+
+### Display modes
+
+Comments paint in one of four display modes:
+
+- `eol` — a collapsed end-of-line marker per comment; the full popup expands
+  while the cursor sits on the line.
+- `float` — anchored floating popups, gated by the viewport (or always shown
+  with `ui.sticky = true`).
+- `inline` — a bordered virtual-line box below each commented line; code is
+  pushed down, never covered.
+- `hidden` — anchor extmarks and line-number tint only.
+
+`eol` is the default because floating popups cover code on long lines.
+`:ManiculeDisplay <mode>` switches live; a bare `:ManiculeDisplay` cycles
+`float → eol → inline → hidden`. The startup mode comes from `ui.display`;
+runtime switches are in-memory and reset when Neovim restarts. No key is
+bound by default — map `<Plug>(manicule-display-cycle)` to cycle from a
+keymap.
+
+The collapsed `eol` marker shows the comment's short id and first body
+line, truncated to the space left on the line (with an `n/m` position when
+several comments share the line, and degrading to `● c<short-id>` when
+almost no space is left):
+
+```
+local sum = 0                     ● c4f2a1c · handle the empty items ca…
+```
+
+Moving the cursor onto the line expands the real popup; moving off
+collapses it again:
+
+```
+local sum = 0                      ┌ c4f2a1c 1/2 ───────────────────┐
+for _, item in ipairs(items) do    │ handle the empty items case    │
+end                                │ before summing                 │
+                                   │ Aug 20 14:05 · edit gca | del… │
+                                   └────────────────────────────────┘
+```
+
+An `inline` box shows the whole comment below the anchor line (long body
+lines word-wrap instead of truncating):
+
+```
+local sum = 0
+ ┌ c4f2a1c 1/2 ─────────────────────────┐
+ │ handle the empty items case          │
+ │ Aug 20 14:05 · edit gca | delete gcd │
+ └──────────────────────────────────────┘
+for _, item in ipairs(items) do
+```
+
+`float` placement (which `eol`'s expanded popups reuse) is
+occlusion-aware: the right-margin spot is used only when it would rest on
+empty cells, otherwise the popup drops below (or above) the anchor line
+instead of covering code.
+
+`gca`/`gcd` (and the `<Plug>` edit/delete maps) work from the commented
+line in every mode.
 
 ## Quickfix
 
@@ -241,6 +303,7 @@ require("manicule").setup({
     cancel_keys = { "q" },
     opacity = 0.0, -- float transparency: 0.0 opaque, 1.0 fully transparent
     sticky = false,
+    display = "eol", -- startup display mode: "float", "eol", "inline", "hidden"
   },
 })
 ```

@@ -1,8 +1,9 @@
 # Architecture
 
 manicule.nvim stores persistent review comments for Neovim buffers. A
-comment is anchored by URI and range, rendered with extmarks and floating
-popups, listed through quickfix, and optionally sent to an external sink.
+comment is anchored by URI and range, rendered with extmarks in one of four
+display modes (floating popups, eol virtual text, inline boxes, or hidden
+anchors), listed through quickfix, and optionally sent to an external sink.
 
 The plugin is local-first. There is no hosted service or network broker.
 Project comments use a local SQLite database in WAL mode; session comments
@@ -33,7 +34,7 @@ lua/manicule/sqlite.lua         minimal LuaJIT FFI SQLite wrapper
 lua/manicule/anchor.lua         shared extmark namespace
 lua/manicule/ui.lua             prompt and sink picker facade
 lua/manicule/ui/editor.lua      floating comment editor
-lua/manicule/ui/render.lua      extmarks, popups, viewport rendering
+lua/manicule/ui/render.lua      extmarks, display modes, popups, viewport rendering
 lua/manicule/ui/quickfix.lua    quickfix formatting and refresh
 lua/manicule/review.lua         review session core (start/open/next/prev/finish/stop)
 lua/manicule/review/git.lua     git plumbing (rev-parse, merge-base, changed files, staging)
@@ -92,20 +93,62 @@ record it keeps one handle containing:
 
 - a primary extmark for anchoring and line-number highlighting
 - additional decoration extmarks for multi-line ranges
+- optional sibling decoration extmarks for the eol marker / inline box block
 - an optional popup buffer/window
 
-`render.reconcile(bufnr, records)` is idempotent. It creates or updates handles
-for live records and clears handles whose record disappeared. Viewport mode
-then calls `render.update_viewport_popups(bufnr, records)` to show popups only
-for currently visible lines. Sticky mode renders every popup.
+Both entry points dispatch on the display mode. `render.reconcile(bufnr,
+records)` is idempotent: it creates or updates handles for live records,
+clears handles whose record disappeared, and decides per mode what a record
+gets beyond its anchor extmark. `render.update_viewport_popups(bufnr,
+records)` owns the transient popups: under `float` it shows popups for
+viewport lines (or every line when `ui.sticky`), under `eol` its visibility
+test becomes the cursor line, and under `inline`/`hidden` it tears every
+popup down.
+
+The mode is split state: `config.get().ui.display` is only the startup
+default (`"eol"`); runtime switches (`:ManiculeDisplay` /
+`render.set_display_mode`, cycle order float → eol → inline → hidden) live
+in module state, in-memory, reset on restart. A switch repaints every
+loaded buffer through the same reconcile + viewport-refresh path `show()`
+uses.
+
+Per mode:
+
+- `eol`: reconcile puts a sibling decoration extmark on each record's
+  anchor line carrying the collapsed `● c<short-id> n/m · body` virt-text
+  marker, truncated to the leftover window width (`n/m` = same-line stack
+  position, omitted for singles). Markers render for every record —
+  viewport/sticky gating is a float concern. The full popup expands while
+  the cursor covers the record: `CursorMoved` feeds init.lua's coalesced
+  viewport refresh, and the viewport pass renders popups for cursor-line
+  records instead of viewport lines.
+- `inline`: each commented line renders ONE `virt_lines` block of bordered
+  boxes below the anchor, owned by the stack head's handle and ordered by
+  `record_stack_less` — code is pushed down, never covered. No popups ever;
+  the box already shows the full body and footer, and edit/delete stay
+  reachable through `record_at_cursor`.
+- `float`: anchored popups with occlusion-aware placement — the
+  right-margin spot is used only when every buffer line the popup would
+  span leaves it on genuinely empty cells (measured by `strdisplaywidth`),
+  otherwise the whole same-line stack falls back below the anchor (above
+  when the window bottom leaves no room), never split between placements.
+  Eol's expanded popups reuse this path.
+- `hidden`: anchor extmarks and line-number tint only.
+
+Float popups and inline boxes share `build_popup_content` (title with short
+id + counter, body fitted to a width cap, date/actions footer). Floats
+ellipsis-truncate each body line; inline word-wraps instead, since there is
+no expanded popup left to reveal the rest.
 
 Popups are intentionally transient. `BufLeave` and `WinLeave` hide them to
 avoid leaking floats across windows. The comment editor is a special case:
 opening it moves focus into a manicule float, so the leave handler skips that
-single transition to keep existing comment popups visible while typing.
+single transition (in every mode) to keep the record's popup visible while
+typing.
 
-Same-line comments stack vertically by popup height and show their stack
-position in the title, for example `cabc 2/3`.
+Same-line comments stack vertically by popup height. The popup/box title
+counter (for example `cabc 2/3`) is the record's position among its scope's
+comments; the eol marker's `n/m` is the same-line stack position.
 
 ## Storage
 
