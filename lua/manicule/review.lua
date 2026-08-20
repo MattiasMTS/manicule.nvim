@@ -94,6 +94,7 @@ function M.open(index)
     protect_left(vim.api.nvim_get_current_buf())
     map_navigation(vim.api.nvim_get_current_buf())
     vim.notify(("manicule: %s was deleted; comments here are file-level notes"):format(pair.path), vim.log.levels.INFO)
+    require("manicule.review.panel").sync_index(index)
     return
   end
 
@@ -106,6 +107,8 @@ function M.open(index)
   map_navigation(vim.api.nvim_get_current_buf())
   map_navigation(right_buf)
   vim.cmd.wincmd("p") -- focus back on the right / worktree side
+  -- Keep the panel's files view pointing at the pair now on screen.
+  require("manicule.review.panel").sync_index(index)
 end
 
 function M.next()

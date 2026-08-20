@@ -296,7 +296,16 @@ local function refresh_current_view()
   else
     items = build_comments_items()
   end
-  vim.fn.setqflist({}, "r", { id = panel_list_id(winid), title = get_panel_title(), items = items })
+  local what = { id = panel_list_id(winid), title = get_panel_title(), items = items }
+  if current_view == "files" then
+    -- Rebuilding resets the list's current entry; restore it to the
+    -- open pair so the panel keeps indicating what is on screen.
+    local state = require("manicule.review").state()
+    if state and state.index and state.index <= #items then
+      what.idx = state.index
+    end
+  end
+  vim.fn.setqflist({}, "r", what)
   -- Restore cursor, clamped
   if vim.api.nvim_win_is_valid(winid) then
     local max_row = math.max(1, #items)
@@ -465,6 +474,27 @@ local function open_window()
       end
     end,
   })
+end
+
+---Point the panel's files view at the given pair: set the quickfix
+---list's current-entry index and move the panel window's cursor to
+---that row, WITHOUT stealing focus from the current window. No-op
+---when the panel is hidden, showing a comments view (including a
+---drill-down), or there is no session.
+---@param pair_index integer
+function M.sync_index(pair_index)
+  if current_view ~= "files" then
+    return
+  end
+  if not require("manicule.review").state() then
+    return
+  end
+  local winid = find_panel_window()
+  if not winid then
+    return
+  end
+  pcall(vim.fn.setqflist, {}, "a", { id = panel_list_id(winid), idx = pair_index })
+  pcall(vim.api.nvim_win_set_cursor, winid, { pair_index, 0 })
 end
 
 function M.open()

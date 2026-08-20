@@ -866,6 +866,59 @@ describe("manicule review session", function()
     )
   end)
 
+  it("next/prev sync the panel's current-entry to the open pair", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(3), label = "sync" }))
+    local pwin = panel_win()
+    assert.is_truthy(pwin, "panel window not found")
+
+    R.next()
+    assert.are.equal(2, vim.fn.getqflist({ winid = pwin, idx = 0 }).idx)
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(pwin)[1])
+    -- Focus must stay in the diff window, not the panel.
+    assert.are_not.equal(pwin, vim.api.nvim_get_current_win())
+    assert.is_false(vim.bo[vim.api.nvim_get_current_buf()].buftype == "quickfix")
+
+    R.prev()
+    assert.are.equal(1, vim.fn.getqflist({ winid = pwin, idx = 0 }).idx)
+    assert.are.equal(1, vim.api.nvim_win_get_cursor(pwin)[1])
+  end)
+
+  it("comment-add refresh keeps the panel index on the open pair", function()
+    local R = require("manicule.review")
+    local files = make_pairs(3)
+    assert.is_true(R.start({ files = files, label = "sync-refresh" }))
+    R.next() -- pair 2 open
+
+    -- Adding a comment fires User ManiculeAdded, which rebuilds the
+    -- panel list; the rebuild must restore idx to the open pair.
+    add_comment(files[2].right, "note on pair 2")
+    vim.wait(200)
+
+    local pwin = panel_win()
+    assert.is_truthy(pwin, "panel window not found")
+    assert.are.equal(2, vim.fn.getqflist({ winid = pwin, idx = 0 }).idx)
+  end)
+
+  it("next() in drill-down comments view leaves the comments list alone", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "sync-drill" }))
+    add_comment(files[1].right, "drill comment")
+    R.open(1)
+
+    press_in_panel(1, "<CR>") -- drill into pair 1's scoped comments view
+    assert.are.equal(1, #vim.fn.getqflist())
+
+    local ok, err = pcall(R.next)
+    assert.is_true(ok, err)
+
+    -- Comments list undisturbed by the pair switch.
+    local items = vim.fn.getqflist()
+    assert.are.equal(1, #items)
+    assert.is_truthy(items[1].text:find("drill comment", 1, true))
+  end)
+
   it(":ManiculeToggle hides the panel during a session and keeps it running", function()
     vim.cmd("runtime plugin/manicule.lua")
     local R = require("manicule.review")
