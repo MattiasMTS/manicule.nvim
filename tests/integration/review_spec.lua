@@ -971,6 +971,78 @@ describe("manicule review session", function()
     assert.is_false(require("manicule.review.panel").toggle())
   end)
 
+  it("finish() from a foreign cwd/unnamed buffer still sends session comments", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+
+    local sent
+    require("manicule").register_sink({
+      name = "capture",
+      send = function(comments, _, cb)
+        sent = comments
+        cb(true)
+      end,
+    })
+
+    assert.is_true(R.start({ files = files, label = "root-hint", sink = "capture" }))
+    add_comment(files[1].right, "session comment")
+
+    -- Move to an unnamed scratch buffer with cwd OUTSIDE the reviewed
+    -- project: list() resolves the store root from the CURRENT buffer,
+    -- falling back to cwd, so without the session's `_root` hint the
+    -- comment would be silently dropped ("review has no comments to send").
+    local elsewhere = ctx.artifact_root .. "/elsewhere"
+    vim.fn.mkdir(elsewhere, "p")
+    local saved = (vim.uv or vim.loop).cwd()
+    vim.cmd.enew()
+    vim.cmd.cd(elsewhere)
+
+    R.finish()
+    vim.wait(200, function()
+      return sent ~= nil
+    end)
+    vim.cmd.cd(saved)
+
+    assert.is_truthy(sent, "sink never received the session's comments")
+    assert.are.equal(1, #sent)
+    assert.are.equal("session comment", sent[1].body)
+  end)
+
+  it("VimLeavePre autoflush wait tracks the socket sink's ack timeout", function()
+    local R = require("manicule.review")
+    -- Default socket ack_timeout_ms is 2000; the historical 2500 floor holds.
+    assert.are.equal(2500, R._autoflush_wait_ms())
+
+    -- A user-configured ack_timeout_ms at or above the old hard-coded 2500
+    -- must extend the wait past the sink's ack timer, or nvim exits before
+    -- the never-lose-comments submit.json fallback fires. No restore
+    -- needed: before_each's setup() rebuilds the config from defaults.
+    require("manicule.config").get().sinks.socket = { ack_timeout_ms = 5000 }
+    assert.is_true(R._autoflush_wait_ms() > 5000, "wait must outlive the ack timer")
+  end)
+
+  it("recreates the session tab after :tabclose so next() does not error", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "tabclose" }))
+    local dead_tab = R.state().tab
+
+    vim.cmd.tabclose() -- kill the review tab directly, bypassing stop()
+
+    local ok, err = pcall(R.next)
+    assert.is_true(ok, err)
+
+    -- Session survived on a fresh, valid tab showing the next pair.
+    local state = R.state()
+    assert.is_truthy(state, "session died with the tab")
+    assert.are.equal(2, state.index)
+    assert.are_not.equal(dead_tab, state.tab)
+    assert.is_true(vim.api.nvim_tabpage_is_valid(state.tab))
+    assert.are.equal(state.tab, vim.api.nvim_get_current_tabpage())
+    assert.is_truthy(vim.api.nvim_buf_get_name(0):find("f2.lua", 1, true))
+    -- The panel comes back with the recreated tab.
+    assert.is_truthy(panel_win(), "panel not reopened with the recreated tab")
+  end)
+
   it("stop() closes the panel and clears autocmds", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))

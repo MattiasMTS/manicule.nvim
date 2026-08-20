@@ -101,6 +101,19 @@ function M.open(index)
   end
   session.index = index
   local pair = session.files[index]
+  -- The review tab can die under the session (`:tabclose` instead of
+  -- stop()): the session and its buffer-local <Tab> maps survive, and
+  -- the dead handle used to throw 'Invalid tabpage id' here. Recreate
+  -- the tab (panel included) rather than stopping, so the session and
+  -- its pending comments stay alive. A TabClosed autocmd that stops the
+  -- session would fight this recovery — an accidental close would kill
+  -- the review and the VimLeavePre autoflush of its comments — so we
+  -- recover lazily here instead.
+  if not vim.api.nvim_tabpage_is_valid(session.tab) then
+    vim.cmd.tabnew()
+    session.tab = vim.api.nvim_get_current_tabpage()
+    require("manicule.review.panel").open()
+  end
   vim.api.nvim_set_current_tabpage(session.tab)
   close_session_windows()
 
@@ -255,6 +268,29 @@ local function session_uris()
   return uris
 end
 
+---Project root the session's worktree files live under. list() resolves
+---the store root from the CURRENT buffer, falling back to cwd — which,
+---from an unnamed buffer, the VimLeavePre autoflush, or a job-driven
+---review of an external worktree, can miss the reviewed project entirely
+---and silently drop the session's comments. Derive the root from the
+---session's own files instead (same mechanism as review/panel.lua) and
+---pass it as `_root` on every list/send filter.
+---@return string|nil
+local function session_root()
+  if not session then
+    return nil
+  end
+  local markers = require("manicule.config").current.store.root_markers
+  for _, pair in ipairs(session.files) do
+    local path = pair.status == "D" and pair.left or pair.right
+    local root = vim.fs.root(path, markers)
+    if root then
+      return root
+    end
+  end
+  return nil
+end
+
 ---Count the session's pending comments without side effects. Records
 ---imported FROM GitHub (meta.github.imported) are excluded: finish()
 ---must never echo GitHub's own comments back through the sink.
@@ -262,7 +298,12 @@ local function pending_comments()
   if not session then
     return {}
   end
-  return require("manicule").list({ _quiet = true, uris = session_uris(), exclude_imported = true })
+  return require("manicule").list({
+    _quiet = true,
+    uris = session_uris(),
+    exclude_imported = true,
+    _root = session_root(),
+  })
 end
 
 ---Dispatch the session's comments to the configured sink.
@@ -283,7 +324,11 @@ function M.finish(opts)
     vim.notify("manicule: review has no comments to send", vim.log.levels.INFO)
     return
   end
-  require("manicule").send(sink, { uris = session_uris(), exclude_imported = true }, session.sink_ctx)
+  require("manicule").send(
+    sink,
+    { uris = session_uris(), exclude_imported = true, _root = session_root() },
+    session.sink_ctx
+  )
 end
 
 ---Start a review from a JSON job file written by an external driver
@@ -322,14 +367,29 @@ function M.start_from_job(path)
   return ok, err
 end
 
+---Milliseconds the VimLeavePre autoflush blocks waiting for the sink to
+---settle. The socket sink writes its never-lose-comments submit.json
+---fallback only when its ack timer fires, so the wait must outlive the
+---configured `ack_timeout_ms` (plus margin for the scheduled fallback
+---write) — a hard-coded 2500 lost comments for any timeout >= 2500. The
+---historical 2500 stays as the floor. Exposed for tests.
+---@return integer
+function M._autoflush_wait_ms()
+  local sinks_cfg = require("manicule.config").get().sinks or {}
+  local socket_cfg = type(sinks_cfg.socket) == "table" and sinks_cfg.socket or {}
+  local ack = tonumber(socket_cfg.ack_timeout_ms) or 2000
+  return math.max(2500, ack + 500)
+end
+
 local augroup = vim.api.nvim_create_augroup("ManiculeReview", { clear = true })
 vim.api.nvim_create_autocmd("VimLeavePre", {
   group = augroup,
   callback = function()
     if session and session.sink and #pending_comments() > 0 then
       -- Block until the async sink settles or times out so the submit/fallback
-      -- completes before nvim exits. Socket sink's default ack_timeout_ms is
-      -- 2000; wait slightly longer to let submit.json fallback finish.
+      -- completes before nvim exits. The wait is derived from the socket
+      -- sink's configured ack_timeout_ms: any shorter and nvim exits before
+      -- the sink's submit.json fallback timer ever fires.
       local done = false
       local done_id = vim.api.nvim_create_autocmd("User", {
         pattern = "ManiculeSent",
@@ -339,7 +399,7 @@ vim.api.nvim_create_autocmd("VimLeavePre", {
         end,
       })
       M.finish()
-      vim.wait(2500, function()
+      vim.wait(M._autoflush_wait_ms(), function()
         return done
       end, 50, false)
       pcall(vim.api.nvim_del_autocmd, done_id)
