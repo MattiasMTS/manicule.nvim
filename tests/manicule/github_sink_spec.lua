@@ -378,6 +378,12 @@ describe("manicule github sink", function()
       table.insert(notifications, { msg = tostring(msg), level = level })
     end
     require("manicule").send("github")
+    -- The send path is async (gh runs via vim.system callbacks): the
+    -- auto-clear fires after the sink's cb, and the skipped notify fires
+    -- just before it — wait for the clear before restoring vim.notify.
+    vim.wait(2000, function()
+      return store.get(ctx.root, "posted-1") == nil
+    end)
     vim.notify = original_notify
 
     -- Only the new record with a repository-relative path was posted.

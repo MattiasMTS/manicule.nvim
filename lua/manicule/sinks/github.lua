@@ -5,7 +5,9 @@
 -- comes from ctx.pr when given, otherwise `gh pr view` resolves the PR
 -- for the current branch. gh is always invoked with argv only — the
 -- JSON review body travels via a temp file passed to `gh api --input`,
--- never through a shell string.
+-- never through a shell string. The send path runs gh asynchronously
+-- (vim.system callbacks) so the UI never blocks on network calls; the
+-- sink reports completion through the `send(comments, ctx, cb)` cb.
 
 local helpers = require("manicule.sinks.helpers")
 
@@ -57,39 +59,49 @@ local function resolve_cwd(ctx, comments)
   return uv.cwd()
 end
 
-local function gh_json(opts, argv, cwd)
+---Run gh asynchronously and decode its JSON stdout. `cb(decoded, nil)`
+---on success, `cb(nil, err)` on failure — always on the main loop.
+local function gh_json(opts, argv, cwd, cb)
   local full = { cli(opts) }
   vim.list_extend(full, argv)
-  local result = helpers.system(full, { cwd = cwd })
-  if result.code ~= 0 then
-    return nil, result.stderr:gsub("%s+$", "")
-  end
-  local ok, decoded = pcall(vim.json.decode, result.stdout)
-  if not ok or type(decoded) ~= "table" then
-    return nil, "gh returned invalid JSON: " .. result.stdout:sub(1, 200)
-  end
-  return decoded, nil
+  helpers.system_async(full, { cwd = cwd }, function(result)
+    if result.code ~= 0 then
+      cb(nil, result.stderr:gsub("%s+$", ""))
+      return
+    end
+    local ok, decoded = pcall(vim.json.decode, result.stdout)
+    if not ok or type(decoded) ~= "table" then
+      cb(nil, "gh returned invalid JSON: " .. result.stdout:sub(1, 200))
+      return
+    end
+    cb(decoded, nil)
+  end)
 end
 
-local function resolve_pr(opts, ctx, cwd)
+local function resolve_pr(opts, ctx, cwd, cb)
   local explicit = tonumber(ctx.pr)
   if explicit then
-    return explicit, nil
+    cb(explicit, nil)
+    return
   end
-  local decoded, err = gh_json(opts, { "pr", "view", "--json", "number" }, cwd)
-  if not decoded or type(decoded.number) ~= "number" then
-    local detail = err and err ~= "" and (" (" .. err .. ")") or ""
-    return nil, "manicule: no open PR for this branch; pass ctx.pr or check out the PR branch" .. detail
-  end
-  return decoded.number, nil
+  gh_json(opts, { "pr", "view", "--json", "number" }, cwd, function(decoded, err)
+    if not decoded or type(decoded.number) ~= "number" then
+      local detail = err and err ~= "" and (" (" .. err .. ")") or ""
+      cb(nil, "manicule: no open PR for this branch; pass ctx.pr or check out the PR branch" .. detail)
+      return
+    end
+    cb(decoded.number, nil)
+  end)
 end
 
-local function resolve_repo(opts, cwd)
-  local decoded, err = gh_json(opts, { "repo", "view", "--json", "nameWithOwner" }, cwd)
-  if not decoded or type(decoded.nameWithOwner) ~= "string" then
-    return nil, "manicule: could not resolve GitHub repository via gh repo view" .. (err and (": " .. err) or "")
-  end
-  return decoded.nameWithOwner, nil
+local function resolve_repo(opts, cwd, cb)
+  gh_json(opts, { "repo", "view", "--json", "nameWithOwner" }, cwd, function(decoded, err)
+    if not decoded or type(decoded.nameWithOwner) ~= "string" then
+      cb(nil, "manicule: could not resolve GitHub repository via gh repo view" .. (err and (": " .. err) or ""))
+      return
+    end
+    cb(decoded.nameWithOwner, nil)
+  end)
 end
 
 ---`meta.github_reply` payload for a record authored as a thread reply
@@ -210,14 +222,15 @@ local function mark_sent(records)
   end
 end
 
-local function post_review(opts, repo, pr, review, cwd)
+local function post_review(opts, repo, pr, review, cwd, cb)
   local tmp = vim.fn.tempname() .. ".json"
   -- `writefile` can also signal failure by returning -1 without throwing.
   local write_ok, wrote = pcall(vim.fn.writefile, { vim.json.encode(review) }, tmp)
   if not write_ok or wrote ~= 0 then
-    return false, "manicule: github sink could not write review payload to " .. tmp
+    cb(false, "manicule: github sink could not write review payload to " .. tmp)
+    return
   end
-  local result = helpers.system({
+  helpers.system_async({
     cli(opts),
     "api",
     ("repos/%s/pulls/%d/reviews"):format(repo, pr),
@@ -225,20 +238,22 @@ local function post_review(opts, repo, pr, review, cwd)
     "POST",
     "--input",
     tmp,
-  }, { cwd = cwd })
-  vim.fn.delete(tmp)
-  if result.code ~= 0 then
-    return false, "manicule: gh api failed: " .. result.stderr:gsub("%s+$", "")
-  end
-  return true, nil
+  }, { cwd = cwd }, function(result)
+    vim.fn.delete(tmp)
+    if result.code ~= 0 then
+      cb(false, "manicule: gh api failed: " .. result.stderr:gsub("%s+$", ""))
+      return
+    end
+    cb(true, nil)
+  end)
 end
 
 ---Post one thread reply: POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies.
 ---The reply's own PR number (recorded at import time) wins over the
 ---review's resolved PR so replies land on the thread they came from.
-local function post_reply(opts, repo, pr, reply, cwd)
+local function post_reply(opts, repo, pr, reply, cwd, cb)
   local target_pr = reply.pr or pr
-  local result = helpers.system({
+  helpers.system_async({
     cli(opts),
     "api",
     ("repos/%s/pulls/%d/comments/%s/replies"):format(repo, target_pr, tostring(reply.to)),
@@ -246,11 +261,13 @@ local function post_reply(opts, repo, pr, reply, cwd)
     "POST",
     "-f",
     "body=" .. reply.body,
-  }, { cwd = cwd })
-  if result.code ~= 0 then
-    return false, "manicule: gh api reply failed: " .. result.stderr:gsub("%s+$", "")
-  end
-  return true, nil
+  }, { cwd = cwd }, function(result)
+    if result.code ~= 0 then
+      cb(false, "manicule: gh api reply failed: " .. result.stderr:gsub("%s+$", ""))
+      return
+    end
+    cb(true, nil)
+  end)
 end
 
 ---Whether the github integration can be used in the current environment.
@@ -362,45 +379,79 @@ function M.setup(opts)
         )
         return
       end
-      local repo, repo_err = resolve_repo(opts, cwd)
-      if not repo then
-        cb(false, repo_err)
-        return
+      -- The gh steps below are sequential network calls, each run through
+      -- an async vim.system so the UI never blocks on gh. The chain is
+      -- kept flat: named steps hand off to the next from their callback
+      -- (already vim.schedule'd back to the main loop by system_async)
+      -- instead of nesting closures per step.
+      local repo, pr
+      local errors = {}
+
+      local function finish()
+        if #errors > 0 then
+          cb(
+            false,
+            table.concat(errors, "; ")
+              .. " (already-posted items were marked sent and will not repost; retry sends only the remainder)"
+          )
+          return
+        end
+        notify_skipped()
+        cb(true, nil)
       end
-      local pr, pr_err = resolve_pr(opts, ctx, cwd)
-      if not pr then
-        cb(false, pr_err)
-        return
+
+      -- Replies post independently: mark each success immediately and
+      -- collect failures, so a retry re-attempts ONLY what failed.
+      local function step_replies(index)
+        local reply = replies[index]
+        if not reply then
+          finish()
+          return
+        end
+        post_reply(opts, repo, pr, reply, cwd, function(ok, err)
+          if ok then
+            mark_sent({ reply.record })
+          else
+            table.insert(errors, err)
+          end
+          step_replies(index + 1)
+        end)
       end
-      if #review.comments > 0 then
-        local ok, err = post_review(opts, repo, pr, review, cwd)
-        if not ok then
+
+      local function step_review()
+        if #review.comments == 0 then
+          step_replies(1)
+          return
+        end
+        post_review(opts, repo, pr, review, cwd, function(ok, err)
+          if not ok then
+            cb(false, err)
+            return
+          end
+          mark_sent(review_records)
+          step_replies(1)
+        end)
+      end
+
+      local function step_pr()
+        resolve_pr(opts, ctx, cwd, function(resolved, err)
+          if not resolved then
+            cb(false, err)
+            return
+          end
+          pr = resolved
+          step_review()
+        end)
+      end
+
+      resolve_repo(opts, cwd, function(resolved, err)
+        if not resolved then
           cb(false, err)
           return
         end
-        mark_sent(review_records)
-      end
-      -- Replies post independently: mark each success immediately and
-      -- collect failures, so a retry re-attempts ONLY what failed.
-      local errors = {}
-      for _, reply in ipairs(replies) do
-        local ok, err = post_reply(opts, repo, pr, reply, cwd)
-        if ok then
-          mark_sent({ reply.record })
-        else
-          table.insert(errors, err)
-        end
-      end
-      if #errors > 0 then
-        cb(
-          false,
-          table.concat(errors, "; ")
-            .. " (already-posted items were marked sent and will not repost; retry sends only the remainder)"
-        )
-        return
-      end
-      notify_skipped()
-      cb(true, nil)
+        repo = resolved
+        step_pr()
+      end)
     end,
   }
 end

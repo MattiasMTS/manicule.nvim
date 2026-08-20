@@ -196,4 +196,24 @@ function M.system(argv, opts)
   }
 end
 
+---Run a command asynchronously without blocking the UI. The callback
+---receives the same normalized result table as `M.system` and is invoked
+---via `vim.schedule` (vim.system's on_exit fires in a fast-event
+---context), so it may safely touch the vim API and `vim.notify`.
+---@param argv string[]
+---@param opts? table
+---@param cb fun(result: {code: integer, stdout: string, stderr: string})
+function M.system_async(argv, opts, cb)
+  opts = vim.tbl_extend("force", { text = true }, opts or {})
+  vim.system(argv, opts, function(result)
+    vim.schedule(function()
+      cb({
+        code = result.code or 0,
+        stdout = result.stdout or "",
+        stderr = result.stderr or "",
+      })
+    end)
+  end)
+end
+
 return M
