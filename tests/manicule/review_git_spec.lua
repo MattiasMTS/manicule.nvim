@@ -58,7 +58,7 @@ describe("manicule review git plumbing", function()
     assert.are.equal(0, vim.fn.getfsize(by_path["src/new.lua"].left))
   end)
 
-  it("stages tracked baselines with one subprocess", function()
+  it("stages tracked baselines with two subprocesses", function()
     local G = require("manicule.review.git")
     local root = H.git_repo(ctx, {
       ["src/modified file.lua"] = { "return 1" },
@@ -83,11 +83,63 @@ describe("manicule review git plumbing", function()
     G.run = original_run
 
     assert.is_true(ok)
-    assert.are.equal(1, #calls)
+    assert.are.equal(2, #calls)
+    assert.are.equal("git", calls[1][1])
+    assert.are.equal(root, calls[1][3])
+    assert.are.equal("--literal-pathspecs", calls[1][4])
+    assert.are.equal("archive", calls[1][5])
+    assert.are.equal("-o", calls[1][6])
+    assert.are.equal("tar", calls[2][1])
+    assert.are.equal("-xf", calls[2][2])
     assert.are.equal(3, #files)
     assert.are.equal("return 1", table.concat(vim.fn.readfile(files[1].left), "\n"))
     assert.are.equal("return 0", table.concat(vim.fn.readfile(files[2].left), "\n"))
     assert.are.equal(0, vim.fn.getfsize(files[3].left))
+  end)
+
+  it("self-heals an archive chunk containing a path absent from the base", function()
+    local G = require("manicule.review.git")
+    local uv = vim.uv or vim.loop
+    local root = H.git_repo(ctx, {
+      ["src/a.lua"] = { "return 1" },
+      ["src/b.lua"] = { "return 2" },
+    })
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local files = G.stage_baseline(root, base, {
+      { path = "src/a.lua", status = "M" },
+      { path = "src/bogus.lua", status = "M" },
+      { path = "src/b.lua", status = "D" },
+    }, ctx.artifact_root .. "/bogus-staged")
+
+    local by_path = {}
+    for _, pair in ipairs(files) do
+      by_path[pair.path] = pair
+    end
+    assert.are.equal("return 1", table.concat(vim.fn.readfile(by_path["src/a.lua"].left), "\n"))
+    assert.are.equal("return 2", table.concat(vim.fn.readfile(by_path["src/b.lua"].left), "\n"))
+    assert.are.equal("file", assert(uv.fs_lstat(by_path["src/bogus.lua"].left)).type)
+    assert.are.equal(0, vim.fn.getfsize(by_path["src/bogus.lua"].left))
+  end)
+
+  it("stages a baseline symlink blob as a regular file", function()
+    local G = require("manicule.review.git")
+    local uv = vim.uv or vim.loop
+    local root, git = H.git_repo(ctx, { ["target.txt"] = { "target content" } })
+    local ok, linked = pcall(uv.fs_symlink, "target.txt", root .. "/link.txt")
+    if not ok or not linked then
+      pending("platform cannot create symlinks")
+      return
+    end
+    git("add", "link.txt")
+    git("commit", "-qm", "add symlink")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local files = G.stage_baseline(root, base, {
+      { path = "link.txt", status = "M" },
+    }, ctx.artifact_root .. "/symlink-staged")
+
+    assert.are.equal("file", assert(uv.fs_lstat(files[1].left)).type)
+    assert.are.equal("target.txt", table.concat(vim.fn.readfile(files[1].left), "\n"))
   end)
 
   it("computes merge-base", function()

@@ -8,4 +8,6 @@ Measured with `scripts/bench-review` on macOS using Neovim 0.13.0-nightly and Gi
 | `stage_baseline` | 17,672.247 ms | 1,110.764 ms | 15.9x |
 | panel `build_files_items` | 79,774.292 ms | 41.888 ms | 1,904.4x |
 
-The baseline now stages tracked files through chunked `git archive | tar` pipelines instead of one `git show` process per file. Panel comment counts come from one filtered list call and a URI count map.
+The baseline now stages tracked files through chunked `git archive` and `tar` subprocesses instead of one `git show` process per file. Panel comment counts come from one filtered list call and a URI count map.
+
+Review baseline staging requires the `tar` executable at runtime.

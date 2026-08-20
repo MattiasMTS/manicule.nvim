@@ -228,6 +228,11 @@ function M.check()
   else
     health.warn("git is not available; :ManiculeReview needs git for ref/pr resolvers")
   end
+  if vim.fn.executable("tar") == 1 then
+    health.ok("tar is available")
+  else
+    health.warn("tar is not available; review baseline staging degrades or fails without it")
+  end
   if vim.fn.executable("gh") == 1 then
     health.ok("gh CLI is available")
   else

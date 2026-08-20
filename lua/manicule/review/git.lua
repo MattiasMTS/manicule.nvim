@@ -145,23 +145,34 @@ function M.stage_baseline(root, base, entries, dir)
   local max_paths_per_chunk = 200
   local chunk = {}
   local chunk_bytes = #root + #base + #dir + 1024
+  local failed_paths = {}
 
   local function extract(paths)
     if #paths == 0 then
       return
     end
-    local argv = {
-      "sh",
-      "-c",
-      'root=$1; base=$2; dir=$3; shift 3; git -C "$root" --literal-pathspecs archive "$base" -- "$@" | tar -xf - -C "$dir"',
-      "manicule-git-archive",
+    local archive_path = vim.fn.tempname() .. ".tar"
+    local archive_argv = {
+      "git",
+      "-C",
       root,
+      "--literal-pathspecs",
+      "archive",
+      "-o",
+      archive_path,
       base,
-      dir,
+      "--",
     }
-    vim.list_extend(argv, paths)
-    local result = M.run(argv)
-    assert(result.code == 0, "manicule: failed to stage git baseline: " .. trim(result.stderr))
+    vim.list_extend(archive_argv, paths)
+    local archive_result = M.run(archive_argv)
+    local tar_result = M.run({ "tar", "-xf", archive_path, "-C", dir })
+    pcall(uv.fs_unlink, archive_path)
+
+    if archive_result.code ~= 0 or tar_result.code ~= 0 then
+      for _, path in ipairs(paths) do
+        failed_paths[path] = true
+      end
+    end
   end
 
   for _, entry in ipairs(entries) do
@@ -178,17 +189,33 @@ function M.stage_baseline(root, base, entries, dir)
   end
   extract(chunk)
 
+  local function write_regular(path, content)
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent then
+      mkdir_p(parent)
+    end
+    local stat = uv.fs_lstat(path)
+    if stat and stat.type ~= "file" then
+      local ok, err = uv.fs_unlink(path)
+      assert(ok, ("manicule: cannot replace staged baseline %s: %s"):format(path, tostring(err)))
+    end
+    local fd, err = uv.fs_open(path, "w", 438) -- 0666, filtered by umask
+    assert(fd, ("manicule: cannot stage baseline %s: %s"):format(path, tostring(err)))
+    local _, write_err = uv.fs_write(fd, content, 0)
+    uv.fs_close(fd)
+    assert(not write_err, ("manicule: cannot write staged baseline %s: %s"):format(path, tostring(write_err)))
+  end
+
   local files = {}
   for _, entry in ipairs(entries) do
     local left = dir .. "/" .. entry.path
     if entry.status == "A" then
-      local parent = left:match("^(.*)/[^/]+$")
-      if parent then
-        mkdir_p(parent)
+      write_regular(left, "")
+    else
+      local stat = uv.fs_lstat(left)
+      if failed_paths[entry.path] or not stat or stat.type ~= "file" then
+        write_regular(left, M.show_file(root, base, entry.path) or "")
       end
-      local fd, err = uv.fs_open(left, "w", 438) -- 0666, filtered by umask
-      assert(fd, ("manicule: cannot stage empty baseline %s: %s"):format(left, tostring(err)))
-      uv.fs_close(fd)
     end
     table.insert(files, {
       left = left,
