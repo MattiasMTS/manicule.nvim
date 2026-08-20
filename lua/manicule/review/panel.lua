@@ -282,17 +282,16 @@ local function setup_panel_keymaps(bufnr)
   require("manicule.ui.quickfix_keymaps").attach(bufnr)
 end
 
-function M.open()
-  local review = require("manicule.review")
-  local state = review.state()
-  if not state then
-    return
+---Create the panel window for the CURRENT view state: push a fresh qf
+---list, open it bottom, wire keymaps, refocus the diff, and (re)arm the
+---live-refresh autocmds. Shared by open() and toggle() reopen.
+local function open_window()
+  local items
+  if current_view == "files" then
+    items = build_files_items()
+  else
+    items = build_comments_items()
   end
-
-  -- Always start in files view
-  current_view = "files"
-  file_filter = nil
-  local items = build_files_items()
   local title = get_panel_title()
 
   vim.fn.setqflist({}, " ", { title = title, items = items })
@@ -336,6 +335,42 @@ function M.open()
       end
     end,
   })
+end
+
+function M.open()
+  local review = require("manicule.review")
+  local state = review.state()
+  if not state then
+    return
+  end
+
+  -- Always start in files view
+  current_view = "files"
+  file_filter = nil
+  open_window()
+end
+
+---Show/hide the panel window without ending the session. Hiding closes
+---ONLY the window; view and file-filter state survive so a second
+---toggle reopens the panel exactly where it was. Autocmds are dropped
+---on hide and re-armed on reopen (no leaks, no refreshes of a window
+---that is gone). No-op without an active session.
+---@return boolean toggled false when there is no session
+function M.toggle()
+  if not require("manicule.review").state() then
+    return false
+  end
+  if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
+    pcall(vim.api.nvim_win_close, panel_winid, true)
+    panel_winid = nil
+    if augroup then
+      pcall(vim.api.nvim_del_augroup_by_id, augroup)
+      augroup = nil
+    end
+    return true
+  end
+  open_window()
+  return true
 end
 
 function M.close()

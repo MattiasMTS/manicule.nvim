@@ -70,9 +70,17 @@ vim.api.nvim_create_user_command("ManiculeEdit", function(opts)
   dispatch_positional("edit", opts)
 end, { nargs = "?", complete = position_completer })
 
-vim.api.nvim_create_user_command("ManiculeToggle", function()
+---During an active review session, :ManiculeToggle shows/hides the
+---review panel; otherwise it flips comment visuals on/off.
+local function toggle()
+  if require("manicule.review").state() then
+    require("manicule.review.panel").toggle()
+    return
+  end
   require("manicule.ui.render").toggle()
-end, {})
+end
+
+vim.api.nvim_create_user_command("ManiculeToggle", toggle, {})
 
 local function dispatch_jump(direction, opts)
   local count = 1
@@ -138,12 +146,10 @@ vim.keymap.set("n", "<Plug>(manicule-delete)", function()
   require("manicule").delete(id)
 end, { silent = true })
 
--- Flip visuals on/off without touching the store. No default binding —
--- the command is enough for most users; expose the <Plug> for anyone
--- who wants a keymap.
-vim.keymap.set("n", "<Plug>(manicule-toggle)", function()
-  require("manicule.ui.render").toggle()
-end, { silent = true })
+-- Flip visuals on/off without touching the store (or show/hide the
+-- review panel during a session). No default binding — the command is
+-- enough for most users; expose the <Plug> for anyone who wants a keymap.
+vim.keymap.set("n", "<Plug>(manicule-toggle)", toggle, { silent = true })
 
 -- Default keymaps. The popup footer advertises `gca` / `gcd` so users
 -- expect them to work out of the box. Set `vim.g.manicule_no_default_keymaps = 1`

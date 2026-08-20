@@ -570,6 +570,58 @@ describe("manicule review session", function()
     assert.is_truthy(texts:find("second file comment", 1, true))
   end)
 
+  it(":ManiculeToggle hides the panel during a session and keeps it running", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "toggle" }))
+    assert.is_truthy(panel_win(), "panel window not found")
+
+    vim.cmd("ManiculeToggle")
+
+    assert.is_nil(panel_win(), "panel window still open after toggle")
+    assert.is_truthy(R.state(), "toggle killed the session")
+  end)
+
+  it(":ManiculeToggle twice restores the panel in the same view", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "toggle" }))
+    add_comment(files[1].right, "first file comment")
+    add_comment(files[2].right, "second file comment")
+
+    -- Drill into a comments view scoped to file 1.
+    press_in_panel(1, "<CR>")
+    assert.are.equal(1, #vim.fn.getqflist())
+
+    vim.cmd("ManiculeToggle")
+    assert.is_nil(panel_win())
+    vim.cmd("ManiculeToggle")
+
+    local winid = panel_win()
+    assert.is_truthy(winid, "panel window not reopened")
+    -- Still the scoped comments view: one row, file 1's comment only.
+    local items = vim.fn.getqflist()
+    assert.are.equal(1, #items)
+    assert.is_truthy(items[1].text:find("first file comment", 1, true))
+  end)
+
+  it(":ManiculeToggle without a session still toggles comment visuals", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local render = require("manicule.ui.render")
+    assert.is_false(render.is_hidden())
+
+    vim.cmd("ManiculeToggle")
+    assert.is_true(render.is_hidden())
+
+    vim.cmd("ManiculeToggle")
+    assert.is_false(render.is_hidden())
+  end)
+
+  it("panel.toggle() without a session is a no-op returning false", function()
+    assert.is_false(require("manicule.review.panel").toggle())
+  end)
+
   it("stop() closes the panel and clears autocmds", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))

@@ -76,7 +76,7 @@ records to loaded buffers.
 :ManiculeEdit          " pick a comment to edit, or pass a list position
 :ManiculeDelete        " pick a comment to delete, or pass a list position
 :ManiculeResolve       " pick a comment to mark resolved
-:ManiculeToggle        " hide or restore all comment visuals
+:ManiculeToggle        " hide or restore all comment visuals; during a review session, shows/hides the review panel
 :ManiculeNext [count]  " jump to the next comment in the current buffer
 :ManiculePrev [count]  " jump to the previous comment in the current buffer
 :ManiculeSend [sink]   " send comments to a sink
@@ -141,8 +141,10 @@ comments view scoped to that file (`<CR>` jumps to a comment, `dd`
 deletes, `ce` edits, `<Esc>` goes back to the file list); `<CR>` on a
 file without comments switches the diff to that pair, and `o` always
 opens the pair regardless of comment count. From a scoped comments view
-`<Tab>` widens to all session comments. Running `:ManiculeReview pr`
-with no number opens a picker over the repository's open PRs.
+`<Tab>` widens to all session comments. `:ManiculeToggle` shows/hides the
+panel during a review (the session and panel view are preserved). Running
+`:ManiculeReview pr` with no number opens a picker over the repository's
+open PRs.
 
 When you review a PR with its head checked out (`:ManiculeReview pr 123`
 on the PR branch), existing GitHub review comments are imported as
