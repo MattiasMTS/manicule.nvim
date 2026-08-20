@@ -1,0 +1,134 @@
+#!/usr/bin/env -S nvim --clean --headless -l
+
+local uv = vim.uv or vim.loop
+local project = uv.cwd()
+vim.opt.runtimepath:prepend(project)
+package.path = table.concat({ project .. "/lua/?.lua", project .. "/lua/?/init.lua", package.path }, ";")
+
+local function run(argv, cwd)
+  local result = vim.system(argv, { cwd = cwd, text = true }):wait()
+  assert(result.code == 0, ("%s failed:\n%s"):format(table.concat(argv, " "), result.stderr or ""))
+  return result
+end
+
+local function write(path, content)
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
+  local fd = assert(io.open(path, "wb"))
+  fd:write(content)
+  fd:close()
+end
+
+local function elapsed_ms(fn)
+  local start = uv.hrtime()
+  local result = fn()
+  return (uv.hrtime() - start) / 1e6, result
+end
+
+local function find_upvalue(fn, wanted)
+  for index = 1, 100 do
+    local name, value = debug.getupvalue(fn, index)
+    if not name then
+      break
+    end
+    if name == wanted then
+      return value
+    end
+  end
+  error("missing upvalue " .. wanted)
+end
+
+local root = assert(uv.fs_mkdtemp((vim.env.TMPDIR or "/tmp"):gsub("/$", "") .. "/manicule-bench-XXXXXX"))
+local stage_resolve = root .. "-resolve"
+local stage_only = root .. "-stage"
+
+local function cleanup()
+  if vim.env.MANICULE_BENCH_KEEP == "1" then
+    print("benchmark repo: " .. root)
+    return
+  end
+  vim.fn.delete(root, "rf")
+  vim.fn.delete(stage_resolve, "rf")
+  vim.fn.delete(stage_only, "rf")
+end
+
+local ok, err = xpcall(function()
+  run({ "git", "init", "-q", "-b", "main", root })
+  run({ "git", "config", "user.email", "benchmark@manicule.local" }, root)
+  run({ "git", "config", "user.name", "Manicule Benchmark" }, root)
+  run({ "git", "config", "commit.gpgsign", "false" }, root)
+
+  -- 667 modified + 667 deleted tracked files, then 666 untracked additions.
+  for index = 1, 1334 do
+    local path = root .. ("/pkg/%04d/module.lua"):format(index)
+    write(path, ("local M = {}\nM.value = %d\nreturn M\n"):format(index))
+  end
+  run({ "git", "add", "." }, root)
+  run({ "git", "commit", "-qm", "benchmark baseline" }, root)
+  run({ "git", "checkout", "-qb", "bench" }, root)
+
+  for index = 1, 667 do
+    local path = root .. ("/pkg/%04d/module.lua"):format(index)
+    write(path, ("local M = {}\nM.value = %d\nM.changed = true\nreturn M\n"):format(index))
+  end
+  for index = 668, 1334 do
+    assert(vim.fn.delete(root .. ("/pkg/%04d/module.lua"):format(index)) == 0)
+  end
+  for index = 1335, 2000 do
+    local path = root .. ("/pkg/%04d/module.lua"):format(index)
+    write(path, ("local M = {}\nM.value = %d\nM.added = true\nreturn M\n"):format(index))
+  end
+
+  local S = require("manicule.review.sources")
+  local G = require("manicule.review.git")
+
+  local resolve_ms, resolved = elapsed_ms(function()
+    return assert(S.resolve({ "main" }, { cwd = root, stage_dir = stage_resolve }))
+  end)
+  assert(#resolved.files == 2000, ("expected 2000 resolved files, got %d"):format(#resolved.files))
+
+  local base = assert(G.merge_base(root, "HEAD", "main"))
+  local changed = assert(G.changed_files(root, base))
+  assert(#changed == 2000, ("expected 2000 changed files, got %d"):format(#changed))
+  local stage_ms, staged = elapsed_ms(function()
+    return G.stage_baseline(root, base, changed, stage_only)
+  end)
+  assert(#staged == 2000)
+
+  local comments = {}
+  local uri_mod = require("manicule.uri")
+  for index = 1, 500 do
+    local pair = resolved.files[index]
+    local path = pair.status == "D" and pair.left or pair.right
+    comments[index] = {
+      id = tostring(index),
+      uri = uri_mod.for_path(path),
+      body = "benchmark comment",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    }
+  end
+  package.loaded["manicule"] = {
+    list = function()
+      return comments
+    end,
+  }
+  package.loaded["manicule.review"] = {
+    state = function()
+      return { files = resolved.files, label = "benchmark" }
+    end,
+  }
+  package.loaded["manicule.review.panel"] = nil
+  local panel = require("manicule.review.panel")
+  local build_files_items = find_upvalue(panel.open, "build_files_items")
+  local panel_ms, items = elapsed_ms(build_files_items)
+  assert(#items == 2000)
+
+  print(("files: %d (M=667 A=666 D=667), comments: %d"):format(#changed, #comments))
+  print(("resolve_ms: %.3f"):format(resolve_ms))
+  print(("stage_baseline_ms: %.3f"):format(stage_ms))
+  print(("panel_build_files_items_ms: %.3f"):format(panel_ms))
+end, debug.traceback)
+
+cleanup()
+if not ok then
+  error(err)
+end

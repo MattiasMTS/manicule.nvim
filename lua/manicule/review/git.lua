@@ -117,14 +117,79 @@ end
 ---@param dir string
 ---@return {left: string, right: string, status: string, path: string}[]
 function M.stage_baseline(root, base, entries, dir)
+  local uv = vim.uv or vim.loop
+  local known_dirs = {}
+  local function mkdir_p(path)
+    if known_dirs[path] then
+      return
+    end
+    if uv.fs_stat(path) then
+      known_dirs[path] = true
+      return
+    end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= "" and parent ~= path then
+      mkdir_p(parent)
+    end
+    local ok, err = uv.fs_mkdir(path, 493) -- 0755, filtered by umask
+    assert(ok, ("manicule: cannot create staging directory %s: %s"):format(path, tostring(err)))
+    known_dirs[path] = true
+  end
+  mkdir_p(dir)
+
+  -- `git archive` has no pathspec-from-file support (including Git 2.55),
+  -- so keep each argv comfortably below platform ARG_MAX instead. Bound
+  -- path count too: archive's pathspec matching slows sharply with a huge
+  -- flat argv even below ARG_MAX (200-path chunks benchmark faster).
+  local max_argv_bytes = 64 * 1024
+  local max_paths_per_chunk = 200
+  local chunk = {}
+  local chunk_bytes = #root + #base + #dir + 1024
+
+  local function extract(paths)
+    if #paths == 0 then
+      return
+    end
+    local argv = {
+      "sh",
+      "-c",
+      'root=$1; base=$2; dir=$3; shift 3; git -C "$root" --literal-pathspecs archive "$base" -- "$@" | tar -xf - -C "$dir"',
+      "manicule-git-archive",
+      root,
+      base,
+      dir,
+    }
+    vim.list_extend(argv, paths)
+    local result = M.run(argv)
+    assert(result.code == 0, "manicule: failed to stage git baseline: " .. trim(result.stderr))
+  end
+
+  for _, entry in ipairs(entries) do
+    if entry.status ~= "A" then
+      local path_bytes = #entry.path + 1
+      if #chunk > 0 and (chunk_bytes + path_bytes > max_argv_bytes or #chunk >= max_paths_per_chunk) then
+        extract(chunk)
+        chunk = {}
+        chunk_bytes = #root + #base + #dir + 1024
+      end
+      table.insert(chunk, entry.path)
+      chunk_bytes = chunk_bytes + path_bytes
+    end
+  end
+  extract(chunk)
+
   local files = {}
   for _, entry in ipairs(entries) do
     local left = dir .. "/" .. entry.path
-    vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
-    local content = entry.status ~= "A" and M.show_file(root, base, entry.path) or nil
-    local fd = assert(io.open(left, "wb"))
-    fd:write(content or "")
-    fd:close()
+    if entry.status == "A" then
+      local parent = left:match("^(.*)/[^/]+$")
+      if parent then
+        mkdir_p(parent)
+      end
+      local fd, err = uv.fs_open(left, "w", 438) -- 0666, filtered by umask
+      assert(fd, ("manicule: cannot stage empty baseline %s: %s"):format(left, tostring(err)))
+      uv.fs_close(fd)
+    end
     table.insert(files, {
       left = left,
       right = root .. "/" .. entry.path,

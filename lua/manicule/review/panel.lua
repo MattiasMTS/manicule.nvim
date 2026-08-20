@@ -31,33 +31,35 @@ local function session_uris()
   return uris
 end
 
-local function count_comments_for_pair(pair)
-  local uri_mod = require("manicule.uri")
-  local path = pair.status == "D" and pair.left or pair.right
-  local target_uri = uri_mod.for_path(path)
-  local records = require("manicule").list({ _quiet = true, uris = session_uris() })
-  local count = 0
-  for _, r in ipairs(records) do
-    if r.uri == target_uri then
-      count = count + 1
-    end
-  end
-  return count
-end
-
 local function build_files_items()
   local review = require("manicule.review")
   local state = review.state()
   if not state then
     return {}
   end
+
+  local uri_mod = require("manicule.uri")
+  local pair_uris = {}
+  local session_uri_set = {}
+  for idx, pair in ipairs(state.files) do
+    local path = pair.status == "D" and pair.left or pair.right
+    local uri = uri_mod.for_path(path)
+    pair_uris[idx] = uri
+    session_uri_set[uri] = true
+  end
+
+  local counts = {}
+  local records = require("manicule").list({ _quiet = true, uris = session_uri_set })
+  for _, record in ipairs(records) do
+    counts[record.uri] = (counts[record.uri] or 0) + 1
+  end
+
   local items = {}
   for idx, pair in ipairs(state.files) do
-    local count = count_comments_for_pair(pair)
     table.insert(items, {
       filename = pair.status == "D" and pair.left or pair.right,
       lnum = 1,
-      text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, count),
+      text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[pair_uris[idx]] or 0),
       -- Store index for <CR> mapping
       user_data = { pair_index = idx },
     })

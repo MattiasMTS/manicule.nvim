@@ -58,6 +58,38 @@ describe("manicule review git plumbing", function()
     assert.are.equal(0, vim.fn.getfsize(by_path["src/new.lua"].left))
   end)
 
+  it("stages tracked baselines with one subprocess", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, {
+      ["src/modified file.lua"] = { "return 1" },
+      ["src/deleted.lua"] = { "return 0" },
+    })
+    vim.fn.writefile({ "return 2" }, root .. "/src/modified file.lua")
+    vim.fn.delete(root .. "/src/deleted.lua")
+    vim.fn.writefile({ "return 3" }, root .. "/src/added.lua")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local original_run = G.run
+    local calls = {}
+    G.run = function(argv, opts)
+      table.insert(calls, argv)
+      return original_run(argv, opts)
+    end
+    local ok, files = pcall(G.stage_baseline, root, base, {
+      { path = "src/modified file.lua", status = "M" },
+      { path = "src/deleted.lua", status = "D" },
+      { path = "src/added.lua", status = "A" },
+    }, ctx.artifact_root .. "/bulk-staged")
+    G.run = original_run
+
+    assert.is_true(ok)
+    assert.are.equal(1, #calls)
+    assert.are.equal(3, #files)
+    assert.are.equal("return 1", table.concat(vim.fn.readfile(files[1].left), "\n"))
+    assert.are.equal("return 0", table.concat(vim.fn.readfile(files[2].left), "\n"))
+    assert.are.equal(0, vim.fn.getfsize(files[3].left))
+  end)
+
   it("computes merge-base", function()
     local G = require("manicule.review.git")
     local root, git = H.git_repo(ctx, { ["a.txt"] = { "one" } })

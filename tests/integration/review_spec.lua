@@ -271,6 +271,23 @@ describe("manicule review session", function()
     assert.is_truthy(items[1].text:find("0 comments"))
   end)
 
+  it("panel queries comments once when building file rows", function()
+    local R = require("manicule.review")
+    local manicule = require("manicule")
+    local original_list = manicule.list
+    local list_calls = 0
+    manicule.list = function(opts)
+      list_calls = list_calls + 1
+      return original_list(opts)
+    end
+    local ok, start_ok, start_err = pcall(R.start, { files = make_pairs(3), label = "panel-test" })
+    manicule.list = original_list
+
+    assert.is_true(ok)
+    assert.is_true(start_ok, start_err)
+    assert.are.equal(1, list_calls)
+  end)
+
   it("panel comment count updates when a comment is added", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))
