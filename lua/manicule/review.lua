@@ -1,9 +1,16 @@
 -- manicule.nvim: review session core.
 --
 -- Opens baseline-vs-worktree file pairs as diffs, one active session at
--- a time. The right side is always the real worktree file so comments
--- anchor natively; the left side is a read-only staged baseline copy.
--- Uses plain :diffsplit for reliable, pair-based diff rendering.
+-- a time. Whichever mode is active, the buffer the user comments in is
+-- the real worktree file, so comments anchor natively.
+--
+--   * `review.mode = "split"` (default) — plain `:diffsplit`: read-only
+--     staged baseline on the left, worktree file on the right.
+--   * `review.mode = "unified"` — a single window showing the worktree
+--     file with the diff painted onto it (see `review/inline.lua`).
+--
+-- `:ManiculeReviewDiffMode` flips between them, re-rendering the pair
+-- that is currently open.
 
 local M = {}
 
@@ -25,8 +32,16 @@ local function protect_left(bufnr)
   vim.bo[bufnr].swapfile = false
 end
 
+---@return manicule.ReviewConfig
+local function review_config()
+  return require("manicule.config").get().review or {}
+end
+
 local function close_session_windows()
   -- Reduce the session tab windows to diff windows only (preserve qf panel).
+  -- Unified paint is buffer-scoped, so it must be dropped explicitly —
+  -- `diffoff!` knows nothing about it.
+  require("manicule.review.inline").clear_all()
   vim.cmd("silent! diffoff!")
   -- Close all non-quickfix windows except the first one
   local wins = vim.api.nvim_tabpage_list_wins(0)
@@ -98,6 +113,26 @@ function M.open(index)
     return
   end
 
+  local cfg = review_config()
+
+  if cfg.mode == "unified" then
+    -- One window, the worktree file itself, with the baseline painted on
+    -- as virtual lines. No second buffer means nothing to protect and no
+    -- coordinate translation anywhere in the comment path.
+    vim.cmd.edit(vim.fn.fnameescape(pair.right))
+    local buf = vim.api.nvim_get_current_buf()
+    local ok, err = require("manicule.review.inline").apply(buf, pair.left, {
+      fold = cfg.fold_unchanged ~= false,
+      context = cfg.context,
+    })
+    if not ok then
+      vim.notify(err or "manicule: cannot render inline diff", vim.log.levels.WARN)
+    end
+    map_navigation(buf)
+    require("manicule.review.panel").sync_index(index)
+    return
+  end
+
   -- Plain diffsplit: Right first (focused), left split beside it.
   -- nvim.difftool support could be added later via open() hook if needed.
   vim.cmd.edit(vim.fn.fnameescape(pair.right))
@@ -126,6 +161,33 @@ end
 ---@return manicule.ReviewSession|nil
 function M.state()
   return session
+end
+
+---Switch the diff rendering used by review sessions. With no argument,
+---flips between "split" and "unified". The setting lives on the merged
+---config, so it also becomes the default for later sessions in this
+---Neovim instance; put `review.mode` in `setup()` to make it permanent.
+---@param mode? "split"|"unified"|"" nil/"" toggles
+---@return string|nil mode, string|nil err
+function M.set_diff_mode(mode)
+  local cfg = require("manicule.config").get()
+  cfg.review = cfg.review or {}
+  if mode == nil or mode == "" then
+    mode = cfg.review.mode == "unified" and "split" or "unified"
+  end
+  if mode ~= "split" and mode ~= "unified" then
+    local err = ('manicule: review mode must be "split" or "unified", got %q'):format(tostring(mode))
+    vim.notify(err, vim.log.levels.ERROR)
+    return nil, err
+  end
+  cfg.review.mode = mode
+  if session then
+    -- Re-render the pair on screen so the switch is visible immediately
+    -- rather than at the next file.
+    M.open(session.index)
+  end
+  vim.notify(("manicule: review diff mode is %s"):format(mode), vim.log.levels.INFO)
+  return mode
 end
 
 ---Start a review session over explicit file pairs.
@@ -161,6 +223,9 @@ function M.stop()
   end
   require("manicule.review.panel").close()
   local tab = session.tab
+  -- Worktree buffers outlive the session tab, so the inline paint has to
+  -- come off explicitly or the file keeps its diff highlights forever.
+  require("manicule.review.inline").clear_all()
   unmap_navigation(session.mapped_bufs)
   session = nil
   if vim.api.nvim_tabpage_is_valid(tab) then

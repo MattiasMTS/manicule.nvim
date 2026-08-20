@@ -264,10 +264,30 @@ vim.api.nvim_create_user_command("ManiculeReviewStop", function()
   require("manicule.review").stop()
 end, {})
 
+-- `:ManiculeReviewDiffMode` with no argument toggles split <-> unified.
+vim.api.nvim_create_user_command("ManiculeReviewDiffMode", function(opts)
+  require("manicule.review").set_diff_mode(opts.args)
+end, {
+  nargs = "?",
+  complete = function(arglead)
+    local out = {}
+    for _, mode in ipairs({ "split", "unified" }) do
+      if mode:find(arglead, 1, true) == 1 then
+        table.insert(out, mode)
+      end
+    end
+    return out
+  end,
+})
+
 vim.keymap.set("n", "<Plug>(manicule-review-next)", function()
   require("manicule.review").next()
 end, { silent = true })
 
 vim.keymap.set("n", "<Plug>(manicule-review-prev)", function()
   require("manicule.review").prev()
+end, { silent = true })
+
+vim.keymap.set("n", "<Plug>(manicule-review-diff-mode)", function()
+  require("manicule.review").set_diff_mode()
 end, { silent = true })

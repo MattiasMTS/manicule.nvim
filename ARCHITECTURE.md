@@ -37,6 +37,7 @@ lua/manicule/ui/render.lua      extmarks, popups, viewport rendering
 lua/manicule/ui/quickfix.lua    quickfix formatting and refresh
 lua/manicule/review.lua         review session core (start/open/next/prev/finish/stop)
 lua/manicule/review/git.lua     git plumbing (rev-parse, merge-base, changed files, staging)
+lua/manicule/review/inline.lua  unified-mode diff paint (virtual lines, folds, hunk nav)
 lua/manicule/review/sources.lua resolver registry (dirs, git ref, pr via gh CLI)
 lua/manicule/sinks/             sink registry and bundled sinks (clipboard, cmux, github, socket)
 ```
@@ -257,7 +258,10 @@ worktree right). One active session at a time, in its own tab page.
 - Right side: real worktree file where it exists; comments anchor natively.
 - Left side: read-only staged baseline copy (modifiable=false, readonly=true,
   bufhidden=wipe, swapfile=false).
-- Diffs render as `:diffsplit` pairs (left split beside right).
+- Diff rendering is chosen by `review.mode`; `:ManiculeReviewDiffMode`
+  flips it and re-opens the current index.
+  - `split` (default): `:diffsplit` pairs (left split beside right).
+  - `unified`: one window on the worktree file, diff painted inline (below).
 - Deleted files: left-only display, notify that comments are file-level notes.
 - Navigation: `next()`/`prev()` wrap around.
 - Panel (`lua/manicule/review/panel.lua`): auto-opens bottom quickfix window
@@ -269,6 +273,31 @@ worktree right). One active session at a time, in its own tab page.
 - `finish()`: collects session comments via URI filter, dispatches to
   configured sink; auto-flushes on `VimLeavePre` when sink is configured and
   comments exist.
+
+**Unified mode** (`lua/manicule/review/inline.lua`):
+- Paints the diff ONTO the real worktree buffer instead of building a
+  synthetic `git diff` document. That choice is load-bearing: records are
+  keyed by worktree URI and store ranges in worktree line coordinates
+  (`adapter.identify`, `sinks/helpers.line_span`), so a separate diff
+  buffer would need a diff↔file mapping at four seams — `finalize_add`,
+  `render_extmark`, `capture_position_patches`, and the `record.range`
+  fallback in `comment_position` — where one miss silently persists a
+  comment against the wrong line. Painting the file keeps all four exact.
+- `vim.diff(..., { result_type = "indices" })` against the staged
+  baseline. Added lines get `line_hl_group = ManiculeDiffAdd`; removed
+  lines become `virt_lines` (above their replacement, or below the line
+  they followed for a pure deletion). Empty baseline/buffer content is
+  normalised to `""` so an added file diffs as a clean all-add.
+- Own namespace (`manicule_review_inline`), separate from `anchor.ns`, and
+  priority 100 so comment anchors (220) still tint their line number.
+- Unchanged regions fold via a `foldexpr` over the kept-row set
+  (`review.context` lines around each hunk). Window options are saved
+  before the first change and restored by `clear()`, since the worktree
+  buffer outlives the session tab.
+- Removed lines are virtual, so they are not commentable — the same
+  restriction split mode has on its read-only baseline side.
+- `]h` / `[h` navigate hunks; both maps are buffer-local and removed on
+  `clear()`. `review.open()`/`stop()` call `clear_all()`.
 
 **Resolver registry** (`lua/manicule/review/sources.lua`):
 - Turns `:ManiculeReview` arguments into staged file pairs.

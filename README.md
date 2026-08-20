@@ -132,9 +132,42 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
     :ManiculeReviewPrev          " previous changed file
     :ManiculeReviewFinish [sink] " send comments to a sink (optional arg)
     :ManiculeReviewStop          " close the session
+    :ManiculeReviewDiffMode      " toggle split <-> unified (or name one)
 
-Diffs render as side-by-side `:diffsplit` pairs (baseline left, read-only;
-worktree right). A bottom panel opens automatically showing the file list
+### Split and unified diffs
+
+`review.mode` picks how a pair renders. `:ManiculeReviewDiffMode` flips
+between the two mid-session and re-renders the file on screen.
+
+`split` (default) is a side-by-side `:diffsplit` pair: read-only baseline
+on the left, worktree file on the right.
+
+`unified` shows one window — the worktree file — with the diff painted
+onto it. Added lines are highlighted, removed lines appear as virtual
+text where they used to sit, and unchanged regions fold away:
+
+```
+  4   local sum = 0
+  5   for _, item in ipairs(items) do
+    ▏    sum = sum + item.price          <- removed (virtual line, no number)
+  6     sum = sum + (item.price * item.qty)   <- added (highlighted)
+  7   end
+ 10   ⋯ 31 unchanged lines ⋯
+```
+
+Unified mode paints the *real* file rather than building a synthetic diff
+buffer, so comments anchor to true worktree line numbers with no
+translation layer — `:ManiculeSend github` posts them at the same lines it
+would from split mode. The trade-off is that removed lines are virtual and
+therefore not commentable, which matches split mode, where the baseline
+side is read-only.
+
+`]h` / `[h` jump between hunks (wrapping), and folds behave like any
+other: `za` toggles, `zR` opens them all. Set `review.fold_unchanged =
+false` to skip folding entirely, or `review.context` to change how much
+code stays visible around each hunk.
+
+A bottom panel opens automatically showing the file list
 with live comment counts. Press `<Tab>` in the panel to toggle between
 files view and comments view. `<CR>` on a commented file drills into a
 comments view scoped to that file (`<CR>` jumps to a comment, `dd`
@@ -194,6 +227,11 @@ require("manicule").setup({
       pre_text = "Optional instructions inserted before the comments.",
       post_text = "Optional follow-up instructions inserted after the comments.",
     },
+  },
+  review = {
+    mode = "split", -- "split" (side-by-side) or "unified" (inline)
+    fold_unchanged = true, -- unified: collapse everything outside a hunk
+    context = 3, -- unified: lines kept visible around each hunk
   },
   ui = {
     width = 72,

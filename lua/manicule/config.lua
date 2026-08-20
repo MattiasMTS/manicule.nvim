@@ -23,6 +23,11 @@ local M = {}
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
 ---@field poll_interval_ms integer Milliseconds between local SQLite sync polls. Set <= 0 to disable.
 
+---@class manicule.ReviewConfig
+---@field mode "split"|"unified" Diff rendering for `:ManiculeReview`. "split" opens a side-by-side `:diffsplit` pair; "unified" paints the diff inline on the worktree buffer.
+---@field fold_unchanged boolean Unified mode only: collapse unchanged regions into folds.
+---@field context integer Unified mode only: lines of context kept around each hunk (and the fold's minimum size).
+
 ---@class manicule.SinksConfig
 ---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
 ---@field cmux boolean|table Enable the bundled cmux integration (defaults to `{ enabled = true }`). Built-in text sinks accept optional `pre_text` and `post_text` strings. cmux also accepts `auto_submit` and `submit_delay_ms`.
@@ -61,6 +66,22 @@ M.defaults = {
     -- `cmux.enabled = false` disables the bundled cmux integration.
     -- When enabled, cmux registers only when the integration is available.
   },
+  -- Review session (`:ManiculeReview`) rendering.
+  review = {
+    -- "split"   — side-by-side `:diffsplit`: read-only baseline left,
+    --             worktree file right (comments go on the right).
+    -- "unified" — one window showing the worktree file with the diff
+    --             painted on: added lines highlighted, removed lines
+    --             drawn as virtual text where they used to sit. The
+    --             buffer IS the file, so comments anchor natively; the
+    --             cost is that removed lines are not commentable
+    --             (same as the read-only baseline side in split mode).
+    mode = "split",
+    -- Unified mode: collapse everything outside a hunk into a fold.
+    fold_unchanged = true,
+    -- Unified mode: context lines kept around each hunk.
+    context = 3,
+  },
   -- Floating editor + popup UI options.
   ui = {
     width = 72,
@@ -92,6 +113,7 @@ function M.setup(opts)
     opts = { opts, "table" },
     store = { opts.store, "table", true },
     sinks = { opts.sinks, "table", true },
+    review = { opts.review, "table", true },
     ui = { opts.ui, "table", true },
   })
   if opts.store then
@@ -117,6 +139,20 @@ function M.setup(opts)
       ["sinks.github"] = { opts.sinks.github, { "boolean", "table" }, true },
       ["sinks.socket"] = { opts.sinks.socket, { "boolean", "table" }, true },
     })
+  end
+  if opts.review then
+    vim.validate({
+      ["review.mode"] = { opts.review.mode, "string", true },
+      ["review.fold_unchanged"] = { opts.review.fold_unchanged, "boolean", true },
+      ["review.context"] = { opts.review.context, "number", true },
+    })
+    if opts.review.mode ~= nil and opts.review.mode ~= "split" and opts.review.mode ~= "unified" then
+      error(('manicule: review.mode must be "split" or "unified", got %q'):format(tostring(opts.review.mode)))
+    end
+    local context = opts.review.context
+    if context ~= nil and (context ~= context or context < 0 or context ~= math.floor(context)) then
+      error(("manicule: review.context must be a non-negative integer, got %s"):format(tostring(context)))
+    end
   end
   if opts.ui then
     vim.validate({
