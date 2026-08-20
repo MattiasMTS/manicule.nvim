@@ -92,19 +92,35 @@ local function resolve_repo(opts, cwd)
   return decoded.nameWithOwner, nil
 end
 
+---`meta.github_reply` payload for a record authored as a thread reply
+---(via the review panel's `r` action), or nil.
+---@param comment table
+---@return {to: number|string, pr?: number}|nil
+local function reply_meta(comment)
+  local meta = type(comment.meta) == "table" and comment.meta or nil
+  local reply = meta and type(meta.github_reply) == "table" and meta.github_reply or nil
+  return (reply and reply.to ~= nil) and reply or nil
+end
+
 ---Build the REST review payload. Records whose URI cannot be resolved to
 ---a project-relative path (session-scope temp buffers, files outside the
----root) are skipped; the skip count is noted in the review body.
+---root) are skipped; the skip count is noted in the review body. Records
+---carrying `meta.github_reply` are returned separately — they post to
+---the thread-replies endpoint, never inside the review.
 local function build_review(comments, opts)
   local review_comments = {}
+  local replies = {}
   local skipped = 0
   local skipped_imported = 0
   local is_import = require("manicule.review.import").is_import
   for _, comment in ipairs(comments) do
     local path = helpers.relative_path(comment)
+    local reply = reply_meta(comment)
     if is_import(comment) then
       -- Never echo comments imported FROM GitHub back as a new review.
       skipped_imported = skipped_imported + 1
+    elseif reply then
+      table.insert(replies, { to = reply.to, pr = tonumber(reply.pr), body = comment.body or "" })
     elseif not path or path == "." then
       skipped = skipped + 1
     else
@@ -130,6 +146,9 @@ local function build_review(comments, opts)
   if skipped_imported > 0 then
     summary = summary .. (" (%d skipped: imported from GitHub)"):format(skipped_imported)
   end
+  if #replies > 0 then
+    summary = summary .. (" (%d thread repl%s posted separately)"):format(#replies, #replies == 1 and "y" or "ies")
+  end
   local body = summary
   if type(opts.pre_text) == "string" and vim.trim(opts.pre_text) ~= "" then
     body = vim.trim(opts.pre_text) .. "\n\n" .. summary
@@ -139,7 +158,9 @@ local function build_review(comments, opts)
     event = opts.event,
     body = body,
     comments = review_comments,
-  }, skipped + skipped_imported
+  },
+    skipped + skipped_imported,
+    replies
 end
 
 local function post_review(opts, repo, pr, review, cwd)
@@ -161,6 +182,26 @@ local function post_review(opts, repo, pr, review, cwd)
   vim.fn.delete(tmp)
   if result.code ~= 0 then
     return false, "manicule: gh api failed: " .. result.stderr:gsub("%s+$", "")
+  end
+  return true, nil
+end
+
+---Post one thread reply: POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies.
+---The reply's own PR number (recorded at import time) wins over the
+---review's resolved PR so replies land on the thread they came from.
+local function post_reply(opts, repo, pr, reply, cwd)
+  local target_pr = reply.pr or pr
+  local result = helpers.system({
+    cli(opts),
+    "api",
+    ("repos/%s/pulls/%d/comments/%s/replies"):format(repo, target_pr, tostring(reply.to)),
+    "--method",
+    "POST",
+    "-f",
+    "body=" .. reply.body,
+  }, { cwd = cwd })
+  if result.code ~= 0 then
+    return false, "manicule: gh api reply failed: " .. result.stderr:gsub("%s+$", "")
   end
   return true, nil
 end
@@ -204,8 +245,8 @@ function M.setup(opts)
     end,
     send = function(comments, ctx, cb)
       local cwd = resolve_cwd(ctx, comments)
-      local review, skipped = build_review(comments, opts)
-      if #review.comments == 0 then
+      local review, skipped, replies = build_review(comments, opts)
+      if #review.comments == 0 and #replies == 0 then
         cb(
           false,
           ("manicule: github sink found no comments with a resolvable repository path (%d skipped)"):format(skipped)
@@ -222,8 +263,21 @@ function M.setup(opts)
         cb(false, pr_err)
         return
       end
-      local ok, err = post_review(opts, repo, pr, review, cwd)
-      cb(ok, err)
+      if #review.comments > 0 then
+        local ok, err = post_review(opts, repo, pr, review, cwd)
+        if not ok then
+          cb(false, err)
+          return
+        end
+      end
+      for _, reply in ipairs(replies) do
+        local ok, err = post_reply(opts, repo, pr, reply, cwd)
+        if not ok then
+          cb(false, err)
+          return
+        end
+      end
+      cb(true, nil)
     end,
   }
 end

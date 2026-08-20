@@ -1536,6 +1536,14 @@ function M._buffer_marks()
   return out
 end
 
+-- Exposed for the review layer (panel reply creation repaints the
+-- target buffer); not part of the stable public API. Repaints `bufnr`
+-- from the store — same path BufWinEnter uses.
+---@param bufnr integer
+function M._attach_buffer(bufnr)
+  attach_buffer(bufnr)
+end
+
 function M._stop_sync_timer_for_tests()
   if sync_timer then
     sync_timer:stop()

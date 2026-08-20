@@ -693,6 +693,78 @@ describe("manicule review session", function()
     assert.is_true(saw_left and saw_right, "pair 1 diff layout was disturbed")
   end)
 
+  ---Persist an imported-from-GitHub record on `path` (project scope,
+  ---line 1) with the given `meta.github` table.
+  local function put_imported(path, gh_meta, body)
+    local store = require("manicule.store")
+    local now = os.time()
+    local record = {
+      id = require("manicule.id").new(),
+      uri = require("manicule.uri").for_path(path),
+      scope = "project",
+      project_root = ctx.root,
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = body or "from github",
+      author = "octocat",
+      created_at = now,
+      updated_at = now,
+      resolved = false,
+      meta = { github = gh_meta },
+    }
+    store.put_record(record)
+    assert(store.save(ctx.root))
+    return record
+  end
+
+  it("r in comments view replies to an imported comment", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    put_imported(files[1].right, { id = 9001, imported = true, thread_id = 9001, pr = 42 })
+    assert.is_true(R.start({ files = files, label = "reply" }))
+
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("sounds good")
+    end
+    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "r")
+    ui.prompt = original_prompt
+
+    local reply
+    for _, r in ipairs(require("manicule.store").all(ctx.root)) do
+      if r.body == "sounds good" then
+        reply = r
+      end
+    end
+    assert.is_truthy(reply, "reply record not created")
+    assert.are.equal(require("manicule.uri").for_path(files[1].right), reply.uri)
+    assert.are.same({ start = { 0, 0 }, end_ = { 0, 0 } }, reply.range)
+    assert.are.same({ to = 9001, pr = 42 }, reply.meta.github_reply)
+    assert.is_nil(reply.meta.github)
+  end)
+
+  it("r on a non-imported comment warns and creates nothing", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    assert.is_true(R.start({ files = files, label = "reply-warn" }))
+    add_comment(files[1].right, "local note")
+
+    local warned
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if level == vim.log.levels.WARN then
+        warned = msg
+      end
+    end
+    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "r")
+    vim.notify = original_notify
+
+    assert.is_truthy(warned, "expected a WARN")
+    assert.are.equal(1, #require("manicule").list({ _quiet = true, _root = ctx.root }))
+  end)
+
   it(":ManiculeToggle hides the panel during a session and keeps it running", function()
     vim.cmd("runtime plugin/manicule.lua")
     local R = require("manicule.review")

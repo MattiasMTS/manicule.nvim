@@ -197,6 +197,43 @@ describe("manicule github sink", function()
     assert.is_truthy(body.body:find("1 skipped: imported from GitHub", 1, true))
   end)
 
+  it("posts meta.github_reply records via the replies endpoint", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({})
+
+    local reply = record({ body = "sounds good" })
+    reply.meta = { github_reply = { to = 9001, pr = 7 } }
+    local ok, err = send(spec, { record(), reply })
+
+    assert.is_true(ok, err)
+    local argv = table.concat(gh.argv(), "\n")
+    assert.is_truthy(
+      argv:find("api repos/acme/widgets/pulls/7/comments/9001/replies --method POST -f body=sounds good", 1, true)
+    )
+    local body = gh.api_input()
+    assert.are.equal(1, #body.comments)
+    assert.are.equal("needs a guard", body.comments[1].body)
+    assert.is_truthy(body.body:find("1 thread reply", 1, true))
+  end)
+
+  it("sends a reply-only batch without posting a review", function()
+    local gh = fake_gh(ctx.artifact_root)
+    vim.env.PATH = gh.bin .. ":" .. saved_path
+    local spec = require("manicule.sinks.github").setup({})
+
+    local reply = record({ body = "will do" })
+    reply.meta = { github_reply = { to = 9001 } }
+    local ok, err = send(spec, { reply })
+
+    assert.is_true(ok, err)
+    local argv = table.concat(gh.argv(), "\n")
+    assert.is_truthy(
+      argv:find("api repos/acme/widgets/pulls/42/comments/9001/replies --method POST -f body=will do", 1, true)
+    )
+    assert.is_nil(argv:find("/reviews", 1, true))
+  end)
+
   it("fails when no record resolves to a repository path", function()
     local gh = fake_gh(ctx.artifact_root)
     vim.env.PATH = gh.bin .. ":" .. saved_path

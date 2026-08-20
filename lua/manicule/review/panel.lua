@@ -171,6 +171,25 @@ local function comment_at_cursor()
   return nil
 end
 
+---Record locator (id + scope + project root) under the cursor in the
+---CURRENT (panel) window. Reads the list displayed in this window, like
+---comment_at_cursor, so qf history can't desync row -> record.
+---@return {id: string, scope?: string, project_root?: string}|nil
+local function record_locator_at_cursor()
+  local winid = vim.api.nvim_get_current_win()
+  local row = vim.api.nvim_win_get_cursor(winid)[1]
+  local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
+  if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
+    return nil
+  end
+  local item = info.items[row]
+  local data = item and item.user_data
+  if type(data) == "table" and type(data.id) == "string" and data.id ~= "" then
+    return { id = data.id, scope = data.scope, project_root = data.project_root }
+  end
+  return nil
+end
+
 ---Jump to the comment under the cursor in a comments view: resolve its
 ---uri to the owning session pair, rebuild that pair's diff via
 ---review.open (never the default qf jump, which picks its own target
@@ -325,6 +344,21 @@ local function setup_panel_keymaps(bufnr)
       require("manicule.review").open(idx)
     end
   end, vim.tbl_extend("keep", { desc = "Manicule review: open pair (skip drill-down)" }, map_opts))
+
+  -- `r` in comments view replies to an imported GitHub comment: opens
+  -- the comment editor; the reply posts to the comment's thread on the
+  -- next github send. Falls through to the default `r` elsewhere.
+  vim.keymap.set("n", "r", function()
+    if current_view ~= "comments" then
+      local r = vim.api.nvim_replace_termcodes("r", true, false, true)
+      vim.api.nvim_feedkeys(r, "n", false)
+      return
+    end
+    local locator = record_locator_at_cursor()
+    if locator then
+      require("manicule.review.github").reply(locator)
+    end
+  end, vim.tbl_extend("keep", { desc = "Manicule review: reply to imported GitHub comment" }, map_opts))
 
   -- <Esc> in a comments view returns to files (clearing any file
   -- filter); in files view it falls through to the default behavior.

@@ -135,6 +135,11 @@ function M.github_pr(root, number)
       if line then
         local start_line = num(comment.start_line) or num(comment.original_start_line) or line
         local user = type(comment.user) == "table" and comment.user or {}
+        -- Replies chain to the thread ROOT (GitHub's replies endpoint
+        -- rejects reply-to-a-reply ids), so record the root id up front:
+        -- the comment's own id for top-level comments, its
+        -- in_reply_to_id otherwise.
+        local thread_id = num(comment.in_reply_to_id) or comment.id
         store.put_record({
           id = id_mod.new(),
           uri = uri_mod.for_path(root .. "/" .. comment.path),
@@ -146,7 +151,15 @@ function M.github_pr(root, number)
           created_at = now,
           updated_at = now,
           resolved = false,
-          meta = { github = { id = comment.id, url = str(comment.html_url), imported = true } },
+          meta = {
+            github = {
+              id = comment.id,
+              url = str(comment.html_url),
+              imported = true,
+              thread_id = thread_id,
+              pr = tonumber(number),
+            },
+          },
         })
         imported = imported + 1
       end

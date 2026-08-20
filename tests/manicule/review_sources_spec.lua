@@ -244,6 +244,40 @@ describe("manicule review sources", function()
       assert.is_true(r.meta.github.imported)
     end)
 
+    it("records thread ids and the PR number on imported comments", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments({
+        {
+          id = 1002,
+          path = "a.lua",
+          line = 2,
+          body = "thread root",
+          html_url = "https://example.test/r/1002",
+          user = { login = "octocat" },
+        },
+        {
+          id = 1004,
+          path = "a.lua",
+          line = 2,
+          in_reply_to_id = 1002,
+          body = "a reply",
+          html_url = "https://example.test/r/1004",
+          user = { login = "hubber" },
+        },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s12" }))
+
+      local by_id = {}
+      for _, r in ipairs(require("manicule.store").all(root)) do
+        by_id[r.meta.github.id] = r
+      end
+      assert.are.equal(1002, by_id[1002].meta.github.thread_id)
+      assert.are.equal(1002, by_id[1004].meta.github.thread_id)
+      assert.are.equal(42, by_id[1002].meta.github.pr)
+    end)
+
     it("preserves comment bodies containing `][` byte-for-byte", function()
       local S = require("manicule.review.sources")
       local body = "see [ref][1] and t[1][2]"
