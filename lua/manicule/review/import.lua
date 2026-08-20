@@ -117,49 +117,66 @@ function M.github_pr(root, number)
   end
 
   -- Best-effort resolve support: the REST comments payload carries no
-  -- review-thread ids, and resolving needs the THREAD node id. One
+  -- review-thread ids, and resolving needs the THREAD node id. A
   -- GraphQL query maps each thread's first comment databaseId to the
-  -- thread node + isResolved; failure degrades to import-without-resolve.
+  -- thread node + isResolved, following `pageInfo`/`after:` cursors so
+  -- PRs with more than 100 threads still backfill every thread; failure
+  -- degrades to import-without-resolve.
   ---@return table<number, {thread_node: string, resolved: boolean}>|nil, string|nil err
   local function fetch_threads()
     local owner, name = repo.nameWithOwner:match("^([^/]+)/(.+)$")
     if not owner then
       return nil, "unexpected repository name " .. repo.nameWithOwner
     end
-    local query = "query($owner:String!,$name:String!,$number:Int!){"
+    local query = "query($owner:String!,$name:String!,$number:Int!,$cursor:String){"
       .. "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-      .. "reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}"
-    local result = G.run({
-      "gh",
-      "api",
-      "graphql",
-      "-f",
-      "query=" .. query,
-      "-f",
-      "owner=" .. owner,
-      "-f",
-      "name=" .. name,
-      "-F",
-      "number=" .. tostring(number),
-    }, { cwd = root })
-    if result.code ~= 0 then
-      return nil, vim.trim(result.stderr)
-    end
-    local ok, decoded = pcall(vim.json.decode, result.stdout)
-    local nodes = ok
-      and type(decoded) == "table"
-      and vim.tbl_get(decoded, "data", "repository", "pullRequest", "reviewThreads", "nodes")
-    if type(nodes) ~= "table" then
-      return nil, "unexpected gh graphql output"
-    end
+      .. "reviewThreads(first:100,after:$cursor){"
+      .. "pageInfo{hasNextPage endCursor}"
+      .. "nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}"
     local map = {}
-    for _, node in ipairs(nodes) do
-      local db = type(node) == "table" and vim.tbl_get(node, "comments", "nodes", 1, "databaseId")
-      if type(node.id) == "string" and type(db) == "number" then
-        map[db] = { thread_node = node.id, resolved = node.isResolved == true }
+    local cursor = nil
+    while true do
+      local args = {
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" .. query,
+        "-f",
+        "owner=" .. owner,
+        "-f",
+        "name=" .. name,
+        "-F",
+        "number=" .. tostring(number),
+      }
+      if cursor then
+        args[#args + 1] = "-f"
+        args[#args + 1] = "cursor=" .. cursor
+      end
+      local result = G.run(args, { cwd = root })
+      if result.code ~= 0 then
+        return nil, vim.trim(result.stderr)
+      end
+      local ok, decoded = pcall(vim.json.decode, result.stdout)
+      local review_threads = ok
+        and type(decoded) == "table"
+        and vim.tbl_get(decoded, "data", "repository", "pullRequest", "reviewThreads")
+      local nodes = type(review_threads) == "table" and review_threads.nodes
+      if type(nodes) ~= "table" then
+        return nil, "unexpected gh graphql output"
+      end
+      for _, node in ipairs(nodes) do
+        local db = type(node) == "table" and vim.tbl_get(node, "comments", "nodes", 1, "databaseId")
+        if type(node.id) == "string" and type(db) == "number" then
+          map[db] = { thread_node = node.id, resolved = node.isResolved == true }
+        end
+      end
+      local page_info = type(review_threads.pageInfo) == "table" and review_threads.pageInfo or {}
+      cursor = page_info.hasNextPage == true and str(page_info.endCursor) or nil
+      if not cursor then
+        return map, nil
       end
     end
-    return map, nil
   end
 
   local threads = {}
@@ -216,6 +233,7 @@ function M.github_pr(root, number)
 
   local imported = 0
   local updated = 0
+  local skipped = 0
   local now = os.time()
   for _, comment in ipairs(comments) do
     local prior = type(comment) == "table" and existing[tostring(comment.id)] or nil
@@ -226,11 +244,16 @@ function M.github_pr(root, number)
         updated = updated + 1
       end
     elseif type(comment) == "table" and type(comment.path) == "string" then
-      -- Comments without a line (outdated/resolved positions) are
-      -- skipped: there is nothing to anchor them to in the worktree.
-      local line = num(comment.line) or num(comment.original_line)
+      -- `line`/`start_line` are coordinates in the file named by
+      -- `side`/`start_side`: RIGHT is the checked-out head worktree,
+      -- LEFT is the base. Comments on the base side and comments
+      -- without a current line (outdated positions, where only
+      -- `original_line` — a superseded head commit's coordinate —
+      -- remains) are skipped: neither anchors to the worktree.
+      local line = comment.side ~= "LEFT" and num(comment.line) or nil
       if line then
-        local start_line = num(comment.start_line) or num(comment.original_start_line) or line
+        local start_line = comment.start_side ~= "LEFT" and num(comment.start_line) or nil
+        start_line = start_line or line
         local user = type(comment.user) == "table" and comment.user or {}
         -- Replies chain to the thread ROOT (GitHub's replies endpoint
         -- rejects reply-to-a-reply ids), so record the root id up front:
@@ -262,10 +285,18 @@ function M.github_pr(root, number)
           },
         })
         imported = imported + 1
+      else
+        skipped = skipped + 1
       end
     end
   end
+  local skip_note = skipped > 0
+      and (" (%d skipped: outdated or base-side position%s)"):format(skipped, skipped == 1 and "" or "s")
+    or ""
   if imported == 0 and updated == 0 then
+    if skipped > 0 then
+      vim.notify("manicule: imported 0 PR comments" .. skip_note, vim.log.levels.INFO)
+    end
     return
   end
   local save_ok, err = store.save(root)
@@ -274,7 +305,7 @@ function M.github_pr(root, number)
   end
   if imported > 0 then
     vim.notify(
-      ("manicule: imported %d PR comment%s"):format(imported, imported == 1 and "" or "s"),
+      ("manicule: imported %d PR comment%s"):format(imported, imported == 1 and "" or "s") .. skip_note,
       vim.log.levels.INFO
     )
   end

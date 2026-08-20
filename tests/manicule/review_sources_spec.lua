@@ -44,7 +44,12 @@ local function fake_gh_pr(dir, opts)
     '  echo \'{"nameWithOwner":"acme/widgets"}\';',
     'elif [ "$1 $2" = "api graphql" ]; then',
     '  if [ -f "$dir/no-graphql" ]; then echo "gh: graphql boom" >&2; exit 1; fi;',
-    '  cat "$dir/threads.json";',
+    '  case "$*" in',
+    "  *cursor=CURSOR_PAGE_2*)",
+    '    cat "$dir/threads2.json";;',
+    "  *)",
+    '    cat "$dir/threads.json";;',
+    "  esac;",
     'elif [ "$1" = "api" ]; then',
     '  case "$*" in',
     "  *--slurp*)",
@@ -74,6 +79,38 @@ local function fake_gh_pr(dir, opts)
       vim.fn.writefile({
         vim.json.encode({ data = { repository = { pullRequest = { reviewThreads = { nodes = nodes } } } } }),
       }, home .. "/threads.json")
+    end,
+    -- Two GraphQL pages: page 1 advertises hasNextPage with the cursor
+    -- the fake script branches on, page 2 is final.
+    set_thread_pages = function(page1_nodes, page2_nodes)
+      vim.fn.writefile({
+        vim.json.encode({
+          data = {
+            repository = {
+              pullRequest = {
+                reviewThreads = {
+                  pageInfo = { hasNextPage = true, endCursor = "CURSOR_PAGE_2" },
+                  nodes = page1_nodes,
+                },
+              },
+            },
+          },
+        }),
+      }, home .. "/threads.json")
+      vim.fn.writefile({
+        vim.json.encode({
+          data = {
+            repository = {
+              pullRequest = {
+                reviewThreads = {
+                  pageInfo = { hasNextPage = false },
+                  nodes = page2_nodes,
+                },
+              },
+            },
+          },
+        }),
+      }, home .. "/threads2.json")
     end,
   }
 end
@@ -369,6 +406,98 @@ describe("manicule review sources", function()
       local records = require("manicule.store").all(root)
       assert.are.equal(1, #records)
       assert.are.equal("range comment", records[1].body)
+    end)
+
+    it("skips LEFT-side and null-line comments instead of anchoring them to head lines", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments({
+        {
+          id = 3001,
+          path = "a.lua",
+          side = "RIGHT",
+          line = 4,
+          body = "head comment",
+          html_url = "https://example.test/r/3001",
+          user = { login = "octocat" },
+        },
+        {
+          -- Anchored to base line 5: head line 5 is an unrelated line,
+          -- so this must not import at head coordinates.
+          id = 3002,
+          path = "a.lua",
+          side = "LEFT",
+          line = 5,
+          original_line = 5,
+          body = "base-side comment",
+          html_url = "https://example.test/r/3002",
+          user = { login = "octocat" },
+        },
+        {
+          -- Outdated position: line=null with original_line pointing at
+          -- a superseded head commit — must not anchor via original_line.
+          id = 3003,
+          path = "a.lua",
+          side = "RIGHT",
+          line = vim.NIL,
+          original_line = 3,
+          body = "outdated comment",
+          html_url = "https://example.test/r/3003",
+          user = { login = "octocat" },
+        },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      local notified = {}
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        notified[#notified + 1] = msg
+        return original_notify(msg, level)
+      end
+      local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s17" })
+      vim.notify = original_notify
+
+      assert.is_nil(err)
+      assert.is_truthy(job)
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      assert.are.equal(3001, records[1].meta.github.id)
+      assert.are.same({ start = { 3, 0 }, end_ = { 3, 0 } }, records[1].range)
+      local summary
+      for _, msg in ipairs(notified) do
+        if msg:find("imported", 1, true) then
+          summary = msg
+        end
+      end
+      assert.is_truthy(summary, "expected an import summary notify")
+      assert.is_truthy(summary:find("2 skipped", 1, true), "expected the skip count in: " .. summary)
+    end)
+
+    it("paginates review threads past the first GraphQL page", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments({
+        {
+          id = 1002,
+          path = "a.lua",
+          side = "RIGHT",
+          line = 4,
+          body = "second page thread",
+          html_url = "https://example.test/r/1002",
+          user = { login = "octocat" },
+        },
+      })
+      gh.set_thread_pages({
+        { id = "RT_1", isResolved = false, comments = { nodes = { { databaseId = 9999 } } } },
+      }, {
+        { id = "RT_2", isResolved = true, comments = { nodes = { { databaseId = 1002 } } } },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s18" }))
+
+      local records = require("manicule.store").all(root)
+      assert.are.equal(1, #records)
+      assert.are.equal("RT_2", records[1].meta.github.thread_node)
+      assert.is_true(records[1].meta.github.resolved)
     end)
 
     it("backfills thread data onto existing records on re-import", function()
