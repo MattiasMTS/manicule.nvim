@@ -218,16 +218,6 @@ function M.record_locator_at_cursor()
   return nil
 end
 
----Compatibility helper for callers that only need the id.
----@return string|nil
-function M.record_id_at_cursor()
-  local locator = M.record_locator_at_cursor()
-  if locator then
-    return locator.id
-  end
-  return nil
-end
-
 --- Populate the quickfix list and (optionally) open it.
 ---@param records table[]
 ---@param opts? { open?: boolean, filter?: table }

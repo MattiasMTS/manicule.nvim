@@ -444,6 +444,40 @@ describe("manicule.store session scope", function()
     assert.is_truthy(err)
   end)
 
+  it("memoizes the branch-scoped store name until _reset", function()
+    -- `store_name` runs on every store read; with `store.branch = true`
+    -- the un-memoized version forked `git branch --show-current` per
+    -- call. The memo pins the load-time name for the whole session
+    -- (keeping cache[root]/sqlite_dbs coherent) and `_reset` drops it.
+    vim.fn.system({ "git", "init", "-q", tmp_root })
+    vim.fn.system({ "git", "-C", tmp_root, "checkout", "-q", "-b", "feature-a" })
+    require("manicule").setup({
+      store = {
+        dir = tmp_state .. "/",
+        format = "json",
+        canonicalize_symlinks = false,
+        poll_interval_ms = 0,
+        branch = true,
+      },
+    })
+    local store = require("manicule.store")
+
+    local path_a = store.path(tmp_root)
+    assert.is_truthy(path_a:find("feature-a", 1, true))
+
+    -- Switching branches on disk does NOT re-key the already-resolved
+    -- store mid-session: reads and writes stay pinned to the database
+    -- the session loaded.
+    vim.fn.system({ "git", "-C", tmp_root, "checkout", "-q", "-b", "feature-b" })
+    assert.are.equal(path_a, store.path(tmp_root))
+
+    -- A reset (fresh session) resolves the new branch.
+    store._reset()
+    local path_b = store.path(tmp_root)
+    assert.is_truthy(path_b:find("feature-b", 1, true))
+    assert.are_not.equal(path_a, path_b)
+  end)
+
   it("restore_record brings a removed session record back and survives reload", function()
     local store = require("manicule.store")
     local record = {

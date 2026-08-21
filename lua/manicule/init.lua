@@ -55,6 +55,13 @@ end
 ---@type table<integer, boolean>
 local viewport_refresh_pending = {}
 
+-- Same idea for the `User Manicule*` → quickfix-refresh autocmd: a bulk
+-- mutation (e.g. `M.send` clearing a batch) fires one event per record,
+-- and a plain `vim.schedule` would queue one qf refresh per event. The
+-- first event of a synchronous burst schedules the refresh; the rest
+-- find the flag set and no-op.
+local qf_refresh_pending = false
+
 ---@class manicule.Config
 ---@field store? table
 ---@field sinks? table
@@ -159,11 +166,12 @@ end
 ---from those shared reads.
 ---
 ---`store.all_for_uri(uri, root)` internally re-reads `store.all(root)`
----via `for_uri`, and `counter_records_for_buffer` read `store.all(root)`
----again — two `store.all` calls per render, each running `M.sync`
----(`SELECT COALESCE(MAX(id))`) on a cache hit, plus two identity
----resolutions. Reading the project list once here and filtering it
----in-process collapses that to one identity + one `store.all`.
+---via `for_uri`, and deriving the counter set separately would read
+---`store.all(root)` again — two `store.all` calls per render, each
+---running `M.sync` (`SELECT COALESCE(MAX(id))`) on a cache hit, plus
+---two identity resolutions. Reading the project list once here and
+---filtering it in-process collapses that to one identity + one
+---`store.all`.
 ---@param bufnr integer
 ---@return table[] records, table[] counter_records, table? identity
 local function render_inputs(bufnr)
@@ -224,16 +232,6 @@ end
 local function records_for_buffer(bufnr)
   local records = render_inputs(bufnr)
   return records
-end
-
----Return the records used for popup title counters. Project comments are
----numbered across the whole project, not just the current file; session
----comments are numbered across the session store.
----@param bufnr integer
----@return table[]
-local function counter_records_for_buffer(bufnr)
-  local _, counter_records = render_inputs(bufnr)
-  return counter_records
 end
 
 local refresh_viewport
@@ -435,8 +433,8 @@ function refresh_viewport(bufnr)
     return
   end
   -- Single-pass: one identify + one store read derives both result sets,
-  -- instead of `records_for_buffer` + `counter_records_for_buffer` each
-  -- re-resolving identity and re-querying the store.
+  -- instead of resolving the per-buffer records and the counter set
+  -- separately (each re-resolving identity and re-querying the store).
   local records, counter_records = render_inputs(bufnr)
   require("manicule.ui.render").update_viewport_popups(bufnr, records, counter_records)
 end
@@ -790,6 +788,11 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "BufUnload", "BufDelete" }, {
     group = group,
     callback = function(ev)
+      -- Drop any pending BufFilePre URI snapshot: a buffer that unloads
+      -- between BufFilePre and the deferred BufFilePost handler would
+      -- otherwise leak its entry forever (`on_bufname_changed`
+      -- early-returns on unloaded buffers before clearing the key).
+      pre_rename_uris[ev.buf] = nil
       require("manicule.ui.render").clear_buffer(ev.buf)
     end,
   })
@@ -809,6 +812,11 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("BufFilePost", {
     group = group,
     callback = function(ev)
+      -- A rename can retarget what a path resolves to (symlinks,
+      -- overwrite-by-rename). Drop the URI module's realpath memo
+      -- BEFORE the deferred rewrite recomputes the new URI, so the
+      -- rename path can never be served a stale resolution.
+      require("manicule.uri")._invalidate_realpath_cache()
       vim.schedule(function()
         on_bufname_changed(ev.buf)
       end)
@@ -868,9 +876,16 @@ function M.setup(opts)
       "ManiculeRestored",
     },
     callback = function()
-      -- Defer so a burst of events coalesces and we don't mutate the
-      -- qflist from inside the autocmd dispatch.
+      -- Defer so we don't mutate the qflist from inside the autocmd
+      -- dispatch. The pending flag makes the burst-coalescing real
+      -- (mirroring `viewport_refresh_pending`): only the FIRST event of
+      -- a synchronous burst schedules the refresh; the rest no-op.
+      if qf_refresh_pending then
+        return
+      end
+      qf_refresh_pending = true
       vim.schedule(function()
+        qf_refresh_pending = false
         local quickfix = require("manicule.ui.quickfix")
         if quickfix.is_manicule_qf_open() then
           quickfix.refresh()
@@ -1265,9 +1280,11 @@ function M.edit(id, opts)
   end)
 end
 
----Delete a comment by id.
+---Delete a comment by id. Returns true when a record was found,
+---removed, and persisted (nil on not-found or persistence failure).
 ---@param id string
----@param opts? { scope?: "project"|"session", project_root?: string, quiet?: boolean }
+---@param opts? { scope?: "project"|"session", project_root?: string, quiet?: boolean, no_refresh?: boolean }
+---@return boolean? deleted
 function M.delete(id, opts)
   opts = opts or {}
   local record, _, remove = find(id, opts)
@@ -1293,8 +1310,15 @@ function M.delete(id, opts)
   -- A fresh deletion invalidates the redo branch, mirroring Vim's
   -- undo-tree: a new edit discards any redo history.
   delete_redo_stack = {}
-  refresh_all_loaded()
+  -- `no_refresh` lets bulk callers (the auto-clear loop in `M.send`)
+  -- suppress the editor-wide repaint per record and run ONE
+  -- `refresh_all_loaded()` after their loop instead. Only the repaint is
+  -- batched — `ManiculeDeleted` still fires per record.
+  if not opts.no_refresh then
+    refresh_all_loaded()
+  end
   emit("ManiculeDeleted", { id = id, record = record })
+  return true
 end
 
 ---Restore the most recently deleted comment. Multi-level: call
@@ -1532,17 +1556,29 @@ function M.send(sink_name, filter, ctx)
       -- `sent_marker` keep the whole-batch behavior.
       local marker = sink.sent_marker
       -- Reuse `M.delete` so each record goes through the full lifecycle
-      -- — store.remove + save, render.reconcile per buffer, and one
-      -- `User ManiculeDeleted` per record — exactly as if the user had
-      -- deleted them by hand. `M.delete` is idempotent on unknown ids
-      -- (returns early), so a sink that already cleared records itself
-      -- becomes a no-op here. Pass `quiet` so already-removed records
-      -- (e.g. a concurrent sync) don't spam a not-found WARN per id.
+      -- — store.remove + save and one `User ManiculeDeleted` per record
+      -- — exactly as if the user had deleted them by hand. `M.delete`
+      -- is idempotent on unknown ids (returns early), so a sink that
+      -- already cleared records itself becomes a no-op here. Pass
+      -- `quiet` so already-removed records (e.g. a concurrent sync)
+      -- don't spam a not-found WARN per id, and `no_refresh` so the
+      -- editor-wide repaint runs ONCE after the loop instead of once
+      -- per cleared record.
+      local cleared = false
       for _, record in ipairs(records) do
         local delivered = marker == nil or (type(record.meta) == "table" and record.meta[marker] ~= nil)
         if delivered then
-          M.delete(record.id, { scope = record.scope, project_root = record.project_root, quiet = true })
+          local deleted = M.delete(record.id, {
+            scope = record.scope,
+            project_root = record.project_root,
+            quiet = true,
+            no_refresh = true,
+          })
+          cleared = cleared or deleted == true
         end
+      end
+      if cleared then
+        refresh_all_loaded()
       end
     end
   end)
@@ -1583,6 +1619,12 @@ end
 ---@param bufnr integer
 function M._attach_buffer(bufnr)
   attach_buffer(bufnr)
+end
+
+-- Exposed for tests (leak assertions on the BufFilePre snapshot table);
+-- not part of the stable public API.
+function M._pre_rename_uris()
+  return pre_rename_uris
 end
 
 function M._stop_sync_timer_for_tests()

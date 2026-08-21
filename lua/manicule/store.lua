@@ -92,17 +92,39 @@ local function git_branch(root)
   return branch
 end
 
+---Memoized `store_name` results, keyed by root. Each entry records the
+---`store.branch` flag it was computed under so a config toggle between
+---`setup()` calls recomputes instead of serving a stale name.
+---
+---Why memoize: `store_name` runs on EVERY store read (`M.all` → `M.sync`
+---→ `sqlite_db` → `sqlite_path`), and with `store.branch = true` each
+---un-memoized call forks `git branch --show-current` — once per viewport
+---refresh. Pinning the resolved name for the session also keeps the
+---cache/db pair coherent: `cache[root]` and `sqlite_dbs[path]` are keyed
+---off the load-time path, so re-resolving the branch mid-session would
+---silently split reads and writes across two databases. A branch switch
+---therefore picks up its own store only after `M._reset()` (i.e. a fresh
+---Neovim session); there is no runtime reload command today.
+---@type table<string, { branch: boolean, name: string }>
+local store_name_cache = {}
+
 ---@param root string
 ---@return string
 local function store_name(root)
   local cfg = config.current.store
+  local want_branch = cfg.branch == true
+  local hit = store_name_cache[root]
+  if hit and hit.branch == want_branch then
+    return hit.name
+  end
   local name = escape(root)
-  if cfg.branch then
+  if want_branch then
     local branch = git_branch(root)
     if branch and branch ~= "main" and branch ~= "master" then
       name = name .. "%%" .. escape(branch)
     end
   end
+  store_name_cache[root] = { branch = want_branch, name = name }
   return name
 end
 
@@ -1115,25 +1137,6 @@ function M.remove_record(scope_or_root, id, project_root)
   return M.remove(scope_or_root, id)
 end
 
----Return every record across every known store — project caches AND
----session. Used by `list` when scope-agnostic enumeration is needed.
----@return table[]
-function M.all_records()
-  M.sync_all()
-  local out = {}
-  for _, entry in pairs(cache) do
-    for _, r in ipairs(entry.records) do
-      table.insert(out, r)
-    end
-  end
-  if session_cache.loaded then
-    for _, r in ipairs(session_cache.records) do
-      table.insert(out, r)
-    end
-  end
-  return out
-end
-
 ---Flush every dirty root in the cache AND the session cache. Used on
 ---VimLeavePre as a safety net.
 function M.flush_all()
@@ -1208,6 +1211,7 @@ function M._reset()
   end
   sqlite_dbs = {}
   cache = {}
+  store_name_cache = {}
   session_cache = { records = {}, dirty = false, loaded = false }
   client_id = ("%s-%d-%d"):format(tostring(vim.fn.hostname()), vim.fn.getpid(), math.random(0, 0xfffffff))
 end
