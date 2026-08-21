@@ -15,6 +15,9 @@ local function setup_env()
   -- Isolate the per-project store to a tempdir and open a buffer inside
   -- the fake root so `store.root()` resolves predictably.
   require("manicule.store")._reset()
+  -- Force `runtime plugin/manicule.lua` to re-source per test so the
+  -- plugin's completion cache starts fresh.
+  vim.g.loaded_manicule = nil
   require("manicule").setup({
     store = {
       dir = tmp_state .. "/",
@@ -72,14 +75,36 @@ describe("manicule positional picker", function()
     vim.cmd("runtime plugin/manicule.lua")
     local cmd = vim.api.nvim_get_commands({})["ManiculeDelete"]
     assert.is_truthy(cmd)
-    -- Re-materialize the completion fn: user_commands expose `complete_arg`
-    -- but not the fn. Call our position completer directly via global.
-    local records = require("manicule").list({ _quiet = true })
-    local expected = {}
-    for i = 1, #records do
-      expected[i] = tostring(i)
+    assert.are.same({ "1", "2", "3" }, vim.fn.getcompletion("ManiculeDelete ", "cmdline"))
+  end)
+
+  it("completion prefix-filters positions by arglead", function()
+    for i = 1, 12 do
+      add("note " .. i, i, "a.lua")
     end
-    assert.are.same({ "1", "2", "3" }, expected)
+    vim.cmd("runtime plugin/manicule.lua")
+    assert.are.same({ "1", "10", "11", "12" }, vim.fn.getcompletion("ManiculeDelete 1", "cmdline"))
+    assert.are.same({ "3" }, vim.fn.getcompletion("ManiculeEdit 3", "cmdline"))
+  end)
+
+  it("completion caches positions so repeated <Tab> does not re-query the store", function()
+    add("one", 1, "a.lua")
+    vim.cmd("runtime plugin/manicule.lua")
+
+    local manicule = require("manicule")
+    local orig_list = manicule.list
+    local calls = 0
+    manicule.list = function(...)
+      calls = calls + 1
+      return orig_list(...)
+    end
+    local first = vim.fn.getcompletion("ManiculeDelete ", "cmdline")
+    local second = vim.fn.getcompletion("ManiculeDelete ", "cmdline")
+    manicule.list = orig_list
+
+    assert.are.same({ "1" }, first)
+    assert.are.same({ "1" }, second)
+    assert.are.equal(1, calls)
   end)
 
   it(":ManiculeDelete <n> removes the positional record", function()

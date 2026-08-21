@@ -28,17 +28,54 @@ local function dispatch_positional(action, opts)
   })
 end
 
+---Keep only the candidates starting with the cmdline prefix `arglead`.
+---@param arglead string
+---@param candidates string[]
+---@return string[]
+local function prefix_filter(arglead, candidates)
+  return vim.tbl_filter(function(candidate)
+    return vim.startswith(candidate, arglead)
+  end, candidates)
+end
+
+---Completion candidates are cached for a short TTL (the pattern used by
+---manicule.review.complete): repeated <Tab> presses must not re-query
+---the whole store on every keystroke.
+local COMPLETION_CACHE_TTL_MS = 10 * 1000
+
+---@type table<string, {at: number, items: string[]}>
+local completion_cache = {}
+
+---Memoize `fn()` under `key` for COMPLETION_CACHE_TTL_MS.
+---@param key string
+---@param fn fun(): string[]
+---@return string[]
+local function cached(key, fn)
+  local hit = completion_cache[key]
+  local now = (vim.uv or vim.loop).hrtime() / 1e6
+  if hit and now - hit.at < COMPLETION_CACHE_TTL_MS then
+    return hit.items
+  end
+  local items = fn()
+  completion_cache[key] = { at = now, items = items }
+  return items
+end
+
 ---Tab-completion returns stringified positions `"1"`..`"N"`. Command-
 ---line completion tokens don't support display text — that's what the
 ---picker is for.
+---@param arglead string
 ---@return string[]
-local function position_completer()
-  local records = require("manicule").list({ _quiet = true })
-  local out = {}
-  for i = 1, #records do
-    out[i] = tostring(i)
-  end
-  return out
+local function position_completer(arglead)
+  local items = cached("positions:" .. tostring((vim.uv or vim.loop).cwd()), function()
+    local records = require("manicule").list({ _quiet = true })
+    local out = {}
+    for i = 1, #records do
+      out[i] = tostring(i)
+    end
+    return out
+  end)
+  return prefix_filter(arglead, items)
 end
 
 vim.api.nvim_create_user_command("ManiculeAdd", function(opts)
@@ -91,13 +128,7 @@ end, {
     -- Second argument after `github`: complete the verdict words.
     local sink = cmdline:match("ManiculeSend%s+(%S+)%s")
     if sink == "github" then
-      local out = {}
-      for _, verdict in ipairs({ "approve", "comment", "request-changes" }) do
-        if verdict:find(arglead, 1, true) == 1 then
-          table.insert(out, verdict)
-        end
-      end
-      return out
+      return prefix_filter(arglead, { "approve", "comment", "request-changes" })
     end
     return require("manicule.sinks").list()
   end,
@@ -134,13 +165,7 @@ vim.api.nvim_create_user_command("ManiculeDisplay", function(opts)
 end, {
   nargs = "?",
   complete = function(arglead)
-    local out = {}
-    for _, mode in ipairs({ "float", "eol", "inline", "hidden" }) do
-      if mode:find(arglead, 1, true) == 1 then
-        table.insert(out, mode)
-      end
-    end
-    return out
+    return prefix_filter(arglead, { "float", "eol", "inline", "hidden" })
   end,
 })
 
@@ -305,13 +330,7 @@ vim.api.nvim_create_user_command("ManiculeReviewDiffMode", function(opts)
 end, {
   nargs = "?",
   complete = function(arglead)
-    local out = {}
-    for _, mode in ipairs({ "split", "unified" }) do
-      if mode:find(arglead, 1, true) == 1 then
-        table.insert(out, mode)
-      end
-    end
-    return out
+    return prefix_filter(arglead, { "split", "unified" })
   end,
 })
 
