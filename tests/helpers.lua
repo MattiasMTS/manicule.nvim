@@ -52,6 +52,22 @@ function H.setup(opts)
   return ctx
 end
 
+---Remove a path recursively via `rm -rf`, retrying once.
+---vim.fn.delete(..., "rf") intermittently fails with E484 on macOS when
+---entries change under the walk (e.g. git object trees still settling);
+---rm tolerates both racing entries and read-only files.
+function H.rimraf(path)
+  if type(path) ~= "string" or path == "" or path == "/" then
+    return
+  end
+  for _ = 1, 2 do
+    local result = vim.system({ "rm", "-rf", path }, { text = true }):wait()
+    if result.code == 0 then
+      return
+    end
+  end
+end
+
 function H.teardown(ctx)
   pcall(vim.cmd, "silent! tabonly")
   pcall(vim.cmd, "silent! only")
@@ -66,7 +82,7 @@ function H.teardown(ctx)
   end)
   vim.g.loaded_manicule = nil
   if ctx then
-    pcall(vim.fn.delete, ctx.artifact_root, "rf")
+    H.rimraf(ctx.artifact_root)
   end
 end
 
@@ -218,7 +234,7 @@ end
 ---@return string root, fun(...): table git  -- git(...) runs git -C root
 function H.git_repo(ctx, files)
   local root = H.project_dir(ctx.artifact_root, "gitrepo")
-  vim.fn.delete(root .. "/.git", "rf")
+  H.rimraf(root .. "/.git")
   local function git(...)
     local result = vim.system({ "git", "-C", root, ... }, { text = true }):wait()
     assert(result.code == 0, ("git %s failed: %s"):format(table.concat({ ... }, " "), result.stderr))
@@ -228,6 +244,11 @@ function H.git_repo(ctx, files)
   git("config", "user.email", "manicule@test.local")
   git("config", "user.name", "Manicule Test")
   git("config", "commit.gpgsign", "false")
+  -- No detached background jobs: they keep writing into .git while
+  -- teardown deletes the tree, the source of intermittent E484 noise.
+  git("config", "gc.auto", "0")
+  git("config", "maintenance.auto", "false")
+  git("config", "core.fsmonitor", "false")
   for path, lines in pairs(files or {}) do
     local abs = root .. "/" .. path
     vim.fn.mkdir(vim.fn.fnamemodify(abs, ":h"), "p")
