@@ -148,14 +148,6 @@ function M.all()
   return vim.deepcopy(sinks)
 end
 
----Return bundled integration names.
----@return string[]
-function M.integrations()
-  local names = vim.tbl_keys(builtin_integrations)
-  table.sort(names)
-  return names
-end
-
 ---List sink names offered for interactive selection.
 ---
 ---Hidden sinks (`spec.hidden`) stay registered — `get`/`dispatch` by name

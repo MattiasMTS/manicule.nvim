@@ -625,6 +625,106 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
+  it("repaints buffers once per consuming send, not once per cleared record", function()
+    local calls = H.register_fake_sink("consume-batch", { clear_on_success = true })
+    local manicule = require("manicule")
+    for i = 1, 3 do
+      manicule.add({
+        body = "batch clear " .. i,
+        range = { start = { i - 1, 0 }, end_ = { i - 1, 0 } },
+      })
+    end
+    assert.are.equal(3, #manicule.list({ _quiet = true }))
+
+    -- Drain callbacks already scheduled by the adds (and by earlier
+    -- tests in this Neovim instance) so the counter below only sees
+    -- work caused by the send itself.
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    local target_bufnr = vim.api.nvim_get_current_buf()
+    local render = require("manicule.ui.render")
+    local original_reconcile = render.reconcile
+    local reconcile_calls = 0
+    render.reconcile = function(bufnr, ...)
+      if bufnr == target_bufnr then
+        reconcile_calls = reconcile_calls + 1
+      end
+      return original_reconcile(bufnr, ...)
+    end
+
+    local events, stop_capture = H.capture_events({ "ManiculeDeleted" })
+    manicule.send("consume-batch")
+    render.reconcile = original_reconcile
+
+    assert.are.equal(1, #calls)
+    assert.are.equal(0, #manicule.list({ _quiet = true }))
+    -- Event semantics unchanged: one ManiculeDeleted per cleared record.
+    assert.are.equal(3, #events)
+    -- Repaint batched: ONE refresh sweep after the clear loop, not one
+    -- editor-wide repaint per deleted record.
+    assert.are.equal(1, reconcile_calls)
+
+    stop_capture()
+  end)
+
+  it("coalesces a synchronous burst of mutation events into one quickfix refresh", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    require("manicule").add({
+      body = "coalesce me",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    vim.cmd("ManiculeList")
+    local quickfix = require("manicule.ui.quickfix")
+    assert.is_truthy(quickfix.is_manicule_qf_open())
+
+    -- Drain callbacks already scheduled by the add (and by earlier
+    -- tests in this Neovim instance) so the counter below only sees
+    -- refreshes caused by the burst fired here.
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    local original_refresh = quickfix.refresh
+    local refresh_calls = 0
+    quickfix.refresh = function(...)
+      refresh_calls = refresh_calls + 1
+      return original_refresh(...)
+    end
+
+    -- Three synchronous events, zero event-loop ticks in between — the
+    -- exact burst shape a bulk mutation produces.
+    for _ = 1, 3 do
+      vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    end
+    assert.is_true(vim.wait(1000, function()
+      return refresh_calls > 0
+    end, 10))
+    -- Drain any additional scheduled callbacks before counting.
+    vim.wait(50, function()
+      return false
+    end, 10)
+    quickfix.refresh = original_refresh
+
+    assert.are.equal(1, refresh_calls)
+  end)
+
+  it("clears the pre-rename URI snapshot when the buffer unloads before BufFilePost lands", function()
+    local path, bufnr = H.edit_project_file(ctx, "src/rename_me.lua", { "local x = 1" })
+    -- `:file` fires BufFilePre (URI snapshotted) then BufFilePost, whose
+    -- handler is deferred via vim.schedule. Wipe the buffer BEFORE the
+    -- schedule drains: the deferred handler early-returns on the dead
+    -- buffer, so only the BufUnload/BufDelete handler can clear the
+    -- snapshot — without it the bufnr slot leaks a stale URI.
+    vim.cmd("file " .. vim.fn.fnameescape(path .. ".renamed"))
+    vim.cmd("bwipeout! " .. bufnr)
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.is_nil(require("manicule")._pre_rename_uris()[bufnr])
+  end)
+
   it("can send to the bundled cmux integration through a fake cmux cli", function()
     local bin, log = H.fake_cmux(ctx, {
       surfaces = {
@@ -660,6 +760,11 @@ describe("manicule headless workflow", function()
     local original_notify = vim.notify
     vim.notify = function() end
     require("manicule").send("cmux")
+    -- The cmux send path is asynchronous (vim.system callbacks); wait for
+    -- the full Added -> Sent -> Deleted event chain before asserting.
+    vim.wait(2000, function()
+      return #events >= 3
+    end)
     vim.notify = original_notify
 
     assert.are.equal(0, #require("manicule").list({ _quiet = true }))

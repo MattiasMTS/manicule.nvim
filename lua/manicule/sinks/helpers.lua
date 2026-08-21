@@ -41,7 +41,7 @@ local function join_blocks(parts)
 end
 
 local function normalize_path(path)
-  return tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("/$", "")
+  return (tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("/$", ""))
 end
 
 local function relpath(root, path)

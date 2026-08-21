@@ -145,6 +145,10 @@ describe("manicule sink helpers", function()
     sink.send({ comment }, { surface = "surface:2" }, function(ok, err)
       sent = { ok = ok, err = err }
     end)
+    -- The send path is asynchronous (vim.system callbacks); wait for the cb.
+    vim.wait(2000, function()
+      return sent ~= nil
+    end)
 
     local log_text = table.concat(vim.fn.readfile(log), "\n")
     assert.is_true(sent.ok)
@@ -190,6 +194,10 @@ describe("manicule sink helpers", function()
     sink.send({ record }, { surface = "surface:2" }, function(ok, err)
       sent = { ok = ok, err = err }
     end)
+    -- The send path is asynchronous (vim.system callbacks); wait for the cb.
+    vim.wait(2000, function()
+      return sent ~= nil
+    end)
 
     assert.is_true(sent.ok)
     assert.is_nil(sent.err)
@@ -227,6 +235,17 @@ describe("manicule sink helpers", function()
     -- Chunking happened: multiple set-buffer + paste-buffer pairs.
     assert.is_true(set_count > 1, "expected more than one chunk, got " .. tostring(set_count))
     assert.are.equal(set_count, paste_count)
+
+    -- Pastes are strictly ordered by chunk index even though the
+    -- set-buffer uploads may complete in any order.
+    local paste_order = {}
+    for idx in raw_log:gmatch("paste%-buffer\tsurface:2\tmanicule%-%d+%-(%d+)\t") do
+      table.insert(paste_order, tonumber(idx))
+    end
+    assert.are.equal(paste_count, #paste_order)
+    for i, idx in ipairs(paste_order) do
+      assert.are.equal(i, idx)
+    end
 
     -- The sink never falls back to `cmux send` for the multiline payload.
     assert.is_nil(raw_log:find("\nsend\tsurface:2", 1, true))
