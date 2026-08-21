@@ -47,15 +47,38 @@ local function read_all(path)
   return content
 end
 
+---Do `left` and `right` hold identical bytes? Sizes are compared first
+---(one fs_stat each): different sizes cannot match, so only same-size
+---pairs pay the two full reads.
+local function same_file(left, right)
+  local lstat, rstat = uv.fs_stat(left), uv.fs_stat(right)
+  if lstat and rstat and lstat.size ~= rstat.size then
+    return false
+  end
+  return read_all(left) == read_all(right)
+end
+
 local function list_files(dir)
   local out = {}
-  local prefix = dir:gsub("/$", "") .. "/"
-  for _, path in
-    ipairs(vim.fs.find(function(name)
-      return name ~= ".git"
-    end, { path = dir, type = "file", limit = math.huge }))
+  local base = dir:gsub("/$", "")
+  -- vim.fs.find's name predicate cannot prune descent — the walk visits
+  -- every directory and the predicate only filters what is RETURNED, so
+  -- a `.git` predicate still walked the whole .git tree and returned its
+  -- internals (HEAD, objects, ...) as reviewable files. vim.fs.dir's
+  -- `skip` prunes the walk itself; entries named `.git` (worktree gitdir
+  -- pointer files) are dropped from the results too, matching the old
+  -- predicate's intent.
+  for rel, type_ in
+    vim.fs.dir(base, {
+      depth = math.huge,
+      skip = function(dir_rel)
+        return dir_rel:match("[^/]+$") ~= ".git"
+      end,
+    })
   do
-    out[path:sub(#prefix + 1)] = path
+    if type_ == "file" and rel:match("[^/]+$") ~= ".git" then
+      out[rel] = base .. "/" .. rel
+    end
   end
   return out
 end
@@ -80,23 +103,28 @@ M.register({
     end
     local sorted = vim.tbl_keys(paths)
     table.sort(sorted)
+    -- ONE lazily-created stage dir shared by every right-only file: a
+    -- per-file mkdtemp costs a subprocess-free but real syscall per
+    -- added file and leaves N dirs for stop() cleanup to track.
+    local stage_root
     for _, rel in ipairs(sorted) do
       local left, right = lefts[rel], rights[rel]
       if left and right then
-        if read_all(left) ~= read_all(right) then
+        if not same_file(left, right) then
           table.insert(files, { left = left, right = right, status = "M", path = rel })
         end
       elseif left then
         table.insert(files, { left = left, right = right_dir .. "/" .. rel, status = "D", path = rel })
       else
         -- Right-only: stage an empty left so the diff shows all-added.
-        local staged = make_stage_dir() .. "/" .. rel
+        stage_root = stage_root or make_stage_dir()
+        local staged = stage_root .. "/" .. rel
         vim.fn.mkdir(vim.fn.fnamemodify(staged, ":h"), "p")
         vim.fn.writefile({}, staged)
         table.insert(files, { left = staged, right = right, status = "A", path = rel })
       end
     end
-    return { files = files, label = "dirs" }
+    return { files = files, label = "dirs", stage_dirs = stage_root and { stage_root } or nil }
   end,
 })
 
@@ -130,10 +158,18 @@ M.register({
     if #changed == 0 then
       return nil, ("manicule: no changes vs %s"):format(ref)
     end
-    local stage_dir = opts.stage_dir or make_stage_dir()
+    -- Only a dir THIS resolver created is reported for stop() cleanup;
+    -- a caller-provided stage_dir stays the caller's to manage.
+    local stage_dir = opts.stage_dir
+    local stage_dirs
+    if not stage_dir then
+      stage_dir = make_stage_dir()
+      stage_dirs = { stage_dir }
+    end
     return {
       files = G.stage_baseline(root, base, changed, stage_dir),
       label = ref,
+      stage_dirs = stage_dirs,
     }
   end,
 })
@@ -176,7 +212,14 @@ M.register({
     if not base then
       return nil, err
     end
-    local stage_dir = opts.stage_dir or make_stage_dir()
+    -- Same ownership rule as the git resolver: report only a
+    -- self-created stage dir for stop() cleanup.
+    local stage_dir = opts.stage_dir
+    local stage_dirs
+    if not stage_dir then
+      stage_dir = make_stage_dir()
+      stage_dirs = { stage_dir }
+    end
     local head = G.rev_parse(root, "HEAD")
     local label = ("pr %s"):format(number)
     if type(meta.title) == "string" and meta.title ~= "" then
@@ -203,7 +246,12 @@ M.register({
       -- Right side = real worktree files, so existing PR review comments
       -- can anchor to them. Best-effort: failures notify and continue.
       require("manicule.review.import").github_pr(root, number)
-      return { files = G.stage_baseline(root, base, changed, stage_dir), label = label, sink_ctx = sink_ctx }
+      return {
+        files = G.stage_baseline(root, base, changed, stage_dir),
+        label = label,
+        sink_ctx = sink_ctx,
+        stage_dirs = stage_dirs,
+      }
     end
 
     -- Head not checked out: stage BOTH sides (comments land on staged
@@ -253,13 +301,13 @@ M.register({
       end
       table.insert(files, { left = left, right = right, status = entry.status, path = entry.path })
     end
-    return { files = files, label = label, sink_ctx = sink_ctx }
+    return { files = files, label = label, sink_ctx = sink_ctx, stage_dirs = stage_dirs }
   end,
 })
 
 ---@param fargs string[]
 ---@param opts? {cwd?: string, stage_dir?: string}
----@return {files: table[], label: string}|nil, string|nil err
+---@return {files: table[], label: string, sink_ctx?: table, stage_dirs?: string[]}|nil, string|nil err
 function M.resolve(fargs, opts)
   opts = opts or {}
   for _, resolver in ipairs(registry) do

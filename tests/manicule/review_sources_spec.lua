@@ -218,6 +218,85 @@ describe("manicule review sources", function()
     assert.is_nil(by_path["same.txt"])
   end)
 
+  it("dirs resolver never walks or diffs .git subtrees", function()
+    local S = require("manicule.review.sources")
+    local left = ctx.artifact_root .. "/GL"
+    local right = ctx.artifact_root .. "/GR"
+    for _, dir in ipairs({ left, right }) do
+      vim.fn.mkdir(dir .. "/.git/objects", "p")
+      vim.fn.mkdir(dir .. "/sub/.git", "p")
+    end
+    -- Differing git internals on both sides, at the top AND nested: none
+    -- of them may surface as diff pairs.
+    vim.fn.writefile({ "ref: refs/heads/a" }, left .. "/.git/HEAD")
+    vim.fn.writefile({ "ref: refs/heads/b" }, right .. "/.git/HEAD")
+    vim.fn.writefile({ "L" }, left .. "/.git/objects/pack")
+    vim.fn.writefile({ "RR" }, right .. "/.git/objects/pack")
+    vim.fn.writefile({ "left only" }, left .. "/sub/.git/config")
+    vim.fn.writefile({ "old" }, left .. "/sub/code.lua")
+    vim.fn.writefile({ "new!" }, right .. "/sub/code.lua")
+
+    local job = assert(S.resolve({ left, right }, {}))
+    assert.are.equal(1, #job.files)
+    assert.are.equal("sub/code.lua", job.files[1].path)
+  end)
+
+  it("dirs resolver stages every right-only file under one owned dir", function()
+    local S = require("manicule.review.sources")
+    local left = ctx.artifact_root .. "/SL"
+    local right = ctx.artifact_root .. "/SR"
+    vim.fn.mkdir(left, "p")
+    vim.fn.mkdir(right .. "/sub", "p")
+    vim.fn.writefile({ "one" }, right .. "/one.lua")
+    vim.fn.writefile({ "two" }, right .. "/sub/two.lua")
+
+    local job = assert(S.resolve({ left, right }, {}))
+    assert.are.equal(2, #job.files)
+    -- ONE stage dir for all right-only files (not one mkdtemp per file),
+    -- reported in the job so review.stop() can delete it.
+    assert.are.equal("table", type(job.stage_dirs))
+    assert.are.equal(1, #job.stage_dirs)
+    local dir = job.stage_dirs[1]
+    assert.are.equal(1, vim.fn.isdirectory(dir))
+    for _, pair in ipairs(job.files) do
+      assert.are.equal("A", pair.status)
+      assert.are.equal(dir, pair.left:sub(1, #dir), "staged left outside the owned dir: " .. pair.left)
+    end
+    vim.fn.delete(dir, "rf")
+  end)
+
+  it("dirs resolver reports no stage dirs when nothing needed staging", function()
+    local S = require("manicule.review.sources")
+    local left = ctx.artifact_root .. "/NL"
+    local right = ctx.artifact_root .. "/NR"
+    vim.fn.mkdir(left, "p")
+    vim.fn.mkdir(right, "p")
+    vim.fn.writefile({ "old" }, left .. "/m.txt")
+    vim.fn.writefile({ "new" }, right .. "/m.txt")
+
+    local job = assert(S.resolve({ left, right }, {}))
+    assert.are.equal(1, #job.files)
+    assert.is_nil(job.stage_dirs)
+  end)
+
+  it("git resolver owns its stage dir only when it created it", function()
+    local S = require("manicule.review.sources")
+    local root = H.git_repo(ctx, { ["a.lua"] = { "return 1" } })
+    vim.fn.writefile({ "return 2" }, root .. "/a.lua")
+
+    -- Caller-provided stage dir: the caller's to manage, never reported.
+    local provided = assert(S.resolve({}, { cwd = root, stage_dir = ctx.artifact_root .. "/prov" }))
+    assert.is_nil(provided.stage_dirs)
+
+    -- Self-created stage dir: reported so review.stop() can delete it.
+    local owned = assert(S.resolve({}, { cwd = root }))
+    assert.are.equal("table", type(owned.stage_dirs))
+    assert.are.equal(1, #owned.stage_dirs)
+    assert.are.equal(1, vim.fn.isdirectory(owned.stage_dirs[1]))
+    assert.are.equal(1, owned.files[1].left:find(owned.stage_dirs[1], 1, true))
+    vim.fn.delete(owned.stage_dirs[1], "rf")
+  end)
+
   it("resolves a remote-tracking ref via merge-base", function()
     local S = require("manicule.review.sources")
     local root, git = H.git_repo(ctx, { ["a.lua"] = { "return 1" } })
@@ -379,6 +458,32 @@ describe("manicule review sources", function()
       assert.are.equal(1, #records)
       assert.are.equal("RT_1", records[1].meta.github.thread_node)
       assert.is_true(records[1].meta.github.resolved)
+    end)
+
+    it("does not warn about thread support when there are no comments", function()
+      local S = require("manicule.review.sources")
+      -- Empty comment stream AND a failing GraphQL endpoint: the thread
+      -- fetch (which now runs concurrently with the comment fetch) must
+      -- stay silent when there is nothing to import.
+      local root, _, gh = pr_repo_with_comments({})
+      gh.set_no_graphql()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      local warned
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        if level == vim.log.levels.WARN then
+          warned = msg
+        end
+        return original_notify(msg, level)
+      end
+      local job, err = S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s23" })
+      vim.notify = original_notify
+
+      assert.is_nil(err)
+      assert.is_truthy(job)
+      assert.is_nil(warned, "no comments to import, yet a warning fired: " .. tostring(warned))
+      assert.are.equal(0, #require("manicule.store").all(root))
     end)
 
     it("imports without resolve support when the thread query fails", function()

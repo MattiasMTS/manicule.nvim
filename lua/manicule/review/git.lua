@@ -20,6 +20,31 @@ function M.run(argv, opts)
   }
 end
 
+---Spawn `argv` WITHOUT waiting, so independent subprocesses can run
+---concurrently; callers `:wait()` the returned handle (see M.wait for
+---the normalized result). A module function, like `M.run`, so tests can
+---observe subprocess fan-out. Throws when the executable is missing —
+---the same loud failure `M.run` has.
+---@param argv string[]
+---@param opts? {cwd?: string}
+---@return vim.SystemObj
+function M.spawn(argv, opts)
+  opts = opts or {}
+  return vim.system(argv, { text = true, cwd = opts.cwd })
+end
+
+---Join a handle from `M.spawn`, normalizing the result like `M.run`.
+---@param handle vim.SystemObj
+---@return {code: integer, stdout: string, stderr: string}
+function M.wait(handle)
+  local result = handle:wait()
+  return {
+    code = result.code or -1,
+    stdout = result.stdout or "",
+    stderr = result.stderr or "",
+  }
+end
+
 local function git(root, ...)
   return M.run({ "git", "-C", root, ... })
 end
@@ -234,8 +259,9 @@ end
 ---Materialize the blob contents of `paths` at `ref` under `dir`,
 ---mirroring relative paths. Batched: chunked `git archive` + `tar`
 ---subprocesses instead of one `git show` fork per file (numbers in
----docs/performance.md), with a per-file `git show` self-heal for
----anything archive missed. Paths absent at `ref` become empty regular
+---docs/performance.md) — archives for all chunks fan out concurrently,
+---extractions join them in order — with a per-file `git show` self-heal
+---for anything archive missed. Paths absent at `ref` become empty regular
 ---files; symlink blobs become regular files holding the link target.
 ---Requires the `tar` executable and fails loudly when it is missing.
 ---@param root string
@@ -253,14 +279,34 @@ function M.materialize(root, ref, paths, dir)
   local max_argv_bytes = 64 * 1024
   local max_paths_per_chunk = 200
   local base_bytes = #root + #ref + #dir + 1024
+  local chunks = {}
   local chunk = {}
   local chunk_bytes = base_bytes
-  local failed_paths = {}
 
-  local function extract(chunk_paths)
-    if #chunk_paths == 0 then
-      return
+  for _, path in ipairs(paths) do
+    local path_bytes = #path + 1
+    if #chunk > 0 and (chunk_bytes + path_bytes > max_argv_bytes or #chunk >= max_paths_per_chunk) then
+      chunks[#chunks + 1] = chunk
+      chunk = {}
+      chunk_bytes = base_bytes
     end
+    table.insert(chunk, path)
+    chunk_bytes = chunk_bytes + path_bytes
+  end
+  if #chunk > 0 then
+    chunks[#chunks + 1] = chunk
+  end
+
+  -- Chunks are independent (distinct pathspecs, distinct archive
+  -- tempfiles, one shared output dir): fan out ALL `git archive`
+  -- subprocesses first, then join each and extract its tar, so
+  -- archives N+1.. run while tar N extracts instead of serializing
+  -- archive/tar pairs. Extraction itself stays sequential — concurrent
+  -- tars into one tree would race on shared parent directories.
+  -- `tar` must exist: M.run throws when it is missing.
+  local failed_paths = {}
+  local jobs = {}
+  for i, chunk_paths in ipairs(chunks) do
     local archive_path = vim.fn.tempname() .. ".tar"
     local archive_argv = {
       "git",
@@ -274,28 +320,19 @@ function M.materialize(root, ref, paths, dir)
       "--",
     }
     vim.list_extend(archive_argv, chunk_paths)
-    local archive_result = M.run(archive_argv)
-    local tar_result = M.run({ "tar", "-xf", archive_path, "-C", dir })
-    pcall(uv.fs_unlink, archive_path)
+    jobs[i] = { paths = chunk_paths, archive = archive_path, handle = M.spawn(archive_argv) }
+  end
+  for _, job in ipairs(jobs) do
+    local archive_result = M.wait(job.handle)
+    local tar_result = M.run({ "tar", "-xf", job.archive, "-C", dir })
+    pcall(uv.fs_unlink, job.archive)
 
     if archive_result.code ~= 0 or tar_result.code ~= 0 then
-      for _, path in ipairs(chunk_paths) do
+      for _, path in ipairs(job.paths) do
         failed_paths[path] = true
       end
     end
   end
-
-  for _, path in ipairs(paths) do
-    local path_bytes = #path + 1
-    if #chunk > 0 and (chunk_bytes + path_bytes > max_argv_bytes or #chunk >= max_paths_per_chunk) then
-      extract(chunk)
-      chunk = {}
-      chunk_bytes = base_bytes
-    end
-    table.insert(chunk, path)
-    chunk_bytes = chunk_bytes + path_bytes
-  end
-  extract(chunk)
 
   for _, path in ipairs(paths) do
     local staged = dir .. "/" .. path

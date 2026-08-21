@@ -114,18 +114,22 @@ describe("manicule review git plumbing", function()
     vim.fn.writefile({ "return 3" }, root .. "/src/added.lua")
 
     local base = assert(G.rev_parse(root, "HEAD"))
-    local original_run = G.run
+    local original_run, original_spawn = G.run, G.spawn
     local calls = {}
     G.run = function(argv, opts)
       table.insert(calls, argv)
       return original_run(argv, opts)
+    end
+    G.spawn = function(argv, opts)
+      table.insert(calls, argv)
+      return original_spawn(argv, opts)
     end
     local ok, files = pcall(G.stage_baseline, root, base, {
       { path = "src/modified file.lua", status = "M" },
       { path = "src/deleted.lua", status = "D" },
       { path = "src/added.lua", status = "A" },
     }, ctx.artifact_root .. "/bulk-staged")
-    G.run = original_run
+    G.run, G.spawn = original_run, original_spawn
 
     assert.is_true(ok)
     assert.are.equal(2, #calls)
@@ -152,21 +156,65 @@ describe("manicule review git plumbing", function()
     vim.fn.writefile({ "changed b" }, root .. "/src/sub/b.lua")
 
     local base = assert(G.rev_parse(root, "HEAD"))
-    local original_run = G.run
+    local original_run, original_spawn = G.run, G.spawn
     local calls = {}
     G.run = function(argv, opts)
       table.insert(calls, argv)
       return original_run(argv, opts)
     end
+    G.spawn = function(argv, opts)
+      table.insert(calls, argv)
+      return original_spawn(argv, opts)
+    end
     local dir = ctx.artifact_root .. "/materialized"
     local ok, err = pcall(G.materialize, root, base, { "src/a.lua", "src/sub/b.lua" }, dir)
-    G.run = original_run
+    G.run, G.spawn = original_run, original_spawn
 
     assert.is_true(ok, tostring(err))
     -- One archive + one tar for the whole batch, no per-file git show.
     assert.are.equal(2, #calls)
     assert.are.equal("base a", table.concat(vim.fn.readfile(dir .. "/src/a.lua"), "\n"))
     assert.are.equal("base b", table.concat(vim.fn.readfile(dir .. "/src/sub/b.lua"), "\n"))
+  end)
+
+  it("fans out chunked archive subprocesses before extracting", function()
+    local G = require("manicule.review.git")
+    local root, git = H.git_repo(ctx)
+    local paths = {}
+    -- Identical content on purpose: 201 paths force two archive chunks
+    -- while producing ONE loose blob object, keeping the fixture repo
+    -- small (macOS teardown of large fresh object trees is flaky-noisy).
+    for i = 1, 201 do
+      local rel = ("f%03d.txt"):format(i)
+      vim.fn.writefile({ "shared content" }, root .. "/" .. rel)
+      paths[i] = rel
+    end
+    git("add", ".")
+    git("commit", "-qm", "fanout files")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local original_run, original_spawn = G.run, G.spawn
+    local order = {}
+    G.run = function(argv, opts)
+      table.insert(order, argv[1])
+      return original_run(argv, opts)
+    end
+    G.spawn = function(argv, opts)
+      table.insert(order, argv[1] .. "-spawn")
+      return original_spawn(argv, opts)
+    end
+    local dir = ctx.artifact_root .. "/fanout"
+    local ok, err = pcall(G.materialize, root, base, paths, dir)
+    G.run, G.spawn = original_run, original_spawn
+
+    assert.is_true(ok, tostring(err))
+    -- 201 paths split into a 200-path and a 1-path chunk. The chunks are
+    -- independent, so BOTH archives spawn before the first tar runs
+    -- (archive N+1 overlaps tar N instead of serializing).
+    assert.are.same({ "git-spawn", "git-spawn", "tar", "tar" }, order)
+    -- One file from each chunk actually extracted.
+    assert.are.equal("shared content", table.concat(vim.fn.readfile(dir .. "/f001.txt"), "\n"))
+    assert.are.equal("shared content", table.concat(vim.fn.readfile(dir .. "/f201.txt"), "\n"))
   end)
 
   it("self-heals an archive chunk containing a path absent from the base", function()

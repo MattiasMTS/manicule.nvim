@@ -62,12 +62,48 @@ function M.github_pr(root, number)
 
   local endpoint = ("repos/%s/pulls/%s/comments"):format(repo.nameWithOwner, number)
 
+  -- The REST comment stream and the GraphQL thread stream are
+  -- independent, and each gh round-trip costs real editor-frozen time:
+  -- spawn the FIRST request of both streams concurrently (G.spawn) and
+  -- join them below. Pagination within a stream stays sequential —
+  -- page N+1 needs page N's cursor — so concurrency is strictly across
+  -- the two streams.
+  local owner, name = repo.nameWithOwner:match("^([^/]+)/(.+)$")
+  local thread_query = "query($owner:String!,$name:String!,$number:Int!,$cursor:String){"
+    .. "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+    .. "reviewThreads(first:100,after:$cursor){"
+    .. "pageInfo{hasNextPage endCursor}"
+    .. "nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}"
+  local function thread_argv(cursor)
+    local args = {
+      "gh",
+      "api",
+      "graphql",
+      "-f",
+      "query=" .. thread_query,
+      "-f",
+      "owner=" .. tostring(owner),
+      "-f",
+      "name=" .. tostring(name),
+      "-F",
+      "number=" .. tostring(number),
+    }
+    if cursor then
+      args[#args + 1] = "-f"
+      args[#args + 1] = "cursor=" .. cursor
+    end
+    return args
+  end
+
+  local comments_handle = G.spawn({ "gh", "api", endpoint, "--paginate", "--slurp" }, { cwd = root })
+  local threads_handle = owner and G.spawn(thread_argv(nil), { cwd = root }) or nil
+
   -- Prefer `--paginate --slurp`: gh wraps one JSON array per page in an
   -- outer array, so page boundaries never require rewriting the payload
   -- (a gsub on `][` would corrupt comment bodies containing brackets).
   ---@return table|nil comments, string|nil err
   local function fetch_comments()
-    local result = G.run({ "gh", "api", endpoint, "--paginate", "--slurp" }, { cwd = root })
+    local result = G.wait(comments_handle)
     if result.code == 0 then
       local ok, pages = pcall(vim.json.decode, result.stdout)
       if not ok or type(pages) ~= "table" then
@@ -111,49 +147,22 @@ function M.github_pr(root, number)
     end
   end
 
-  local comments, fetch_err = fetch_comments()
-  if not comments then
-    return warn(fetch_err)
-  end
-
   -- Best-effort resolve support: the REST comments payload carries no
-  -- review-thread ids, and resolving needs the THREAD node id. A
+  -- review-thread ids, and resolving needs the THREAD node id. The
   -- GraphQL query maps each thread's first comment databaseId to the
   -- thread node + isResolved, following `pageInfo`/`after:` cursors so
   -- PRs with more than 100 threads still backfill every thread; failure
-  -- degrades to import-without-resolve.
+  -- degrades to import-without-resolve. The first page is already in
+  -- flight (threads_handle above).
   ---@return table<number, {thread_node: string, resolved: boolean}>|nil, string|nil err
   local function fetch_threads()
-    local owner, name = repo.nameWithOwner:match("^([^/]+)/(.+)$")
-    if not owner then
+    if not threads_handle then
       return nil, "unexpected repository name " .. repo.nameWithOwner
     end
-    local query = "query($owner:String!,$name:String!,$number:Int!,$cursor:String){"
-      .. "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-      .. "reviewThreads(first:100,after:$cursor){"
-      .. "pageInfo{hasNextPage endCursor}"
-      .. "nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}"
     local map = {}
-    local cursor = nil
+    local pending = threads_handle
     while true do
-      local args = {
-        "gh",
-        "api",
-        "graphql",
-        "-f",
-        "query=" .. query,
-        "-f",
-        "owner=" .. owner,
-        "-f",
-        "name=" .. name,
-        "-F",
-        "number=" .. tostring(number),
-      }
-      if cursor then
-        args[#args + 1] = "-f"
-        args[#args + 1] = "cursor=" .. cursor
-      end
-      local result = G.run(args, { cwd = root })
+      local result = G.wait(pending)
       if result.code ~= 0 then
         return nil, vim.trim(result.stderr)
       end
@@ -172,21 +181,29 @@ function M.github_pr(root, number)
         end
       end
       local page_info = type(review_threads.pageInfo) == "table" and review_threads.pageInfo or {}
-      cursor = page_info.hasNextPage == true and str(page_info.endCursor) or nil
+      local cursor = page_info.hasNextPage == true and str(page_info.endCursor) or nil
       if not cursor then
         return map, nil
       end
+      pending = G.spawn(thread_argv(cursor), { cwd = root })
     end
   end
 
+  -- Join both streams before branching, so neither subprocess is left
+  -- running unobserved.
+  local comments, fetch_err = fetch_comments()
+  local thread_map, thread_err = fetch_threads()
+  if not comments then
+    return warn(fetch_err)
+  end
+
   local threads = {}
-  if #comments > 0 then
-    local thread_map, thread_err = fetch_threads()
-    if thread_map then
-      threads = thread_map
-    else
-      vim.notify(("manicule: PR thread resolve support unavailable: %s"):format(thread_err), vim.log.levels.WARN)
-    end
+  if thread_map then
+    threads = thread_map
+  elseif #comments > 0 then
+    -- Nothing to import means nothing to resolve: stay silent on thread
+    -- failures then (the sequential code never even issued the query).
+    vim.notify(("manicule: PR thread resolve support unavailable: %s"):format(thread_err), vim.log.levels.WARN)
   end
 
   local store = require("manicule.store")
