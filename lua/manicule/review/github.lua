@@ -4,7 +4,10 @@
 -- everything here reads and writes `record.meta` only (`meta.github` on
 -- imported records, `meta.github_reply` on locally-authored replies)
 -- and talks to GitHub through the gh CLI. The core record schema stays
--- github-agnostic.
+-- github-agnostic. Network calls run asynchronously (the sink helpers'
+-- `system_async`) so panel keymaps never block the UI; `M.reply` itself
+-- never networks — it only persists a local record that the github sink
+-- posts on the next send.
 
 local M = {}
 
@@ -54,6 +57,18 @@ local function imported_github(record)
   local meta = type(record.meta) == "table" and record.meta or nil
   local gh = meta and type(meta.github) == "table" and meta.github or nil
   return (gh and gh.imported == true) and gh or nil
+end
+
+---Executable for GitHub calls: honours `sinks.github.command` — the
+---same knob the github sink reads — and falls back to plain `gh`.
+---@return string
+local function gh_cli()
+  local sinks = require("manicule.config").get().sinks
+  local github = type(sinks) == "table" and sinks.github or nil
+  if type(github) == "table" and type(github.command) == "string" and github.command ~= "" then
+    return github.command
+  end
+  return "gh"
 end
 
 ---Reply to the imported GitHub comment behind `locator`: open the
@@ -123,11 +138,19 @@ end
 
 ---Toggle GitHub thread resolution for the imported comment behind
 ---`locator` via the resolveReviewThread / unresolveReviewThread GraphQL
----mutations. On success `meta.github.resolved` flips locally and a
----ManiculeEdited event refreshes every open surface. Requires
----`meta.github.thread_node` (captured at import time); records imported
----before resolve support gain it when `:ManiculeReview pr <n>` is
----re-run — import backfills thread data onto deduped records.
+---mutations. The mutation runs through an async `vim.system` (the same
+---helper as the github sink's send path) so pressing `gr` never blocks
+---the UI. The UX is pending-style, not optimistic: a
+---"resolving/unresolving thread..." notify fires immediately, and the
+---local `meta.github.resolved` flip, store save, and ManiculeEdited
+---refresh all happen in the callback once GitHub confirmed the mutation
+---— the sync version's ordering preserved, so a failed mutation needs
+---no rollback. A second `gr` while a mutation is in flight re-sends the
+---same (idempotent) mutation and both callbacks set the same final
+---value, so state stays consistent. Requires `meta.github.thread_node`
+---(captured at import time); records imported before resolve support
+---gain it when `:ManiculeReview pr <n>` is re-run — import backfills
+---thread data onto deduped records.
 ---@param locator {id: string, scope?: string, project_root?: string}|nil
 function M.toggle_resolve(locator)
   local record, save = find(locator)
@@ -150,24 +173,27 @@ function M.toggle_resolve(locator)
   local resolving = gh.resolved ~= true
   local mutation = resolving and "resolveReviewThread" or "unresolveReviewThread"
   local query = ("mutation($id:ID!){%s(input:{threadId:$id}){thread{isResolved}}}"):format(mutation)
-  local result = require("manicule.review.git").run(
-    { "gh", "api", "graphql", "-f", "query=" .. query, "-f", "id=" .. gh.thread_node },
-    { cwd = record.project_root }
+  vim.notify(("manicule: %s thread..."):format(resolving and "resolving" or "unresolving"), vim.log.levels.INFO)
+  require("manicule.sinks.helpers").system_async(
+    { gh_cli(), "api", "graphql", "-f", "query=" .. query, "-f", "id=" .. gh.thread_node },
+    { cwd = record.project_root },
+    function(result)
+      if result.code ~= 0 then
+        vim.notify(("manicule: gh %s failed: %s"):format(mutation, vim.trim(result.stderr)), vim.log.levels.ERROR)
+        return
+      end
+      gh.resolved = resolving
+      record.updated_at = os.time()
+      local ok, err = save()
+      if not ok then
+        gh.resolved = not resolving
+        vim.notify("manicule: failed to persist thread state: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      emit("ManiculeEdited", record)
+      vim.notify(("manicule: thread %s"):format(resolving and "resolved" or "unresolved"), vim.log.levels.INFO)
+    end
   )
-  if result.code ~= 0 then
-    vim.notify(("manicule: gh %s failed: %s"):format(mutation, vim.trim(result.stderr)), vim.log.levels.ERROR)
-    return
-  end
-  gh.resolved = resolving
-  record.updated_at = os.time()
-  local ok, err = save()
-  if not ok then
-    gh.resolved = not resolving
-    vim.notify("manicule: failed to persist thread state: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  emit("ManiculeEdited", record)
-  vim.notify(("manicule: thread %s"):format(resolving and "resolved" or "unresolved"), vim.log.levels.INFO)
 end
 
 return M

@@ -804,15 +804,24 @@ describe("manicule review session", function()
 
     press_in_panel(1, "gr")
 
+    -- The mutation runs through an async vim.system: the argv log, the
+    -- flag flip, and the panel refresh all land in the callback.
+    local store = require("manicule.store")
+    vim.wait(2000, function()
+      return store.get(ctx.root, record.id).meta.github.resolved == true
+    end)
+
     local argv = table.concat(gh.argv(), "\n")
     assert.is_truthy(argv:find("resolveReviewThread", 1, true))
     assert.is_truthy(argv:find("RT_kwDO1", 1, true))
     assert.is_nil(argv:find("unresolveReviewThread", 1, true))
-    local store = require("manicule.store")
     assert.is_true(store.get(ctx.root, record.id).meta.github.resolved)
     assert.is_truthy(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
 
     press_in_panel(1, "gr")
+    vim.wait(2000, function()
+      return store.get(ctx.root, record.id).meta.github.resolved == false
+    end)
 
     argv = table.concat(gh.argv(), "\n")
     assert.is_truthy(argv:find("unresolveReviewThread", 1, true))

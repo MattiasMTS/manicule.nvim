@@ -555,9 +555,108 @@ describe("manicule review sources", function()
       assert.is_true(records[1].meta.github.resolved)
 
       -- Resolve now works on the backfilled record: RT_9 is resolved, so
-      -- gr sends unresolveReviewThread and flips the local flag.
+      -- gr sends unresolveReviewThread and flips the local flag. The
+      -- mutation runs through an async vim.system, so wait for the
+      -- callback to land before asserting.
       require("manicule.review.github").toggle_resolve({ id = records[1].id, project_root = root })
+      vim.wait(2000, function()
+        return store.get(root, records[1].id).meta.github.resolved == false
+      end)
       assert.is_false(store.get(root, records[1].id).meta.github.resolved)
+    end)
+
+    it("toggles thread resolution asynchronously without blocking", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments(nil, {
+        { id = "RT_1", isResolved = false, comments = { nodes = { { databaseId = 1002 } } } },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s20" }))
+      local store = require("manicule.store")
+      local record = store.all(root)[1]
+      assert.is_nil(record.meta.github.resolved)
+
+      local messages = {}
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        table.insert(messages, { msg = tostring(msg), level = level })
+      end
+      require("manicule.review.github").toggle_resolve({ id = record.id, project_root = root })
+      -- gh runs via an async vim.system: the local flag must not have
+      -- flipped yet when toggle_resolve returns.
+      local flipped_synchronously = store.get(root, record.id).meta.github.resolved == true
+      vim.wait(2000, function()
+        return store.get(root, record.id).meta.github.resolved == true
+      end)
+      vim.notify = original_notify
+
+      assert.is_false(flipped_synchronously)
+      assert.is_true(store.get(root, record.id).meta.github.resolved)
+      -- Pending feedback fires immediately, success once gh confirms.
+      assert.are.equal("manicule: resolving thread...", messages[1].msg)
+      local resolved_notified = false
+      for _, entry in ipairs(messages) do
+        if entry.msg == "manicule: thread resolved" then
+          resolved_notified = true
+        end
+      end
+      assert.is_true(resolved_notified)
+    end)
+
+    it("keeps the local flag and reports the error when the mutation fails", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments(nil, {
+        { id = "RT_1", isResolved = false, comments = { nodes = { { databaseId = 1002 } } } },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s21" }))
+      local store = require("manicule.store")
+      local record = store.all(root)[1]
+      gh.set_no_graphql()
+
+      local err_msg
+      local original_notify = vim.notify
+      vim.notify = function(msg, level)
+        if level == vim.log.levels.ERROR then
+          err_msg = tostring(msg)
+        end
+      end
+      require("manicule.review.github").toggle_resolve({ id = record.id, project_root = root })
+      vim.wait(2000, function()
+        return err_msg ~= nil
+      end)
+      vim.notify = original_notify
+
+      assert.are.equal("manicule: gh resolveReviewThread failed: gh: graphql boom", err_msg)
+      assert.is_nil(store.get(root, record.id).meta.github.resolved)
+    end)
+
+    it("routes thread mutations through the configured github sink command", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments(nil, {
+        { id = "RT_1", isResolved = false, comments = { nodes = { { databaseId = 1002 } } } },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s22" }))
+      local store = require("manicule.store")
+      local record = store.all(root)[1]
+
+      -- Decoy `gh` on PATH that always fails: the mutation must go
+      -- through `sinks.github.command` (the same knob the github sink
+      -- reads), not a hardcoded PATH lookup of `gh`.
+      local decoy_bin = ctx.artifact_root .. "/decoy-bin"
+      vim.fn.mkdir(decoy_bin, "p")
+      vim.fn.writefile({ "#!/bin/sh", "exit 9" }, decoy_bin .. "/gh")
+      vim.fn.system({ "chmod", "+x", decoy_bin .. "/gh" })
+      vim.env.PATH = decoy_bin .. ":" .. saved_path
+      require("manicule.config").get().sinks.github = { command = gh.bin .. "/gh" }
+
+      require("manicule.review.github").toggle_resolve({ id = record.id, project_root = root })
+      vim.wait(2000, function()
+        return store.get(root, record.id).meta.github.resolved == true
+      end)
+
+      assert.is_true(store.get(root, record.id).meta.github.resolved)
     end)
 
     it("re-resolving the same PR does not duplicate imported records", function()
