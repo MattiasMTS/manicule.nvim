@@ -130,6 +130,24 @@ describe("manicule review unified mode", function()
     assert.is_true(vim.fn.foldclosed(20) > 0, "unchanged tail did not fold")
   end)
 
+  it("arms the foldexpr through an eagerly-resolved global", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "unified" }))
+    vim.api.nvim_set_current_win(file_window())
+
+    -- 'foldexpr' is evaluated per line on every fold recompute; going
+    -- through v:lua.require'...' paid a package.loaded lookup per line.
+    assert.are.equal("v:lua.__manicule_inline_foldexpr(v:lnum)", vim.wo.foldexpr)
+    assert.are.equal("function", type(_G.__manicule_inline_foldexpr))
+    assert.are.equal("function", type(_G.__manicule_inline_foldtext))
+    -- Same fold behavior as before the indirection change.
+    assert.is_true(vim.fn.foldclosed(20) > 0, "unchanged tail did not fold")
+
+    R.stop()
+    assert.is_nil(_G.__manicule_inline_foldexpr)
+    assert.is_nil(_G.__manicule_inline_foldtext)
+  end)
+
   it("does not fold when review.context is disabled by fold_unchanged", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },

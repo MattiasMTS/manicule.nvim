@@ -103,3 +103,22 @@ describe("review inline fold rows", function()
     assert.is_nil(keep[3])
   end)
 end)
+
+describe("review inline buffer lifecycle", function()
+  it("drops a wiped buffer's state mid-session", function()
+    local baseline = vim.fn.tempname()
+    vim.fn.writefile({ "one", "two" }, baseline)
+    local bufnr = vim.api.nvim_create_buf(false, false)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "one", "TWO" })
+    assert.is_true(inline.apply(bufnr, baseline, { fold = false }))
+    assert.is_true(inline.is_active(bufnr))
+
+    -- Wiping the buffer directly (not via clear_all at session end) must
+    -- reap its state entry, or a long session pins every dead buffer's
+    -- hunk tables until it stops.
+    vim.api.nvim_buf_delete(bufnr, { force = true })
+
+    assert.is_false(inline.is_active(bufnr))
+    vim.fn.delete(baseline)
+  end)
+end)

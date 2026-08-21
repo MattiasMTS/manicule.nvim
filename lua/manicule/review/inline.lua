@@ -44,6 +44,23 @@ M.ns = vim.api.nvim_create_namespace("manicule_review_inline")
 ---@type table<integer, manicule.review.InlineState>
 local state = {}
 
+---Buffer-local BufWipeout autocmds that reap a buffer's state entry the
+---moment the buffer dies mid-session; clear_all at session end used to
+---be the only reaper, pinning dead buffers' hunk tables until then.
+local wipe_group = vim.api.nvim_create_augroup("ManiculeReviewInlineWipe", { clear = true })
+
+---Drop the fold-callback globals once nothing is painted anymore.
+---'foldexpr' runs per line on every fold recompute, so it references an
+---eagerly-resolved global (armed in fold_windows) instead of paying a
+---v:lua require() round-trip per line; window options are restored by
+---clear() before this runs, so no window still points at the globals.
+local function maybe_clear_fold_globals()
+  if next(state) == nil then
+    _G.__manicule_inline_foldexpr = nil
+    _G.__manicule_inline_foldtext = nil
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- Highlights
 -- ---------------------------------------------------------------------------
@@ -283,6 +300,9 @@ local function fold_windows(bufnr, context)
   if not entry then
     return
   end
+  -- Arm the eagerly-resolved fold callbacks (see maybe_clear_fold_globals).
+  _G.__manicule_inline_foldexpr = M.foldexpr
+  _G.__manicule_inline_foldtext = M.foldtext
   for _, winid in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
       if not entry.windows[winid] then
@@ -290,8 +310,8 @@ local function fold_windows(bufnr, context)
       end
       set_window_options(winid, {
         foldmethod = "expr",
-        foldexpr = "v:lua.require'manicule.review.inline'.foldexpr(v:lnum)",
-        foldtext = "v:lua.require'manicule.review.inline'.foldtext()",
+        foldexpr = "v:lua.__manicule_inline_foldexpr(v:lnum)",
+        foldtext = "v:lua.__manicule_inline_foldtext()",
         foldenable = true,
         foldlevel = 0,
         -- Never collapse a gap smaller than the context we already show;
@@ -417,6 +437,17 @@ function M.apply(bufnr, left_path, opts)
 
   paint(bufnr, hunks)
   map_hunk_navigation(bufnr)
+  -- Reap this buffer's entry the moment the buffer dies: the session can
+  -- outlive any one buffer (e.g. :bwipeout on a reviewed file), and the
+  -- entry would otherwise linger until clear_all at session end.
+  vim.api.nvim_clear_autocmds({ group = wipe_group, buffer = bufnr })
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    group = wipe_group,
+    buffer = bufnr,
+    callback = function()
+      M.clear(bufnr)
+    end,
+  })
   -- Folding an identical file would hide the whole buffer behind one
   -- fold; leave it open so the user sees the file, not a placeholder.
   if opts.fold ~= false and #hunks > 0 then
@@ -431,18 +462,20 @@ function M.clear(bufnr)
   local entry = state[bufnr]
   state[bufnr] = nil
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    maybe_clear_fold_globals()
     return
   end
+  pcall(vim.api.nvim_clear_autocmds, { group = wipe_group, buffer = bufnr })
   pcall(vim.api.nvim_buf_clear_namespace, bufnr, M.ns, 0, -1)
   unmap_hunk_navigation(bufnr)
-  if not entry then
-    return
-  end
-  for winid, saved in pairs(entry.windows) do
-    if vim.api.nvim_win_is_valid(winid) then
-      set_window_options(winid, saved)
+  if entry then
+    for winid, saved in pairs(entry.windows) do
+      if vim.api.nvim_win_is_valid(winid) then
+        set_window_options(winid, saved)
+      end
     end
   end
+  maybe_clear_fold_globals()
 end
 
 ---Clear every buffer this module has painted. Called whenever the review
@@ -452,6 +485,7 @@ function M.clear_all()
     M.clear(bufnr)
   end
   state = {}
+  maybe_clear_fold_globals()
 end
 
 ---Is `bufnr` currently showing an inline diff?
