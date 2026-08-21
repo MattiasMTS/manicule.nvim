@@ -302,40 +302,22 @@ local function short_id(record_id)
   return s:sub(1, 6)
 end
 
----Build the edit/delete hint shown in the popup footer. We pull from
----`config.get().keymaps` when available (user-configured), otherwise
----fall back to a hard-coded `<Plug>`-style hint that matches the
----bindings shipped in `plugin/manicule.lua`.
----@return string?
-local function comment_hint_text()
-  local cfg = config.get() or {}
-  local keymaps = cfg.keymaps or {}
-  local parts = {}
-  if type(keymaps.edit) == "string" and keymaps.edit ~= "" then
-    table.insert(parts, "edit " .. keymaps.edit)
-  end
-  if type(keymaps.delete) == "string" and keymaps.delete ~= "" then
-    table.insert(parts, "delete " .. keymaps.delete)
-  end
-  if #parts == 0 then
-    return "edit gca | delete gcd"
-  end
-  return table.concat(parts, " | ")
-end
+---Edit/delete hint shown in the popup footer. Matches the default
+---`gca` / `gcd` bindings shipped in `plugin/manicule.lua`; there is no
+---user-facing keymap-hint config.
+local COMMENT_HINT = "edit gca | delete gcd"
 
----Compose the popup footer: "<Mon DD HH:MM> · <hint>". Falls back to
----just the timestamp when no keymap hint is bound, just the hint when
----the record has neither timestamp, and nil when both are absent.
+---Compose the popup footer: "<Mon DD HH:MM> · <hint>", or just the hint
+---when the record carries no timestamp.
 ---@param record table
----@return string?
+---@return string
 local function comment_footer_text(record)
   local ts = record and (record.updated_at or record.created_at)
   local ts_str = type(ts) == "number" and os.date("%b %d %H:%M", ts) or nil
-  local hint = comment_hint_text()
-  if ts_str and hint then
-    return ts_str .. " · " .. hint
+  if ts_str then
+    return ts_str .. " · " .. COMMENT_HINT
   end
-  return ts_str or hint
+  return COMMENT_HINT
 end
 
 ---Find any window (in any tab) currently showing `bufnr`.
