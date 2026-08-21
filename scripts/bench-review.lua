@@ -111,14 +111,37 @@ local ok, err = xpcall(function()
       return comments
     end,
   }
+  -- Mirror the session shape review.start builds, including the cached
+  -- uris/root the panel reads (review.state() carries them since the
+  -- session-cache change; older builds ignore the extra fields).
+  local function pair_path(pair)
+    return pair.status == "D" and pair.left or pair.right
+  end
+  local session_uris = {}
+  local session_uri_set = {}
+  for index, pair in ipairs(resolved.files) do
+    local uri = uri_mod.for_path(pair_path(pair))
+    session_uris[index] = uri
+    session_uri_set[uri] = true
+  end
   package.loaded["manicule.review"] = {
     state = function()
-      return { files = resolved.files, label = "benchmark" }
+      return {
+        files = resolved.files,
+        label = "benchmark",
+        uris = session_uris,
+        uri_set = session_uri_set,
+        root = root,
+      }
     end,
+    pair_path = pair_path,
   }
   package.loaded["manicule.review.panel"] = nil
   local panel = require("manicule.review.panel")
-  local build_files_items = find_upvalue(panel.open, "build_files_items")
+  -- build_files_items sits behind open_window since the panel toggle
+  -- refactor; chase it through the upvalue chain.
+  local open_window = find_upvalue(panel.open, "open_window")
+  local build_files_items = find_upvalue(open_window, "build_files_items")
   local panel_ms, items = elapsed_ms(build_files_items)
   assert(#items == 2000)
 

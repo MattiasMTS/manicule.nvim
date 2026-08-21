@@ -23,41 +23,13 @@ local panel_winid = nil
 ---@type integer|nil autocmd group for the panel's live refresh
 local augroup = nil
 
----Project root the session's worktree files live under. list() resolves
----the root from the CURRENT buffer, and the panel's unnamed quickfix
----buffer falls back to cwd — which can miss the reviewed project
----entirely. Pass this as `_root` on every list() call made from panel
----keymaps so queries hit the right store.
----@return string|nil
-local function session_root()
-  local review = require("manicule.review")
-  local state = review.state()
-  if not state then
-    return nil
-  end
-  local markers = require("manicule.config").current.store.root_markers
-  for _, pair in ipairs(state.files) do
-    local root = vim.fs.root(review.pair_path(pair), markers)
-    if root then
-      return root
-    end
-  end
-  return nil
-end
-
-local function session_uris()
-  local review = require("manicule.review")
-  local state = review.state()
-  if not state then
-    return {}
-  end
-  local uri_mod = require("manicule.uri")
-  local uris = {}
-  for _, pair in ipairs(state.files) do
-    uris[uri_mod.for_path(review.pair_path(pair))] = true
-  end
-  return uris
-end
+-- The session's project root, URI array/set, and uri -> pair-index map
+-- all come pre-computed on review.state() (session cache built once in
+-- review.start): list() resolves the store root from the CURRENT
+-- buffer, and the panel's unnamed quickfix buffer falls back to cwd —
+-- which can miss the reviewed project entirely — so every list() call
+-- here passes the cached root as `_root` and filters on the cached
+-- uri set.
 
 local function build_files_items()
   local review = require("manicule.review")
@@ -66,17 +38,8 @@ local function build_files_items()
     return {}
   end
 
-  local uri_mod = require("manicule.uri")
-  local pair_uris = {}
-  local session_uri_set = {}
-  for idx, pair in ipairs(state.files) do
-    local uri = uri_mod.for_path(review.pair_path(pair))
-    pair_uris[idx] = uri
-    session_uri_set[uri] = true
-  end
-
   local counts = {}
-  local records = require("manicule").list({ _quiet = true, uris = session_uri_set, _root = session_root() })
+  local records = require("manicule").list({ _quiet = true, uris = state.uri_set, _root = state.root })
   for _, record in ipairs(records) do
     counts[record.uri] = (counts[record.uri] or 0) + 1
   end
@@ -86,7 +49,7 @@ local function build_files_items()
     table.insert(items, {
       filename = review.pair_path(pair),
       lnum = 1,
-      text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[pair_uris[idx]] or 0),
+      text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[state.uris[idx]] or 0),
       -- Store index for <CR> mapping
       user_data = { pair_index = idx },
     })
@@ -94,9 +57,14 @@ local function build_files_items()
   return items
 end
 
-local function build_comments_items()
-  local uris = file_filter and { [file_filter] = true } or session_uris()
-  local records = require("manicule").list({ _quiet = true, uris = uris, _root = session_root() })
+---@param records? table[] pre-fetched records for the CURRENT filter
+---(uri-scoped when `file_filter` is set); fetched here when nil.
+local function build_comments_items(records)
+  if not records then
+    local state = require("manicule.review").state()
+    local uris = file_filter and { [file_filter] = true } or (state and state.uri_set or {})
+    records = require("manicule").list({ _quiet = true, uris = uris, _root = state and state.root or nil })
+  end
   local items = require("manicule.ui.quickfix").build_items(records)
   -- Carry each record's uri + line in user_data (mirroring the files
   -- view's user_data.pair_index) so the panel's <CR> can map a comment
@@ -123,71 +91,48 @@ local function build_comments_items()
   return items
 end
 
----URI a pair's comments anchor to (see review.pair_path), matching how
----build_files_items counts them.
----@param pair {left: string, right: string, status: string}
----@return string
-local function pair_uri(pair)
-  local path = require("manicule.review").pair_path(pair)
-  return require("manicule.uri").for_path(path)
-end
-
----Pair index under the cursor in the CURRENT (panel) window. Reads the
----list displayed in this window, not the global current stack entry,
----so qf history can't desync row -> pair mapping.
----@return integer|nil
-local function pair_index_at_cursor()
+---Quickfix item under the cursor in the CURRENT (panel) window. Reads
+---the list displayed in THIS window, not the global current stack
+---entry, so qf history can't desync row -> item. The three projections
+---below pull their locators out of the item's user_data.
+---@return table|nil item
+local function item_at_cursor()
   local winid = vim.api.nvim_get_current_win()
   local row = vim.api.nvim_win_get_cursor(winid)[1]
   local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
   if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
     return nil
   end
-  local item = info.items[row]
-  if not item then
-    return nil
-  end
-  local data = item.user_data
+  return info.items[row]
+end
+
+---Pair index under the cursor (files view).
+---@return integer|nil
+local function pair_index_at_cursor()
+  local item = item_at_cursor()
+  local data = item and item.user_data
   if type(data) == "table" and type(data.pair_index) == "number" then
     return data.pair_index
   end
   return nil
 end
 
----Comment locator (uri + line) under the cursor in the CURRENT (panel)
----window. Reads the list displayed in this window, like
----pair_index_at_cursor, so qf history can't desync row -> comment.
+---Comment locator (uri + line) under the cursor (comments view).
 ---@return {uri: string, line: integer}|nil
 local function comment_at_cursor()
-  local winid = vim.api.nvim_get_current_win()
-  local row = vim.api.nvim_win_get_cursor(winid)[1]
-  local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
-  if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
-    return nil
-  end
-  local item = info.items[row]
-  if not item then
-    return nil
-  end
-  local data = item.user_data
+  local item = item_at_cursor()
+  local data = item and item.user_data
   if type(data) == "table" and type(data.uri) == "string" and data.uri ~= "" then
     return { uri = data.uri, line = tonumber(data.line) or item.lnum or 1 }
   end
   return nil
 end
 
----Record locator (id + scope + project root) under the cursor in the
----CURRENT (panel) window. Reads the list displayed in this window, like
----comment_at_cursor, so qf history can't desync row -> record.
+---Record locator (id + scope + project root) under the cursor
+---(comments view).
 ---@return {id: string, scope?: string, project_root?: string}|nil
 local function record_locator_at_cursor()
-  local winid = vim.api.nvim_get_current_win()
-  local row = vim.api.nvim_win_get_cursor(winid)[1]
-  local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
-  if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
-    return nil
-  end
-  local item = info.items[row]
+  local item = item_at_cursor()
   local data = item and item.user_data
   if type(data) == "table" and type(data.id) == "string" and data.id ~= "" then
     return { id = data.id, scope = data.scope, project_root = data.project_root }
@@ -212,13 +157,9 @@ local function jump_to_comment()
   if not state then
     return
   end
-  local pair_index
-  for idx, pair in ipairs(state.files) do
-    if pair_uri(pair) == comment.uri then
-      pair_index = idx
-      break
-    end
-  end
+  -- uri -> pair index straight off the session cache; the linear
+  -- pair_uri scan here used to cost an fs_realpath per pair per jump.
+  local pair_index = state.uri_index[comment.uri]
   if not pair_index then
     vim.notify("manicule: comment does not match any file in this review", vim.log.levels.WARN)
     return
@@ -282,7 +223,9 @@ local function panel_list_id(winid)
   return 0
 end
 
-local function refresh_current_view()
+---@param comment_records? table[] pre-fetched records for a comments
+---view refresh (see build_comments_items); ignored in files view.
+local function refresh_current_view(comment_records)
   local winid = find_panel_window()
   if not winid then
     return
@@ -292,7 +235,7 @@ local function refresh_current_view()
   if current_view == "files" then
     items = build_files_items()
   else
-    items = build_comments_items()
+    items = build_comments_items(comment_records)
   end
   local what = { id = panel_list_id(winid), title = get_panel_title(), items = items }
   if current_view == "files" then
@@ -328,12 +271,15 @@ local function setup_panel_keymaps(bufnr)
       local state = require("manicule.review").state()
       local pair = state and state.files[idx]
       if pair then
-        local uri = pair_uri(pair)
-        local records = require("manicule").list({ _quiet = true, uris = { [uri] = true }, _root = session_root() })
+        local uri = state.uris[idx]
+        local records = require("manicule").list({ _quiet = true, uris = { [uri] = true }, _root = state.root })
         if #records > 0 then
           current_view = "comments"
           file_filter = uri
-          refresh_current_view()
+          -- The drill-down check above already fetched exactly the
+          -- records this scoped view shows; render them instead of
+          -- re-listing.
+          refresh_current_view(records)
           return
         end
       end

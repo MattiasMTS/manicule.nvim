@@ -14,6 +14,8 @@
 
 local M = {}
 
+local uv = vim.uv or vim.loop
+
 ---@class manicule.ReviewSession
 ---@field files {left: string, right: string, status: string, path: string}[]
 ---@field label string
@@ -21,6 +23,12 @@ local M = {}
 ---@field sink_ctx table|nil
 ---@field index integer
 ---@field tab integer
+---@field root string|nil project root the worktree files live under (cached by start)
+---@field uris string[] pair_path URI per file, index-aligned with `files` (cached by start)
+---@field uri_set table<string, true> membership set over `uris` (list()/send() filter)
+---@field uri_index table<string, integer> URI -> first pair index (panel jumps)
+---@field stage_dirs string[]|nil staging dirs the session OWNS; deleted by stop()
+---@field mapped_bufs table<integer, true>|nil
 
 ---@type manicule.ReviewSession|nil
 local session = nil
@@ -213,8 +221,49 @@ function M.set_diff_mode(mode)
   return mode
 end
 
----Start a review session over explicit file pairs.
----@param opts {files: table[], label?: string, sink?: string, sink_ctx?: table}
+---Session-derived query cache, computed ONCE per session: the URI of
+---every commentable buffer (see M.pair_path — matching how
+---adapter.identify keys records) and the project root the worktree
+---files live under. `uri.for_path` costs an fs_realpath per file and
+---`vim.fs.root` a marker walk; finish(), the VimLeavePre autoflush, and
+---every panel refresh used to redo that work per call. `session.files`
+---never changes after start, so the cache cannot go stale.
+---
+---The root matters because list() resolves the store root from the
+---CURRENT buffer, falling back to cwd — which, from an unnamed buffer,
+---the VimLeavePre autoflush, or a job-driven review of an external
+---worktree, can miss the reviewed project entirely and silently drop
+---the session's comments. It is passed as `_root` on every list/send
+---filter instead.
+---@param s manicule.ReviewSession
+local function build_session_cache(s)
+  local uri_mod = require("manicule.uri")
+  s.uris = {}
+  s.uri_set = {}
+  s.uri_index = {}
+  for idx, pair in ipairs(s.files) do
+    local uri = uri_mod.for_path(M.pair_path(pair))
+    s.uris[idx] = uri
+    s.uri_set[uri] = true
+    if not s.uri_index[uri] then
+      s.uri_index[uri] = idx
+    end
+  end
+  local markers = require("manicule.config").current.store.root_markers
+  for _, pair in ipairs(s.files) do
+    local root = vim.fs.root(M.pair_path(pair), markers)
+    if root then
+      s.root = root
+      break
+    end
+  end
+end
+
+---Start a review session over explicit file pairs. `stage_dirs` lists
+---staging directories the session OWNS: stop() deletes them (and wipes
+---any buffer still pointing into them). Resolvers report only dirs they
+---created themselves.
+---@param opts {files: table[], label?: string, sink?: string, sink_ctx?: table, stage_dirs?: string[]}
 ---@return boolean ok, string|nil err
 function M.start(opts)
   opts = opts or {}
@@ -230,14 +279,60 @@ function M.start(opts)
     label = opts.label or "review",
     sink = opts.sink,
     sink_ctx = opts.sink_ctx,
+    stage_dirs = opts.stage_dirs,
     index = 1,
     tab = vim.api.nvim_get_current_tabpage(),
   }
+  build_session_cache(session)
   M.open(1)
   -- The panel owns the review quickfix list (files/comments views);
   -- review.lua itself never writes the qf stack.
   require("manicule.review.panel").open()
   return true
+end
+
+---Delete the staging dirs a stopped session OWNED. Buffers first:
+---deleted-file pairs opened the LEFT staged file, and a
+---pr-head-not-checked-out session opens staged RIGHT files as plain
+---file buffers — wipe anything still pointing into a stage dir so no
+---buffer is left naming a removed file. Comments recorded on those
+---staged URIs live in the session-scope store and simply remain
+---(session-scoped by design; finish() already ran or the user chose
+---not to send).
+---@param stage_dirs string[]|nil
+local function cleanup_stage_dirs(stage_dirs)
+  if type(stage_dirs) ~= "table" or #stage_dirs == 0 then
+    return
+  end
+  local prefixes = {}
+  for _, dir in ipairs(stage_dirs) do
+    if type(dir) == "string" and dir ~= "" and dir ~= "/" then
+      local norm = dir:gsub("/+$", "")
+      prefixes[#prefixes + 1] = norm .. "/"
+      -- Buffer names may carry the resolved path (macOS: /tmp and
+      -- /var/folders are symlinks under /private).
+      local real = uv.fs_realpath(norm)
+      if real and real ~= norm then
+        prefixes[#prefixes + 1] = real .. "/"
+      end
+    end
+  end
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_get_name(bufnr)
+    if name ~= "" then
+      for _, prefix in ipairs(prefixes) do
+        if name:sub(1, #prefix) == prefix then
+          pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+          break
+        end
+      end
+    end
+  end
+  for _, dir in ipairs(stage_dirs) do
+    if type(dir) == "string" and dir ~= "" and dir ~= "/" then
+      vim.fn.delete(dir, "rf")
+    end
+  end
 end
 
 function M.stop()
@@ -246,6 +341,7 @@ function M.stop()
   end
   require("manicule.review.panel").close()
   local tab = session.tab
+  local stage_dirs = session.stage_dirs
   -- Worktree buffers outlive the session tab, so the inline paint has to
   -- come off explicitly or the file keeps its diff highlights forever.
   require("manicule.review.inline").clear_all()
@@ -264,53 +360,28 @@ function M.stop()
       vim.cmd("silent! enew")
     end
   end
-end
-
----URIs for every commentable buffer in the session (see M.pair_path),
----matching how adapter.identify keys records.
-local function session_uris()
-  local uri_mod = require("manicule.uri")
-  local uris = {}
-  for _, pair in ipairs(session.files) do
-    uris[uri_mod.for_path(M.pair_path(pair))] = true
-  end
-  return uris
-end
-
----Project root the session's worktree files live under. list() resolves
----the store root from the CURRENT buffer, falling back to cwd — which,
----from an unnamed buffer, the VimLeavePre autoflush, or a job-driven
----review of an external worktree, can miss the reviewed project entirely
----and silently drop the session's comments. Derive the root from the
----session's own files instead (same mechanism as review/panel.lua) and
----pass it as `_root` on every list/send filter.
----@return string|nil
-local function session_root()
-  if not session then
-    return nil
-  end
-  local markers = require("manicule.config").current.store.root_markers
-  for _, pair in ipairs(session.files) do
-    local root = vim.fs.root(M.pair_path(pair), markers)
-    if root then
-      return root
-    end
-  end
-  return nil
+  -- Owned staging dirs go LAST, after the tab/windows above are gone,
+  -- so no window is left displaying a removed file. stop() is
+  -- deliberately not wired to VimLeavePre: the autoflush there must
+  -- finish its send first, and leaking dirs on a hard exit is the
+  -- accepted trade (in-session stop/restart is what must not leak).
+  cleanup_stage_dirs(stage_dirs)
 end
 
 ---Count the session's pending comments without side effects. Records
 ---imported FROM GitHub (meta.github.imported) are excluded: finish()
----must never echo GitHub's own comments back through the sink.
+---must never echo GitHub's own comments back through the sink. The
+---uris/root filters come from the session cache (see
+---build_session_cache).
 local function pending_comments()
   if not session then
     return {}
   end
   return require("manicule").list({
     _quiet = true,
-    uris = session_uris(),
+    uris = session.uri_set,
     exclude_imported = true,
-    _root = session_root(),
+    _root = session.root,
   })
 end
 
@@ -332,9 +403,14 @@ function M.finish(opts)
     vim.notify("manicule: review has no comments to send", vim.log.levels.INFO)
     return
   end
+  -- send() re-lists internally — its contract takes a filter, never
+  -- pre-fetched records — so the pending_comments() gate above plus
+  -- this call cost two list() passes. Avoiding that needs a
+  -- records-accepting send() in init.lua; with the cached uris/root
+  -- each pass is cheap, so the double list stays.
   require("manicule").send(
     sink,
-    { uris = session_uris(), exclude_imported = true, _root = session_root() },
+    { uris = session.uri_set, exclude_imported = true, _root = session.root },
     session.sink_ctx
   )
 end
@@ -368,6 +444,9 @@ function M.start_from_job(path)
     label = job.label or "review",
     sink = sink,
     sink_ctx = sink_ctx,
+    -- External drivers own their staged files: stop() deletes them only
+    -- when the job opts in by listing them under `stage_dirs`.
+    stage_dirs = type(job.stage_dirs) == "table" and job.stage_dirs or nil,
   })
   if not ok then
     vim.notify(err, vim.log.levels.ERROR)

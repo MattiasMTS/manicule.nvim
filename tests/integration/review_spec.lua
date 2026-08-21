@@ -107,6 +107,89 @@ describe("manicule review session", function()
     assert.are.equal(tabs_before, #vim.api.nvim_list_tabpages())
   end)
 
+  it("start() caches the session's root and uris once", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "cache" }))
+
+    local state = R.state()
+    local uri_mod = require("manicule.uri")
+    local uri1 = uri_mod.for_path(files[1].right)
+    local uri2 = uri_mod.for_path(files[2].right)
+    -- Index-aligned array, membership set, and uri -> pair index map.
+    assert.are.same({ uri1, uri2 }, state.uris)
+    assert.is_true(state.uri_set[uri1])
+    assert.is_true(state.uri_set[uri2])
+    assert.are.equal(1, state.uri_index[uri1])
+    assert.are.equal(2, state.uri_index[uri2])
+    -- helpers.project_dir plants a .git marker in ctx.root.
+    assert.are.equal(ctx.root, state.root)
+  end)
+
+  it("stop() deletes owned stage dirs and wipes buffers pointing into them", function()
+    local R = require("manicule.review")
+    -- Both sides staged, like a pr-head-not-checked-out session: the
+    -- RIGHT buffer is a plain file buffer (no bufhidden=wipe), so stop()
+    -- must wipe it before removing the files it points at.
+    local stage = ctx.artifact_root .. "/owned-stage"
+    local left = stage .. "/base/x.lua"
+    local right = stage .. "/head/x.lua"
+    vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+    vim.fn.mkdir(vim.fn.fnamemodify(right, ":h"), "p")
+    vim.fn.writefile({ "return 1" }, left)
+    vim.fn.writefile({ "return 2" }, right)
+    local files = { { left = left, right = right, status = "M", path = "x.lua" } }
+
+    assert.is_true(R.start({ files = files, label = "cleanup", stage_dirs = { stage } }))
+    assert.is_true(vim.fn.bufnr(right) > 0, "right staged buffer not loaded")
+
+    R.stop()
+
+    assert.are.equal(0, vim.fn.isdirectory(stage), "owned stage dir survived stop()")
+    assert.are.equal(-1, vim.fn.bufnr(right), "a buffer still points at a removed staged file")
+  end)
+
+  it("start_from_job leaves external stage dirs alone unless the job opts in", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    local dir = ctx.artifact_root .. "/driver-stage"
+    vim.fn.mkdir(dir, "p")
+
+    -- No stage_dirs in the job: the external driver owns its files.
+    local job_a = ctx.artifact_root .. "/job-a.json"
+    vim.fn.writefile({ vim.json.encode({ label = "ext", files = files }) }, job_a)
+    assert.is_true(R.start_from_job(job_a))
+    R.stop()
+    assert.are.equal(1, vim.fn.isdirectory(dir), "stop() deleted a dir the session never owned")
+
+    -- Opt-in: the job lists the dirs manicule should delete on stop.
+    local job_b = ctx.artifact_root .. "/job-b.json"
+    vim.fn.writefile({ vim.json.encode({ label = "ext", files = files, stage_dirs = { dir } }) }, job_b)
+    assert.is_true(R.start_from_job(job_b))
+    R.stop()
+    assert.are.equal(0, vim.fn.isdirectory(dir), "opted-in stage dir survived stop()")
+  end)
+
+  it(":ManiculeReview HEAD owns its staged baseline dir and stop() removes it", function()
+    vim.cmd("runtime plugin/manicule.lua")
+    local root = H.git_repo(ctx, { ["own.lua"] = { "return 1" } })
+    vim.fn.writefile({ "return 2" }, root .. "/own.lua")
+    local saved = (vim.uv or vim.loop).cwd()
+    vim.cmd.cd(root)
+    vim.cmd("ManiculeReview HEAD")
+    vim.cmd.cd(saved)
+
+    local R = require("manicule.review")
+    local state = assert(R.state(), "session did not start")
+    assert.are.equal("table", type(state.stage_dirs))
+    local dir = state.stage_dirs[1]
+    assert.are.equal(1, vim.fn.isdirectory(dir))
+    assert.are.equal(1, state.files[1].left:find(dir, 1, true))
+
+    R.stop()
+    assert.are.equal(0, vim.fn.isdirectory(dir), "staged baseline dir leaked past stop()")
+  end)
+
   it("rejects an empty file list", function()
     local R = require("manicule.review")
     local ok, err = R.start({ files = {}, label = "test" })
