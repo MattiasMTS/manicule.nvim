@@ -377,6 +377,30 @@ describe("manicule eol display mode", function()
     assert.is_true(vim.fn.strdisplaywidth(text) <= win_width - line_width - 1)
   end)
 
+  it("truncates a double-width body on whole-glyph boundaries", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = string.rep("古", 200),
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    local win_width = vim.api.nvim_win_get_width(0)
+    local line_width = vim.fn.strdisplaywidth(vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1])
+    local text = eol_virt_text(bufnr, 0)
+    assert.is_truthy(text:find("…", 1, true))
+    assert.is_true(vim.fn.strdisplaywidth(text) <= win_width - line_width - 1)
+    -- The truncated body is whole double-width glyphs followed by the
+    -- single-cell ellipsis — a split glyph would leave stray bytes here.
+    local body = text:match("· (.*)$")
+    assert.is_truthy(body)
+    assert.are.equal("…", body:sub(-3))
+    local glyphs = body:sub(1, -4)
+    assert.is_true(#glyphs > 0)
+    assert.are.equal(0, #glyphs % 3)
+    assert.are.equal(string.rep("古", #glyphs / 3), glyphs)
+  end)
+
   it("relocates the expanded popup below the anchor on a long line", function()
     -- Eol-mode cursor expansion reuses the float placement path, so it
     -- inherits the occlusion-aware placement: on a line too long for the
@@ -551,6 +575,35 @@ describe("manicule inline display mode", function()
     end
     -- The single long body line wrapped across several box lines.
     assert.is_true(body_line_count >= 2)
+  end)
+
+  it("hard-breaks a double-width body across box lines without splitting glyphs", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    -- One long spaceless CJK "word" (160 cells): forces the wrap path's
+    -- hard-break char walk, where a glyph split would show as broken
+    -- bytes and an off-by-one width.
+    require("manicule").add({
+      body = string.rep("古", 80),
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    local win_width = vim.api.nvim_win_get_width(0)
+    local lines = inline_virt_lines(bufnr, 0)
+    assert.is_true(#lines > 0)
+    local body_line_count = 0
+    for _, line in ipairs(lines) do
+      -- Every rendered virtual line fits the window (no clipping).
+      assert.is_true(vim.fn.strdisplaywidth(line) <= win_width)
+      if line:find("古", 1, true) then
+        body_line_count = body_line_count + 1
+      end
+    end
+    -- Wrapped across several box lines, with every glyph intact.
+    assert.is_true(body_line_count >= 2)
+    local joined = table.concat(lines, "\n")
+    local _, glyph_count = joined:gsub("古", "")
+    assert.are.equal(80, glyph_count)
   end)
 
   it("anchors a multi-line record's box at the range start line", function()

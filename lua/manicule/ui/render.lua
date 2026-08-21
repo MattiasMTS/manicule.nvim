@@ -212,6 +212,33 @@ end
 local split_lines = str.split_lines
 local truncate_text = str.truncate
 
+---Longest prefix of `text` that fits `max_cells` display cells. Walks
+---composed characters (`skipcc` — base + combining stay one unit) with
+---a RUNNING width instead of re-measuring the whole prefix per char
+---(which was O(len²) with a string realloc per step). The per-char
+---width is measured at the running column so tab stops expand exactly
+---as they would inside the full prefix. Returns the prefix and the
+---number of composed chars taken (for `strcharpart` continuation).
+---@param text string
+---@param max_cells integer
+---@return string head, integer taken
+local function fit_chars(text, max_cells)
+  local out = {}
+  local width = 0
+  local taken = 0
+  for i = 0, vim.fn.strchars(text, 1) - 1 do
+    local char = vim.fn.strcharpart(text, i, 1, 1)
+    local w = vim.fn.strdisplaywidth(char, width)
+    if width + w > max_cells then
+      break
+    end
+    width = width + w
+    taken = taken + 1
+    out[taken] = char
+  end
+  return table.concat(out), taken
+end
+
 ---Truncate `text` to at most `max_cells` display cells, appending a
 ---single-cell ellipsis when cut. `str.truncate` is byte-based; fitting
 ---virtual text into leftover window columns needs display width
@@ -226,22 +253,18 @@ local function truncate_display(text, max_cells)
   if vim.fn.strdisplaywidth(text) <= max_cells then
     return text
   end
-  local budget = max_cells - 1 -- reserve the ellipsis cell
-  local out = ""
-  for i = 0, vim.fn.strchars(text) - 1 do
-    local next_out = out .. vim.fn.strcharpart(text, i, 1)
-    if vim.fn.strdisplaywidth(next_out) > budget then
-      break
-    end
-    out = next_out
-  end
-  return out .. "…"
+  -- Reserve the ellipsis cell.
+  return fit_chars(text, max_cells - 1) .. "…"
 end
 
 ---Word-wrap `text` into lines of at most `max_cells` display cells.
 ---Breaks at spaces when possible; a single word wider than the whole
 ---budget is hard-broken with the same char walk `truncate_display`
----uses. Always returns at least one line.
+---uses. Always returns at least one line. Line widths accumulate as a
+---running sum (words carry no tabs, and a word's leading combining char
+---is measured composed onto the joining space) so a line costs one
+---`strdisplaywidth` per word instead of one per word over the whole
+---line-so-far.
 ---@param text string
 ---@param max_cells integer
 ---@return string[]
@@ -250,40 +273,42 @@ local function wrap_display(text, max_cells)
     return { text }
   end
   local lines = {}
-  local current = ""
+  local current = {}
+  local current_width = 0
   for word in text:gmatch("%S+") do
-    local candidate = current == "" and word or (current .. " " .. word)
-    if vim.fn.strdisplaywidth(candidate) <= max_cells then
-      current = candidate
+    local candidate_width
+    if #current == 0 then
+      candidate_width = vim.fn.strdisplaywidth(word)
     else
-      if current ~= "" then
-        table.insert(lines, current)
-        current = ""
+      candidate_width = current_width + vim.fn.strdisplaywidth(" " .. word)
+    end
+    if candidate_width <= max_cells then
+      table.insert(current, word)
+      current_width = candidate_width
+    else
+      if #current > 0 then
+        table.insert(lines, table.concat(current, " "))
+        current = {}
+        current_width = 0
       end
       -- Hard-break a word longer than the whole budget.
       while vim.fn.strdisplaywidth(word) > max_cells do
-        local head = ""
-        local taken = 0
-        for i = 0, vim.fn.strchars(word) - 1 do
-          local next_head = head .. vim.fn.strcharpart(word, i, 1)
-          if vim.fn.strdisplaywidth(next_head) > max_cells then
-            break
-          end
-          head = next_head
-          taken = i + 1
-        end
+        local head, taken = fit_chars(word, max_cells)
         if head == "" then
           -- Budget below one glyph: bail rather than spin.
           break
         end
         table.insert(lines, head)
-        word = vim.fn.strcharpart(word, taken)
+        word = vim.fn.strcharpart(word, taken, #word, 1)
       end
-      current = word
+      if word ~= "" then
+        current = { word }
+        current_width = vim.fn.strdisplaywidth(word)
+      end
     end
   end
-  if current ~= "" then
-    table.insert(lines, current)
+  if #current > 0 then
+    table.insert(lines, table.concat(current, " "))
   end
   if #lines == 0 then
     lines = { text }
@@ -307,17 +332,30 @@ end
 ---user-facing keymap-hint config.
 local COMMENT_HINT = "edit gca | delete gcd"
 
+---Footer strings memoized by their timestamp: `os.date` for the same
+---epoch second is deterministic, and one render pass formats the same
+---record's footer several times (width measurement + content build),
+---across passes on every cursor move. Keyed by the raw number so there
+---is no staleness to invalidate; growth is bounded by the number of
+---distinct record timestamps seen this session.
+---@type table<number, string>
+local footer_by_ts = {}
+
 ---Compose the popup footer: "<Mon DD HH:MM> · <hint>", or just the hint
 ---when the record carries no timestamp.
 ---@param record table
 ---@return string
 local function comment_footer_text(record)
   local ts = record and (record.updated_at or record.created_at)
-  local ts_str = type(ts) == "number" and os.date("%b %d %H:%M", ts) or nil
-  if ts_str then
-    return ts_str .. " · " .. COMMENT_HINT
+  if type(ts) ~= "number" then
+    return COMMENT_HINT
   end
-  return COMMENT_HINT
+  local footer = footer_by_ts[ts]
+  if not footer then
+    footer = os.date("%b %d %H:%M", ts) .. " · " .. COMMENT_HINT
+    footer_by_ts[ts] = footer
+  end
+  return footer
 end
 
 ---Find any window (in any tab) currently showing `bufnr`.
@@ -415,23 +453,54 @@ local function record_stack_less(a, b)
   return tostring(a.id or "") < tostring(b.id or "")
 end
 
----Same-line stack position for `record`: 1-based index among the
----records sharing its uri + start line (in `record_stack_less` order)
----and the stack's total size — the n/m the popup title and the eol
+---Build ONE uri+line → sorted same-line stack map for a whole reconcile
+---pass. Each stack holds every record sharing that uri + start line, in
+---`record_stack_less` order — the ordering the popup stack layout, the
+---eol marker's n/m counter, and the inline box block all share. The old
+---per-record scan (`same_line_stack_position`) rescanned + re-sorted ALL
+---records for every record rendered, making the default eol reconcile
+---O(N²); building the map once makes each lookup O(1).
+---@param records table[]
+---@return table<string, table[]>
+local function build_line_stacks(records)
+  local stacks = {}
+  for _, record in ipairs(records or {}) do
+    local key = tostring(record.uri or "") .. "\0" .. record_start_line(record)
+    local stack = stacks[key]
+    if not stack then
+      stack = {}
+      stacks[key] = stack
+    end
+    table.insert(stack, record)
+  end
+  for _, stack in pairs(stacks) do
+    table.sort(stack, record_stack_less)
+  end
+  return stacks
+end
+
+---The precomputed same-line stack `record` belongs to. Always at least
+---`{ record }` so callers can iterate unconditionally.
+---@param stacks table<string, table[]>?
+---@param record table
+---@return table[]
+local function stack_for_record(stacks, record)
+  local key = tostring(record.uri or "") .. "\0" .. record_start_line(record)
+  local stack = stacks and stacks[key]
+  if not stack or #stack == 0 then
+    return { record }
+  end
+  return stack
+end
+
+---Same-line stack position of `record` inside its (small) precomputed
+---stack: 1-based index + total — the n/m the popup title and the eol
 ---marker show.
 ---@param record table
----@param records table[]
+---@param stack table[]
 ---@return integer index, integer total
-local function same_line_stack_position(record, records)
-  local my_line = record_start_line(record)
+local function stack_position(record, stack)
   local my_id = tostring(record.id or "")
-  local stack = {}
-  for _, other in ipairs(records or {}) do
-    if other.uri == record.uri and record_start_line(other) == my_line then
-      table.insert(stack, other)
-    end
-  end
-  table.sort(stack, record_stack_less)
   for index, other in ipairs(stack) do
     if tostring(other.id or "") == my_id then
       return index, #stack
@@ -454,33 +523,12 @@ local function same_counter_scope(record, candidate)
   return candidate.uri == record.uri
 end
 
----@param record table
----@param records table[]
----@return integer index, integer total
-local function record_display_position(record, records)
-  local id = tostring(record.id or "")
-  local ordered = {}
-  for _, other in ipairs(records or {}) do
-    if same_counter_scope(record, other) then
-      table.insert(ordered, other)
-    end
-  end
-  table.sort(ordered, record_counter_less)
-  for index, other in ipairs(ordered) do
-    if tostring(other.id or "") == id then
-      return index, #ordered
-    end
-  end
-  return 1, math.max(1, #ordered)
-end
-
 ---Precompute `{ index, total }` display positions for a set of records
 ---against `counter_records`, sharing each counter-scope group's sort
----across every record that belongs to it. `record_display_position`
----re-scans + re-sorts `counter_records` per call, which makes the
----per-record popup render O(counter_records) — over a viewport of N
----records that is O(N · counter_records). This builds the same answer
----once: one sort per distinct scope group, then O(1) lookups.
+---across every record that belongs to it: one sort per distinct scope
+---group, then O(1) lookups. Every render path (viewport layout, sticky
+---float, inline box) threads this map through instead of re-scanning +
+---re-sorting the counter set per record.
 ---@param records table[] records that will be rendered
 ---@param counter_records table[]
 ---@return table<string, {index: integer, total: integer}>
@@ -545,30 +593,20 @@ local function clear_number_extmarks(handle)
   handle.number_extmark_ids = nil
 end
 
----Tear down the decoration-only eol virt-text extmark (the "eol"
----display mode's collapsed marker).
+---Tear down a decoration-only extmark tracked on `handle[field]` — the
+---"eol" collapsed marker (`eol_extmark_id`) or the "inline" box block
+---(`inline_extmark_id`).
 ---@param handle manicule.ui.render.Handle
-local function clear_eol_extmark(handle)
-  if not handle.eol_extmark_id then
+---@param field "eol_extmark_id"|"inline_extmark_id"
+local function clear_decoration_extmark(handle, field)
+  local id = handle[field]
+  if not id then
     return
   end
   if vim.api.nvim_buf_is_valid(handle.bufnr) then
-    pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.eol_extmark_id)
+    pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, id)
   end
-  handle.eol_extmark_id = nil
-end
-
----Tear down the decoration-only virt_lines extmark (the "inline"
----display mode's below-line box block).
----@param handle manicule.ui.render.Handle
-local function clear_inline_extmark(handle)
-  if not handle.inline_extmark_id then
-    return
-  end
-  if vim.api.nvim_buf_is_valid(handle.bufnr) then
-    pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.inline_extmark_id)
-  end
-  handle.inline_extmark_id = nil
+  handle[field] = nil
 end
 
 ---@param handle manicule.ui.render.Handle
@@ -584,8 +622,8 @@ local function close_handle(handle)
   handle.popup_bufnr = nil
 
   clear_number_extmarks(handle)
-  clear_eol_extmark(handle)
-  clear_inline_extmark(handle)
+  clear_decoration_extmark(handle, "eol_extmark_id")
+  clear_decoration_extmark(handle, "inline_extmark_id")
 
   if handle.extmark_id and handle.extmark_id ~= 0 and vim.api.nvim_buf_is_valid(handle.bufnr) then
     pcall(vim.api.nvim_buf_del_extmark, handle.bufnr, anchor.ns, handle.extmark_id)
@@ -631,8 +669,8 @@ end
 local function strip_handle_visuals(handle)
   hide_popup(handle)
   clear_number_extmarks(handle)
-  clear_eol_extmark(handle)
-  clear_inline_extmark(handle)
+  clear_decoration_extmark(handle, "eol_extmark_id")
+  clear_decoration_extmark(handle, "inline_extmark_id")
 
   if not handle.extmark_id or handle.extmark_id == 0 then
     return
@@ -846,13 +884,18 @@ local function margin_spot_is_clear(bufnr, anchor_line, entries)
     return true
   end
   local lines = vim.api.nvim_buf_get_lines(bufnr, first - 1, last, false)
+  -- Stack entries overlap in rows; measure each spanned line ONCE
+  -- instead of once per entry that spans it.
+  local widths = {}
+  for index, line in ipairs(lines) do
+    widths[index] = vim.fn.strdisplaywidth(line)
+  end
 
   for _, entry in ipairs(entries) do
     local top = anchor_line + entry.row
     local bottom = math.min(anchor_line + entry.row + entry.height + 1, line_count)
     for lnum = top, bottom do
-      local line = lines[lnum - first + 1] or ""
-      if vim.fn.strdisplaywidth(line) + 1 > entry.col then
+      if (widths[lnum - first + 1] or 0) + 1 > entry.col then
         return false
       end
     end
@@ -925,20 +968,32 @@ end
 ---when the handle is healthy (regardless of whether the popup ended up
 ---visible — a missing anchor window hides the popup but keeps the
 ---handle alive).
+---
+---Every caller precomputes its pass-invariant data ONCE and threads it
+---through `layout`: the viewport pass supplies full placement geometry
+---(`placement`/`row`/`col_shift`), the sticky reconcile path supplies
+---the record's same-line `stack` and lets this function make the
+---occlusion-aware placement decision. Both supply the title counter
+---(`display`), the anchor window and the config `opacity`.
 ---@param record table
 ---@param handle manicule.ui.render.Handle
----@param records table[] Current record snapshot (used for stack offset)
----@param counter_records? table[] Current project/session snapshot (used for title count)
----@param layout? {winid?: integer, placement?: "margin"|"below"|"above", row?: integer, col_shift?: integer, index?: integer, total?: integer, display?: {index: integer, total: integer}}
+---@param layout? {winid?: integer, placement?: "margin"|"below"|"above", row?: integer, col_shift?: integer, display?: {index: integer, total: integer}, stack?: table[], opacity?: number}
 ---@return boolean
-local function render_comment_popup(record, handle, records, counter_records, layout)
+local function render_comment_popup(record, handle, layout)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
     return false
   end
   layout = layout or {}
 
+  -- The pass-resolved anchor window may have gone stale by the time a
+  -- scheduled sticky render runs (closed, or showing another buffer now)
+  -- — re-resolve fresh in that case.
   local anchor_win = layout.winid
-  if not anchor_win or not vim.api.nvim_win_is_valid(anchor_win) then
+  if
+    not anchor_win
+    or not vim.api.nvim_win_is_valid(anchor_win)
+    or vim.api.nvim_win_get_buf(anchor_win) ~= handle.bufnr
+  then
     anchor_win = find_window_for_buffer(handle.bufnr)
   end
   if not anchor_win then
@@ -946,15 +1001,8 @@ local function render_comment_popup(record, handle, records, counter_records, la
     return true
   end
 
-  -- Title counter position: reuse the caller's precomputed value when it
-  -- threaded one through (`update_viewport_popups` builds them once for
-  -- the whole viewport), otherwise compute it for this single record.
-  local display_index, display_total
-  if layout.display then
-    display_index, display_total = layout.display.index, layout.display.total
-  else
-    display_index, display_total = record_display_position(record, counter_records or records)
-  end
+  local display = layout.display or {}
+  local display_index, display_total = display.index or 1, display.total or 1
 
   local win_width = vim.api.nvim_win_get_width(anchor_win)
   local width_cap = popup_width_cap(win_width)
@@ -965,9 +1013,9 @@ local function render_comment_popup(record, handle, records, counter_records, la
 
   -- Placement + stack geometry. The non-sticky viewport path supplies
   -- everything precomputed (`layout.placement`/`row`/`col_shift` — it
-  -- lays out whole viewports at once), so skip the O(records) stack
-  -- scan + sort entirely in that case. The sticky path (no layout)
-  -- computes the same-line stack here and makes the same
+  -- lays out whole viewports at once), so skip the stack geometry
+  -- entirely in that case. The sticky path supplies the precomputed
+  -- same-line stack (`layout.stack`) and this function makes the same
   -- occlusion-aware placement decision `update_viewport_popups` makes:
   -- margin only when every buffer line the stack would span leaves the
   -- spot on empty cells, otherwise below/above the anchor — always for
@@ -977,14 +1025,8 @@ local function render_comment_popup(record, handle, records, counter_records, la
   local stack_index = 1
   local fallback_row = 1
   if not placement then
-    local stack = {}
-    for _, other in ipairs(records or {}) do
-      if other.uri == record.uri and record_start_line(other) == my_line then
-        table.insert(stack, other)
-      end
-    end
-    table.sort(stack, record_stack_less)
-    if #stack == 0 then
+    local stack = layout.stack
+    if not stack or #stack == 0 then
       stack = { record }
     end
 
@@ -1046,7 +1088,7 @@ local function render_comment_popup(record, handle, records, counter_records, la
 
   float.apply_title_footer(win_config, border, content.title, "left", content.footer or nil, "left")
 
-  local popup_winid = float.open_or_reconfigure(handle.popup_winid, popup_bufnr, false, win_config)
+  local popup_winid, created = float.open_or_reconfigure(handle.popup_winid, popup_bufnr, false, win_config)
 
   -- `open_or_reconfigure` pcalls `nvim_open_win`/`nvim_win_set_config` and
   -- returns nil on failure (e.g. the anchor window vanished between layout
@@ -1060,21 +1102,25 @@ local function render_comment_popup(record, handle, records, counter_records, la
   end
   handle.popup_winid = popup_winid
 
-  -- Tag the float so `prune_orphan_popups` can recognize a manicule
-  -- comment popup that no live handle tracks anymore (e.g. a handle whose
-  -- `popup_winid` got overwritten/nil'd, or the whole handle table reset
-  -- on plugin reload) and close it. A window var (not a buffer var) is
-  -- used because the scratch popup buffer can be wiped/reused.
-  pcall(vim.api.nvim_win_set_var, popup_winid, "manicule_popup", true)
+  if created then
+    -- Tag the float so `prune_orphan_popups` can recognize a manicule
+    -- comment popup that no live handle tracks anymore (e.g. a handle whose
+    -- `popup_winid` got overwritten/nil'd, or the whole handle table reset
+    -- on plugin reload) and close it. A window var (not a buffer var) is
+    -- used because the scratch popup buffer can be wiped/reused.
+    vim.w[popup_winid].manicule_popup = true
+    -- Window-local options survive reconfigures; only a fresh window
+    -- needs them applied.
+    float.set_float_win_options(popup_winid, comment_winhighlight())
+  end
 
   vim.bo[popup_bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, content.lines)
   vim.bo[popup_bufnr].modifiable = false
 
-  float.set_float_win_options(popup_winid, comment_winhighlight())
-
-  local opacity = ((config.get() or {}).ui or {}).opacity or 0
-  float.set_float_transparency(popup_winid, opacity)
+  -- Re-applied even on reuse (one cheap winblend write) so a live
+  -- config change to ui.opacity keeps taking effect on the next render.
+  float.set_float_transparency(popup_winid, layout.opacity or 0)
 
   return true
 end
@@ -1099,9 +1145,9 @@ local function prune_orphan_popups()
 
   for _, winid in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(winid) and not tracked[winid] then
-      -- Most windows won't carry the var, so pcall + guard on the result.
-      local ok, tagged = pcall(vim.api.nvim_win_get_var, winid, "manicule_popup")
-      if ok and tagged then
+      -- `vim.w[winid]` yields nil for an unset var — no thrown error to
+      -- pcall-catch per window like `nvim_win_get_var` would.
+      if vim.w[winid].manicule_popup then
         pcall(vim.api.nvim_win_close, winid, true)
       end
     end
@@ -1261,8 +1307,8 @@ local EOL_MIN_WIDTH = 20
 ---`● <short-id>` and the window edge clips whatever still overflows.
 ---@param record table
 ---@param handle manicule.ui.render.Handle
----@param records table[] Current record snapshot (same-line stack counter)
-local function render_eol_virt_text(record, handle, records)
+---@param ctx manicule.ui.render.PassCtx Pass-invariant reconcile context
+local function render_eol_virt_text(record, handle, ctx)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
     return
   end
@@ -1274,17 +1320,12 @@ local function render_eol_virt_text(record, handle, records)
   if live then
     row = live.start_line - 1
   end
-  local line_count = vim.api.nvim_buf_line_count(handle.bufnr)
-  row = math.max(0, math.min(row, math.max(0, line_count - 1)))
+  row = math.max(0, math.min(row, math.max(0, ctx.line_count - 1)))
 
   -- Budget: leftover cells after the line, in the window that shows the
-  -- buffer (falls back to the full screen width for hidden buffers —
-  -- the next reconcile after the buffer surfaces re-truncates).
-  local win_width = vim.o.columns
-  local anchor_win = find_window_for_buffer(handle.bufnr)
-  if anchor_win then
-    win_width = vim.api.nvim_win_get_width(anchor_win)
-  end
+  -- buffer (the pass ctx falls back to the full screen width for hidden
+  -- buffers — the next reconcile after the buffer surfaces re-truncates).
+  local win_width = ctx.win_width
   local line = vim.api.nvim_buf_get_lines(handle.bufnr, row, row + 1, false)[1] or ""
   local avail = win_width - vim.fn.strdisplaywidth(line) - 1
 
@@ -1293,7 +1334,7 @@ local function render_eol_virt_text(record, handle, records)
     { "c" .. short_id(record.id), "ManiculeEolMeta" },
   }
   if avail >= EOL_MIN_WIDTH then
-    local stack_index, stack_total = same_line_stack_position(record, records)
+    local stack_index, stack_total = stack_position(record, stack_for_record(ctx.stacks, record))
     if stack_total > 1 then
       table.insert(chunks, { (" %d/%d"):format(stack_index, stack_total), "ManiculeEolMeta" })
     end
@@ -1400,28 +1441,18 @@ end
 ---and the rest of the range, matching where the eol marker sits.
 ---@param record table
 ---@param handle manicule.ui.render.Handle
----@param records table[] Current record snapshot (stack + counter fallback)
----@param counter_records? table[] Current project/session snapshot (title count)
-local function render_inline_virt_lines(record, handle, records, counter_records)
+---@param ctx manicule.ui.render.PassCtx Pass-invariant reconcile context
+local function render_inline_virt_lines(record, handle, ctx)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
     return
   end
 
   local my_line = record_start_line(record)
   local my_id = tostring(record.id or "")
-  local stack = {}
-  for _, other in ipairs(records or {}) do
-    if other.uri == record.uri and record_start_line(other) == my_line then
-      table.insert(stack, other)
-    end
-  end
-  table.sort(stack, record_stack_less)
-  if #stack == 0 then
-    stack = { record }
-  end
+  local stack = stack_for_record(ctx.stacks, record)
   if tostring(stack[1].id or "") ~= my_id then
     -- Not the stack head: the head's handle owns the line's block.
-    clear_inline_extmark(handle)
+    clear_decoration_extmark(handle, "inline_extmark_id")
     return
   end
 
@@ -1432,23 +1463,19 @@ local function render_inline_virt_lines(record, handle, records, counter_records
   if live then
     row = live.start_line - 1
   end
-  local line_count = vim.api.nvim_buf_line_count(handle.bufnr)
-  row = math.max(0, math.min(row, math.max(0, line_count - 1)))
+  row = math.max(0, math.min(row, math.max(0, ctx.line_count - 1)))
 
   -- Content width: the float popup's width logic, additionally capped so
-  -- the box frame fits the window that shows the buffer (falls back to
-  -- the full screen width for hidden buffers — the next reconcile after
-  -- the buffer surfaces re-fits).
-  local win_width = vim.o.columns
-  local anchor_win = find_window_for_buffer(handle.bufnr)
-  if anchor_win then
-    win_width = vim.api.nvim_win_get_width(anchor_win)
-  end
+  -- the box frame fits the window that shows the buffer (the pass ctx
+  -- falls back to the full screen width for hidden buffers — the next
+  -- reconcile after the buffer surfaces re-fits).
+  local win_width = ctx.win_width
   local max_width = math.max(8, math.min(popup_width_cap(win_width), win_width - INLINE_FRAME_CELLS))
 
   local virt_lines = {}
   for _, member in ipairs(stack) do
-    local display_index, display_total = record_display_position(member, counter_records or records)
+    local pos = ctx.display[tostring(member.id or "")]
+    local display_index, display_total = pos and pos.index or 1, pos and pos.total or 1
     append_inline_box(build_popup_content(member, max_width, display_index, display_total, true), virt_lines)
   end
 
@@ -1472,12 +1499,26 @@ end
 -- Per-record reconcile helper
 -- ---------------------------------------------------------------------------
 
+---Pass-invariant context built ONCE per `M.reconcile` call and threaded
+---through every per-record render, replacing what used to be per-record
+---re-derivation: config reads (`mode`/`sticky`/`opacity`), the window +
+---line-count resolution, the same-line stack map, and the title-counter
+---display positions.
+---@class manicule.ui.render.PassCtx
+---@field mode "float"|"eol"|"inline"|"hidden" Live display mode
+---@field sticky boolean `mode == "float"` and config `ui.sticky`
+---@field opacity number Config `ui.opacity` (float mode only, else 0)
+---@field stacks table<string, table[]> uri+line → sorted same-line stack
+---@field display table<string, {index: integer, total: integer}> id → title counter
+---@field line_count integer Buffer line count (buffer text is stable across the pass)
+---@field winid integer? Window showing the buffer (nil when hidden)
+---@field win_width integer Width of `winid`, or the full screen width for hidden buffers
+
 ---@param bufnr integer
 ---@param record table
----@param records table[]
----@param counter_records? table[]
+---@param ctx manicule.ui.render.PassCtx
 ---@param tab table<string, manicule.ui.render.Handle>
-local function reconcile_record(bufnr, record, records, counter_records, tab)
+local function reconcile_record(bufnr, record, ctx, tab)
   local id = tostring(record.id or "")
   if id == "" then
     return
@@ -1525,19 +1566,18 @@ local function reconcile_record(bufnr, record, records, counter_records, tab)
   --   inline -> below-line box block here (for every record, like eol);
   --             no popups ever — see the header
   --   hidden -> nothing beyond the anchor
-  local mode = current_display_mode()
-  if mode == "eol" then
-    render_eol_virt_text(record, handle, records)
+  if ctx.mode == "eol" then
+    render_eol_virt_text(record, handle, ctx)
   else
-    clear_eol_extmark(handle)
+    clear_decoration_extmark(handle, "eol_extmark_id")
   end
-  if mode == "inline" then
-    render_inline_virt_lines(record, handle, records, counter_records)
+  if ctx.mode == "inline" then
+    render_inline_virt_lines(record, handle, ctx)
   else
-    clear_inline_extmark(handle)
+    clear_decoration_extmark(handle, "inline_extmark_id")
   end
 
-  if mode == "float" and is_sticky() then
+  if ctx.sticky then
     local hdl = handle
     vim.schedule(function()
       -- A stale scheduled render must do nothing if, by the time it
@@ -1556,7 +1596,12 @@ local function reconcile_record(bufnr, record, records, counter_records, tab)
       if not hdl.extmark_id or hdl.extmark_id == 0 then
         return
       end
-      render_comment_popup(record, hdl, records, counter_records)
+      render_comment_popup(record, hdl, {
+        winid = ctx.winid,
+        display = ctx.display[id],
+        stack = stack_for_record(ctx.stacks, record),
+        opacity = ctx.opacity,
+      })
       -- Coalesce the orphan-prune + dedup sweeps to ONCE per reconcile
       -- batch instead of per-record. The sweeps are global and run on a
       -- later scheduled tick, so every record's float in this batch is
@@ -1632,11 +1677,33 @@ function M.reconcile(bufnr, records, counter_records)
   local tab = get_buf_handles(bufnr)
   local live = {}
 
+  -- Pass-invariant context, built once instead of re-derived per record:
+  -- config reads, window + line-count resolution, the same-line stack
+  -- map, and the title-counter positions. The stack/display maps are
+  -- only consumed by the eol/inline/sticky-float paths, so skip building
+  -- them for modes that never read them.
+  local mode = current_display_mode()
+  local sticky = mode == "float" and is_sticky()
+  local needs_stacks = sticky or mode == "eol" or mode == "inline"
+  local needs_display = sticky or mode == "inline"
+  local winid = find_window_for_buffer(bufnr)
+  ---@type manicule.ui.render.PassCtx
+  local ctx = {
+    mode = mode,
+    sticky = sticky,
+    opacity = mode == "float" and (((config.get() or {}).ui or {}).opacity or 0) or 0,
+    stacks = needs_stacks and build_line_stacks(records) or {},
+    display = needs_display and precompute_display_positions(records, counter_records or records) or {},
+    line_count = vim.api.nvim_buf_line_count(bufnr),
+    winid = winid,
+    win_width = winid and vim.api.nvim_win_get_width(winid) or vim.o.columns,
+  }
+
   for _, record in ipairs(records or {}) do
     local id = tostring(record.id or "")
     if id ~= "" then
       live[id] = true
-      reconcile_record(bufnr, record, records, counter_records, tab)
+      reconcile_record(bufnr, record, ctx, tab)
     end
   end
 
@@ -1682,11 +1749,13 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     -- full comment — a cursor-line popup would only duplicate visible
     -- content (and, being `focusable = false`, add no interaction;
     -- edit/delete go through `record_at_cursor` on the anchor line).
-    -- Sweep untracked tagged floats too so a mode switch clears strays.
+    -- Sweep untracked tagged floats too so a mode switch clears strays —
+    -- coalesced, since this branch runs on every CursorMoved in these
+    -- modes and the sweep walks every window.
     for _, handle in pairs(tab) do
       hide_popup(handle)
     end
-    prune_orphan_popups()
+    schedule_popup_sweeps()
     return
   end
 
@@ -1829,13 +1898,16 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     end
   end
 
+  -- Config read hoisted out of the per-record render.
+  local opacity = ((config.get() or {}).ui or {}).opacity or 0
   for _, record in ipairs(records or {}) do
     local id = tostring(record.id or "")
     local handle = tab[id]
     if handle then
       local layout = layouts[id]
       if layout then
-        render_comment_popup(record, handle, records, counter_records, layout)
+        layout.opacity = opacity
+        render_comment_popup(record, handle, layout)
       else
         hide_popup(handle)
       end
@@ -1843,14 +1915,15 @@ function M.update_viewport_popups(bufnr, records, counter_records)
   end
 
   -- Sweep orphans after the render/hide loop so duplicates self-heal on
-  -- the next viewport update. Every popup just rendered above is tracked
-  -- (its winid is on a live handle), so only untracked floats are closed.
-  prune_orphan_popups()
-  -- Then collapse duplicate *tracked* popups: a same-URI sibling buffer
-  -- (e.g. a codediff view) tracks its own float for the same record id, so
-  -- close all but one. This runs on every refresh_viewport (scroll/focus
-  -- change) + refresh_all_loaded, so it self-heals and follows focus.
-  dedup_popups()
+  -- the next viewport update, then collapse duplicate *tracked* popups
+  -- (a same-URI sibling buffer, e.g. a codediff view, tracks its own
+  -- float for the same record id — close all but one, following focus).
+  -- Coalesced via `schedule_popup_sweeps`: this function runs on every
+  -- CursorMoved/scroll, and both sweeps are global cross-buffer window
+  -- walks — one scheduled run after the burst yields the same final
+  -- popup set. Every popup rendered above is already tracked, so the
+  -- later sweep can only close untracked/duplicate floats.
+  schedule_popup_sweeps()
 end
 
 --- Hide every popup owned for `bufnr`. Extmarks + handles survive so
@@ -1927,13 +2000,8 @@ function M.record_at_cursor(bufnr)
   if bufnr == 0 then
     bufnr = vim.api.nvim_get_current_buf()
   end
-  -- `anchor.resolve` calls `nvim_buf_get_extmark_by_id` without its own
-  -- buffer-validity guard, which throws "Invalid buffer id" if `bufnr`
-  -- has been wiped out from under the `gca`/`gcd`/edit keymap handler.
-  -- Bail to the no-match path before we reach it.
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    return nil
-  end
+  -- `anchor.resolve` guards buffer validity itself (returns nil for a
+  -- wiped buffer), so no pre-check is needed before the loop below.
   local tab = handles[bufnr]
   if not tab or vim.tbl_isempty(tab) then
     return nil
@@ -2026,10 +2094,7 @@ end
 ---switch repaint identically. Lazy-requires `manicule.store` so the
 ---render module doesn't grow a hard dep on persistence.
 local function repaint_all_loaded()
-  local ok_store, store = pcall(require, "manicule.store")
-  if not ok_store then
-    return
-  end
+  local store = require("manicule.store")
   local adapter = require("manicule.adapter")
   store.session_load()
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do

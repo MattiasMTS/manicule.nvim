@@ -243,6 +243,30 @@ describe("manicule render lifecycle", function()
     assert.is_true(popup_screen_top(second) > popup_screen_bottom(first))
   end)
 
+  it("keeps window options and the popup tag across a reconfigure-reuse render", function()
+    local manicule = require("manicule")
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    manicule.add({
+      body = "reuse options",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("reuse options", 1))
+    local winid = floating_windows_containing("reuse options")[1]
+
+    -- A follow-up viewport pass takes the reconfigure path (the popup
+    -- window is reused, not recreated). One-time window state — the
+    -- orphan-prune tag and the float window options — must still be in
+    -- place on the reused window.
+    local records = manicule.list({ _quiet = true })
+    render.update_viewport_popups(bufnr, records, records)
+    assert.are.equal(winid, floating_windows_containing("reuse options")[1])
+    assert.is_true(vim.w[winid].manicule_popup)
+    assert.is_truthy(vim.wo[winid].winhighlight:find("ManiculeCommentBorder", 1, true))
+    assert.is_false(vim.wo[winid].wrap)
+  end)
+
   it("prunes an orphaned popup but keeps the tracked one", function()
     local manicule = require("manicule")
     local render = require("manicule.ui.render")
