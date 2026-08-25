@@ -20,8 +20,29 @@ local function make_pair()
   return { { left = left, right = right, status = "M", path = "big.lua" } }
 end
 
+---A single-file pair with explicit contents, for intra-line diff tests.
+local function make_custom_pair(name, baseline, current)
+  local left = ctx.artifact_root .. "/left/" .. name
+  local right = ctx.root .. "/" .. name
+  vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+  vim.fn.writefile(baseline, left)
+  vim.fn.writefile(current, right)
+  return { { left = left, right = right, status = "M", path = name } }
+end
+
 local function inline_marks(bufnr)
   return vim.api.nvim_buf_get_extmarks(bufnr, require("manicule.review.inline").ns, 0, -1, { details = true })
+end
+
+---Every ManiculeDiffWordAdded span mark in the buffer, as {row, col, end_col}.
+local function word_marks(bufnr)
+  local marks = {}
+  for _, mark in ipairs(inline_marks(bufnr)) do
+    if mark[4].hl_group == "ManiculeDiffWordAdded" then
+      table.insert(marks, { row = mark[2], col = mark[3], end_col = mark[4].end_col })
+    end
+  end
+  return marks
 end
 
 ---The single non-panel window of the session tab.
@@ -94,6 +115,69 @@ describe("manicule review unified mode", function()
     assert.are.same({ row = 1, above = false }, removed["local gone = 3"])
   end)
 
+  it("emphasizes only the changed span of a modified line", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "unified" }))
+    local bufnr = vim.api.nvim_win_get_buf(file_window())
+
+    -- `local b = 2` → `local b = 22`: only the appended `2` differs, so
+    -- the word mark covers byte cols 11..12 of row 1 — not the whole line.
+    assert.are.same({ { row = 1, col = 11, end_col = 12 } }, word_marks(bufnr))
+  end)
+
+  it("puts no word-span mark on pure added lines", function()
+    local R = require("manicule.review")
+    local files = make_custom_pair("added.lua", { "local a = 1" }, { "local a = 1", "local added = true" })
+    assert.is_true(R.start({ files = files, label = "unified" }))
+    local bufnr = vim.api.nvim_win_get_buf(file_window())
+
+    local added_rows = {}
+    for _, mark in ipairs(inline_marks(bufnr)) do
+      if mark[4].line_hl_group == "ManiculeDiffAdd" then
+        added_rows[mark[2]] = true
+      end
+    end
+    assert.is_true(added_rows[1], "pure added line lost its line highlight")
+    assert.are.same({}, word_marks(bufnr))
+  end)
+
+  it("splits the removed virtual line around the changed span", function()
+    local R = require("manicule.review")
+    local files = make_custom_pair("word.lua", { "return alpha" }, { "return omega" })
+    assert.is_true(R.start({ files = files, label = "unified" }))
+    local bufnr = vim.api.nvim_win_get_buf(file_window())
+
+    local virt_lines
+    for _, mark in ipairs(inline_marks(bufnr)) do
+      virt_lines = virt_lines or mark[4].virt_lines
+    end
+    assert.is_truthy(virt_lines, "removed line was not drawn")
+    -- Common prefix "return " and suffix "a" trim away; "alph" is the
+    -- differing middle and carries the emphasis chunk.
+    local chunks = virt_lines[1]
+    assert.are.same({ "return ", "ManiculeDiffDelete" }, { chunks[2][1], chunks[2][2] })
+    assert.are.same({ "alph", "ManiculeDiffWordRemoved" }, { chunks[3][1], chunks[3][2] })
+    assert.are.same({ "a", "ManiculeDiffDelete" }, { chunks[4][1], chunks[4][2] })
+    -- The worktree side gets the matching span over "omeg".
+    assert.are.same({ { row = 0, col = 7, end_col = 11 } }, word_marks(bufnr))
+  end)
+
+  it("skips word-level emphasis for very long lines", function()
+    local R = require("manicule.review")
+    local long = string.rep("x", 600)
+    local files = make_custom_pair("long.lua", { long .. "a" }, { long .. "b" })
+    assert.is_true(R.start({ files = files, label = "unified" }))
+    local bufnr = vim.api.nvim_win_get_buf(file_window())
+
+    assert.are.same({}, word_marks(bufnr))
+    for _, mark in ipairs(inline_marks(bufnr)) do
+      for _, virt_line in ipairs(mark[4].virt_lines or {}) do
+        -- Sign + one whole-line chunk: the removed line stays unsplit.
+        assert.are.equal(2, #virt_line)
+      end
+    end
+  end)
+
   it("keeps comments anchored to real worktree line numbers", function()
     local R = require("manicule.review")
     local files = make_pair()
@@ -129,6 +213,22 @@ describe("manicule review unified mode", function()
     assert.are.equal(-1, vim.fn.foldclosed(1))
     assert.are.equal(-1, vim.fn.foldclosed(2))
     assert.is_true(vim.fn.foldclosed(20) > 0, "unchanged tail did not fold")
+  end)
+
+  it("renders the fold line as an unmodified-lines bar", function()
+    require("manicule").setup({
+      store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
+      review = { mode = "unified", fold_unchanged = true, context = 0 },
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "unified" }))
+    vim.api.nvim_set_current_win(file_window())
+
+    -- With zero context only line 2 stays out; lines 3..22 fold as one
+    -- 20-line block whose fold line reads like Pierre's bar.
+    assert.is_true(vim.fn.foldclosed(3) > 0, "unchanged tail did not fold")
+    local text = vim.fn.foldtextresult(3)
+    assert.is_truthy(text:find("20 unmodified lines ▸", 1, true), "unexpected fold text: " .. text)
   end)
 
   it("arms the foldexpr through an eagerly-resolved global", function()

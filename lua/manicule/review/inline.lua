@@ -72,6 +72,12 @@ function M.setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculeDiffDelete", { link = "DiffDelete", default = true })
   vim.api.nvim_set_hl(0, "ManiculeDiffDeleteSign", { link = "ManiculeDiffDelete", default = true })
   vim.api.nvim_set_hl(0, "ManiculeDiffFold", { link = "Folded", default = true })
+  -- Intra-line emphasis on modified lines. DiffText is exactly vim's
+  -- "changed text inside a changed line" group, so it layers correctly
+  -- over both the DiffAdd-tinted worktree line and the DiffDelete-tinted
+  -- removed virtual line in stock colorschemes.
+  vim.api.nvim_set_hl(0, "ManiculeDiffWordAdded", { link = "DiffText", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeDiffWordRemoved", { link = "DiffText", default = true })
 end
 
 ---Gutter glyph marking a removed line. A literal `-` (git's marker)
@@ -154,6 +160,45 @@ function M.hunks(baseline, current)
   return hunks
 end
 
+---Perf guard: the trim below is O(line length) per modified line, which
+---is nothing for code but pointless for minified/generated monsters —
+---and a word span on a line that long is unreadable anyway. Skip those.
+local WORD_DIFF_MAX_BYTES = 500
+
+---The differing middle of a modified line pair, found by trimming the
+---common prefix and suffix. That is the "simple" inline mode diff tools
+---ship (git delta, vim's own `diffopt+=inline:simple`): a single scan,
+---no allocation, and multi-edit lines degrade gracefully to one merged
+---span instead of highlight confetti.
+---
+---Byte columns to match extmarks; a trim can split a multibyte char when
+---two chars share lead bytes, which Neovim renders fine (highlights are
+---per byte), so it is not worth a UTF-8 boundary walk.
+---@param old string
+---@param new string
+---@return {old_start: integer, old_stop: integer, new_start: integer, new_stop: integer}? span 0-indexed, stop-exclusive
+local function word_span(old, new)
+  if old == new or #old > WORD_DIFF_MAX_BYTES or #new > WORD_DIFF_MAX_BYTES then
+    return nil
+  end
+  local old_len, new_len = #old, #new
+  local shorter = math.min(old_len, new_len)
+  local prefix = 0
+  while prefix < shorter and old:byte(prefix + 1) == new:byte(prefix + 1) do
+    prefix = prefix + 1
+  end
+  local suffix = 0
+  while suffix < shorter - prefix and old:byte(old_len - suffix) == new:byte(new_len - suffix) do
+    suffix = suffix + 1
+  end
+  return {
+    old_start = prefix,
+    old_stop = old_len - suffix,
+    new_start = prefix,
+    new_stop = new_len - suffix,
+  }
+end
+
 -- ---------------------------------------------------------------------------
 -- Painting
 -- ---------------------------------------------------------------------------
@@ -181,11 +226,20 @@ end
 
 ---@param bufnr integer
 ---@param hunks manicule.review.InlineHunk[]
-local function paint(bufnr, hunks)
+---@param current string[] Worktree buffer lines, for intra-line spans
+local function paint(bufnr, hunks, current)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
 
   for _, hunk in ipairs(hunks) do
+    -- Pair line k of the removed range with line k of its replacement
+    -- while both exist; only these MODIFIED lines get word-level spans.
+    -- Pure additions/deletions stay whole-line.
+    local spans = {}
+    for k = 1, math.min(hunk.old_count, hunk.new_count) do
+      spans[k] = word_span(hunk.removed[k], current[hunk.new_start + k - 1] or "")
+    end
+
     if hunk.new_count > 0 then
       local first = math.max(0, hunk.new_start - 1)
       local last = math.min(hunk.new_start + hunk.new_count - 2, line_count - 1)
@@ -196,16 +250,35 @@ local function paint(bufnr, hunks)
           -- still shows its manicule line-number tint.
           priority = 100,
         })
+        local span = spans[row - hunk.new_start + 2]
+        if span and span.new_stop > span.new_start then
+          pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row, span.new_start, {
+            end_col = span.new_stop,
+            hl_group = "ManiculeDiffWordAdded",
+            -- Above the line paint, still below the comment anchors.
+            priority = 110,
+          })
+        end
       end
     end
 
     if #hunk.removed > 0 then
       local virt_lines = {}
-      for _, text in ipairs(hunk.removed) do
-        table.insert(virt_lines, {
-          { REMOVED_SIGN, "ManiculeDiffDeleteSign" },
-          { text, "ManiculeDiffDelete" },
-        })
+      for i, text in ipairs(hunk.removed) do
+        local chunks = { { REMOVED_SIGN, "ManiculeDiffDeleteSign" } }
+        local span = spans[i]
+        if span and span.old_stop > span.old_start then
+          if span.old_start > 0 then
+            table.insert(chunks, { text:sub(1, span.old_start), "ManiculeDiffDelete" })
+          end
+          table.insert(chunks, { text:sub(span.old_start + 1, span.old_stop), "ManiculeDiffWordRemoved" })
+          if span.old_stop < #text then
+            table.insert(chunks, { text:sub(span.old_stop + 1), "ManiculeDiffDelete" })
+          end
+        else
+          table.insert(chunks, { text, "ManiculeDiffDelete" })
+        end
+        table.insert(virt_lines, chunks)
       end
       local row, above = removed_anchor(hunk, line_count)
       pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row, 0, {
@@ -260,10 +333,11 @@ function M.foldexpr(lnum)
   return entry.keep[lnum] and "0" or "1"
 end
 
+---Pierre-style fold bar: the count of hidden lines, nothing else.
 ---@return string
 function M.foldtext()
   local count = vim.v.foldend - vim.v.foldstart + 1
-  return ("  ⋯ %d unchanged line%s ⋯"):format(count, count == 1 and "" or "s")
+  return ("%d unmodified line%s ▸"):format(count, count == 1 and "" or "s")
 end
 
 ---Window options unified mode owns. Saved before the first change so
@@ -435,7 +509,7 @@ function M.apply(bufnr, left_path, opts)
     windows = {},
   }
 
-  paint(bufnr, hunks)
+  paint(bufnr, hunks, current)
   map_hunk_navigation(bufnr)
   -- Reap this buffer's entry the moment the buffer dies: the session can
   -- outlive any one buffer (e.g. :bwipeout on a reviewed file), and the
