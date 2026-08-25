@@ -489,6 +489,15 @@ function M.start(opts)
     winbar_wins = {},
   }
   build_session_cache(session)
+  -- Word-level diff emphasis in split mode: upgrade the stock
+  -- `inline:simple` to `inline:word` for the session. A user who chose
+  -- an inline variant themselves (char/word/none) keeps it — we only
+  -- replace the 0.12 default, and restore it in stop().
+  local diffopt = vim.o.diffopt
+  if diffopt:find("inline:simple", 1, true) then
+    session.saved_diffopt = diffopt
+    vim.o.diffopt = diffopt:gsub("inline:simple", "inline:word")
+  end
   M.open(1)
   -- The panel is an owned scratch-buffer split (files/comments views);
   -- review mode never touches the quickfix stack.
@@ -555,6 +564,9 @@ function M.stop()
   -- below usually destroys them, but the single-tab branch (and any
   -- `:only`-surviving worktree window) reuses a session window.
   clear_winbars(session.winbar_wins)
+  if session.saved_diffopt then
+    vim.o.diffopt = session.saved_diffopt
+  end
   session = nil
   if vim.api.nvim_tabpage_is_valid(tab) then
     local tab_count = #vim.api.nvim_list_tabpages()

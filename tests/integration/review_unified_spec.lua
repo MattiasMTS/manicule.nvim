@@ -293,6 +293,35 @@ describe("manicule review unified mode", function()
     assert.are.equal(2, diff_wins)
   end)
 
+  it("split mode upgrades the default inline:simple diffopt for the session", function()
+    local saved = vim.o.diffopt
+    vim.o.diffopt = saved:gsub("inline:%w+", "inline:simple")
+    require("manicule").setup({
+      store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
+      review = { mode = "split" },
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "split" }))
+    assert.is_truthy(vim.o.diffopt:find("inline:word", 1, true))
+    R.stop()
+    assert.is_truthy(vim.o.diffopt:find("inline:simple", 1, true))
+    vim.o.diffopt = saved
+  end)
+
+  it("split mode respects a user-chosen inline diffopt variant", function()
+    local saved = vim.o.diffopt
+    vim.o.diffopt = saved:gsub("inline:%w+", "inline:char")
+    require("manicule").setup({
+      store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
+      review = { mode = "split" },
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "split" }))
+    assert.is_truthy(vim.o.diffopt:find("inline:char", 1, true))
+    R.stop()
+    vim.o.diffopt = saved
+  end)
+
   it("split mode keeps native diff folds when fold_unchanged is on", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
