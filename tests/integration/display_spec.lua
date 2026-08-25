@@ -468,6 +468,122 @@ describe("manicule eol display mode", function()
   end)
 end)
 
+-- Origin badges on the collapsed eol marker: the leading bullet chunk is
+-- the record's origin badge — github-imported records (`meta.github`)
+-- show the GitHub badge, local records the local one. With icons
+-- disabled the local ASCII fallback IS today's `●`, so the icons-off
+-- default look stays byte-identical to before badges existed.
+describe("manicule eol origin badges", function()
+  before_each(setup_env)
+
+  after_each(function()
+    package.preload["mini.icons"] = nil
+    package.loaded["mini.icons"] = nil
+    pcall(function()
+      require("manicule.ui.icons")._reset()
+    end)
+    teardown_env()
+  end)
+
+  ---First eol virt-text chunk (`[text, hl]`) on `row` (0-indexed), in
+  ---the manicule namespace. Nil when the row carries no eol marker.
+  local function first_eol_chunk(bufnr, row)
+    local ns = require("manicule.anchor").ns
+    local marks = vim.api.nvim_buf_get_extmarks(bufnr, ns, { row, 0 }, { row, -1 }, { details = true })
+    for _, mark in ipairs(marks) do
+      local details = mark[4] or {}
+      if details.virt_text and details.virt_text_pos == "eol" then
+        return details.virt_text[1]
+      end
+    end
+    return nil
+  end
+
+  ---A github-imported record shaped like `review/import.lua` stores it:
+  ---the `meta.github` table marks the origin.
+  local function github_record(bufnr)
+    return {
+      id = "ghimport-1",
+      uri = require("manicule.uri").for_bufnr(bufnr),
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "imported note",
+      author = "octocat",
+      created_at = os.time(),
+      updated_at = os.time(),
+      resolved = false,
+      meta = { github = { id = 99, imported = true } },
+    }
+  end
+
+  ---Force glyph mode without the real plugins: stub a provider module
+  ---via package.preload (the icons_spec pattern) and re-probe.
+  local function enable_glyph_mode()
+    package.preload["mini.icons"] = function()
+      return {
+        get = function()
+          return "X", "MiniIconsAzure", false
+        end,
+      }
+    end
+    require("manicule.config").current.ui.icons = "auto"
+    require("manicule.ui.icons")._reset()
+  end
+
+  it("marks imported records with the ASCII github badge when icons are off", function()
+    require("manicule.config").current.ui.icons = false
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    local record = github_record(bufnr)
+    render.reconcile(bufnr, { record }, { record })
+
+    assert.are.equal("[gh] cghimpo · imported note", eol_virt_text(bufnr, 0))
+    -- The badge chunk keeps the bullet highlight.
+    local chunk = first_eol_chunk(bufnr, 0)
+    assert.are.equal("[gh] ", chunk[1])
+    assert.are.equal("ManiculeEolBullet", chunk[2])
+  end)
+
+  it("marks imported records with the github glyph when a provider is loadable", function()
+    enable_glyph_mode()
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    local record = github_record(bufnr)
+    render.reconcile(bufnr, { record }, { record })
+
+    local chunk = first_eol_chunk(bufnr, 0)
+    assert.are.equal("\u{F09B} ", chunk[1])
+    assert.are.equal("ManiculeEolBullet", chunk[2])
+  end)
+
+  it("marks local records with the local glyph when a provider is loadable", function()
+    enable_glyph_mode()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "local glyph note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+
+    local chunk = first_eol_chunk(bufnr, 0)
+    assert.are.equal("\u{F0B79} ", chunk[1])
+    assert.are.equal("ManiculeEolBullet", chunk[2])
+  end)
+
+  it("keeps today's ● marker byte-identically for local records with icons off", function()
+    require("manicule.config").current.ui.icons = false
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "plain local note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    local records = require("manicule").list({ _quiet = true })
+    local short = tostring(records[1].id):sub(1, 6)
+
+    assert.are.equal("● c" .. short .. " · plain local note", eol_virt_text(bufnr, 0))
+  end)
+end)
+
 describe("manicule inline display mode", function()
   before_each(function()
     setup_env()

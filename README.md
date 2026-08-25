@@ -136,6 +136,11 @@ almost no space is left):
 local sum = 0                     ● c4f2a1c · handle the empty items ca…
 ```
 
+The leading `●` is an origin badge: comments imported from a GitHub PR
+show a GitHub badge instead (`[gh]`, or a Nerd Font glyph when icons are
+on — see `ui.icons`), and the same badge prefixes the author line inside
+the comment card.
+
 Moving the cursor onto the line expands the real popup; moving off
 collapses it again:
 
@@ -230,7 +235,8 @@ false` to skip folding entirely, or `review.context` to change how much
 code stays visible around each hunk.
 
 A bottom panel opens automatically showing the file list
-with live comment counts. Press `<Tab>` in the panel to toggle between
+with live comment counts (files get filetype icons when an icon provider
+is installed — see `ui.icons`). Press `<Tab>` in the panel to toggle between
 files view and comments view. `<CR>` on a commented file drills into a
 comments view scoped to that file (`<CR>` jumps to a comment, `dd`
 deletes, `ce` edits, `<Esc>` goes back to the file list); `<CR>` on a
@@ -304,12 +310,22 @@ require("manicule").setup({
     opacity = 0.0, -- float transparency: 0.0 opaque, 1.0 fully transparent
     sticky = false,
     display = "eol", -- startup display mode: "float", "eol", "inline", "hidden"
+    icons = "auto", -- Nerd Font badges + filetype icons: "auto", true, false
   },
 })
 ```
 
 `ui.opacity` is fractional float transparency: `0` is opaque, `0.5` is
 half transparent, `0.99` is 99% transparent, and `1` is fully transparent.
+
+`ui.icons` controls icon rendering: `"auto"` (default) turns icons on only
+when an icon provider —
+[mini.icons](https://github.com/echasnovski/mini.icons) or
+[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) — is
+installed (both are optional; neither is a dependency), `true` forces the
+Nerd Font badges on without a provider (the review panel's filetype icons
+still need one), and `false` keeps everything plain text (`[gh]`, `●`,
+`✓`).
 
 ## Storage
 

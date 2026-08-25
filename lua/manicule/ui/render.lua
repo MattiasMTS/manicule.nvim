@@ -82,6 +82,7 @@ local M = {}
 local anchor = require("manicule.anchor")
 local float = require("manicule.ui.float")
 local config = require("manicule.config")
+local icons = require("manicule.ui.icons")
 local str = require("manicule.str")
 
 ---@class manicule.ui.render.Handle
@@ -487,12 +488,54 @@ local function quote_display_lines(quote, width)
   return out
 end
 
----The card's author line: "<author> · <relative time>". The author is
+---Origin of a record, for the card / eol badge: "github" when the
+---record was imported from a GitHub PR thread — `meta.github` is the
+---table `review/import.lua` stamps — otherwise "local" (including
+---panel `r` replies to a thread: those carry `meta.github_reply` and
+---are locally authored, so they read as local until GitHub owns them).
+---Deliberately origin-only, never "resolved": the badge must
+---not change meaning when a record's state flips, and resolution is
+---already surfaced by every listing surface (quickfix's `[x]`, the
+---picker's `✓` prefix, the review panel's `✓` on GitHub-resolved
+---threads) — the card does not re-mark it.
+---@param record table
+---@return "github"|"local"
+local function record_origin(record)
+  local meta = record and record.meta
+  if type(meta) == "table" and type(meta.github) == "table" then
+    return "github"
+  end
+  return "local"
+end
+
+---Origin badge prefixing the card's author line ("<badge> " or "").
+---GitHub-imported records badge in every icon mode; local records badge
+---only in glyph mode — the ASCII local fallback (`●`) is a plain bullet
+---that would prefix EVERY local card with noise while distinguishing
+---nothing (local is the unmarked default), so with icons disabled the
+---card looks exactly as it did before badges existed.
+---@param record table
+---@return string
+local function author_badge(record)
+  local origin = record_origin(record)
+  if origin == "local" and not icons.enabled() then
+    return ""
+  end
+  local badge = icons.badge(origin)
+  if badge == "" then
+    return ""
+  end
+  return badge .. " "
+end
+
+---The card's author line: "<badge> <author> · <relative time>". The
+---badge is the record's origin (see `author_badge`); the author is
 ---the record's stored value (what `M.add` persisted — an email keeps
----only its local part for display), falling back to $USER, then "you";
----the time is `M.relative_time` of the record's timestamp (updated_at
----preferred, matching the old footer). Just the author when the record
----carries no timestamp.
+---only its local part for display; GitHub imports store the GitHub
+---login), falling back to $USER, then "you"; the time is
+---`M.relative_time` of the record's timestamp (updated_at preferred,
+---matching the old footer). No time suffix when the record carries no
+---timestamp.
 ---@param record table
 ---@return string
 local function author_line_text(record)
@@ -501,6 +544,7 @@ local function author_line_text(record)
     author = vim.env.USER or "you"
   end
   author = author:match("^([^@]+)@") or author
+  author = author_badge(record) .. author
   local ts = record and (record.updated_at or record.created_at)
   if type(ts) ~= "number" then
     return author
@@ -1432,15 +1476,19 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Minimum leftover cells the full marker form needs. Below this the
--- marker degrades to just `● <short-id>` — a tighter budget would
+-- marker degrades to just `<badge> <short-id>` — a tighter budget would
 -- truncate the body into unreadable noise.
 local EOL_MIN_WIDTH = 20
 
 ---Render (or refresh) the collapsed end-of-line marker for `record`:
----`● <short-id> <n>/<m> · <body first line>` as eol virtual text on the
----anchor's current line, via a sibling decoration-only extmark tracked
----as `handle.eol_extmark_id`. n/m is the record's same-line stack
----position; single-record lines omit it.
+---`<badge> <short-id> <n>/<m> · <body first line>` as eol virtual text
+---on the anchor's current line, via a sibling decoration-only extmark
+---tracked as `handle.eol_extmark_id`. The leading badge is the record's
+---origin (`icons.badge` — github imports get the GitHub badge, local
+---records the local one; with icons disabled the local ASCII fallback
+---is `●`, keeping the icons-off look byte-identical to the pre-badge
+---marker). n/m is the record's same-line stack position; single-record
+---lines omit it.
 ---
 ---Truncation: the marker's budget is the window width minus the line's
 ---display width (minus one gap cell Neovim leaves before eol virt
@@ -1472,7 +1520,7 @@ local function render_eol_virt_text(record, handle, ctx)
   local avail = win_width - vim.fn.strdisplaywidth(line) - 1
 
   local chunks = {
-    { "● ", "ManiculeEolBullet" },
+    { icons.badge(record_origin(record)) .. " ", "ManiculeEolBullet" },
     { "c" .. short_id(record.id), "ManiculeEolMeta" },
   }
   if avail >= EOL_MIN_WIDTH then

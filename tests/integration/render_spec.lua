@@ -894,3 +894,133 @@ describe("manicule comment card", function()
     assert.is_nil(lines[3]:find("▍", 1, true))
   end)
 end)
+
+-- Origin badges on the card's author line: `<badge> author · time`.
+-- github-imported records (`meta.github`) badge in every icon mode;
+-- local records badge only in glyph mode — the ASCII local fallback is
+-- a plain bullet that would prefix EVERY local card with noise while
+-- distinguishing nothing (local is the unmarked default), so the
+-- icons-off card look stays as before. The badge is purely ORIGIN,
+-- never state: resolution stays on the listing surfaces (quickfix
+-- `[x]`, picker `✓` prefix, review panel `✓` on GitHub-resolved
+-- threads) and is not re-marked in the card.
+describe("manicule card origin badges", function()
+  before_each(setup_env)
+
+  after_each(function()
+    package.preload["mini.icons"] = nil
+    package.loaded["mini.icons"] = nil
+    pcall(function()
+      require("manicule.ui.icons")._reset()
+    end)
+    teardown_env()
+  end)
+
+  local function popup_lines(text)
+    local winid = floating_windows_containing(text)[1]
+    assert.is_truthy(winid)
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(winid), 0, -1, false), winid
+  end
+
+  ---Force glyph mode without the real plugins: stub a provider module
+  ---via package.preload (the icons_spec pattern) and re-probe.
+  local function enable_glyph_mode()
+    package.preload["mini.icons"] = function()
+      return {
+        get = function()
+          return "X", "MiniIconsAzure", false
+        end,
+      }
+    end
+    require("manicule.config").current.ui.icons = "auto"
+    require("manicule.ui.icons")._reset()
+  end
+
+  local function make_record(over)
+    over = over or {}
+    local bufnr = vim.api.nvim_get_current_buf()
+    return {
+      id = over.id or "badge-rec-1",
+      uri = require("manicule.uri").for_bufnr(bufnr),
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = over.body or "badge body",
+      author = over.author or "octocat",
+      created_at = os.time(),
+      updated_at = os.time(),
+      resolved = over.resolved or false,
+      meta = over.meta or {},
+    }
+  end
+
+  ---Render `record` through the normal float pipeline and return its
+  ---card lines + popup winid.
+  local function card_lines(record)
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    render.reconcile(bufnr, { record }, { record })
+    render.update_viewport_popups(bufnr, { record }, { record })
+    assert.is_true(wait_for_popup_count(record.body, 1))
+    return popup_lines(record.body)
+  end
+
+  it("prefixes the github author line with [gh] in ASCII mode", function()
+    require("manicule.config").current.ui.icons = false
+    local lines = card_lines(make_record({ meta = { github = { id = 7, imported = true } } }))
+    assert.are.equal("[gh] octocat · just now", lines[2])
+  end)
+
+  it("keeps the local author line bare in ASCII mode", function()
+    require("manicule.config").current.ui.icons = false
+    local lines = card_lines(make_record({}))
+    assert.are.equal("octocat · just now", lines[2])
+  end)
+
+  it("badges both origins in glyph mode", function()
+    enable_glyph_mode()
+    local gh_lines = card_lines(make_record({
+      id = "badge-gh",
+      body = "glyph github body",
+      meta = { github = { id = 7, imported = true } },
+    }))
+    assert.are.equal("\u{F09B} octocat · just now", gh_lines[2])
+
+    local local_lines = card_lines(make_record({ id = "badge-local", body = "glyph local body" }))
+    assert.are.equal("\u{F0B79} octocat · just now", local_lines[2])
+  end)
+
+  it("counts the badge into the card width", function()
+    require("manicule.config").current.ui.icons = false
+    -- The author line is the card's widest line (hint is 21 cells,
+    -- quote 19), so the popup width must equal it INCLUDING the badge.
+    local author = "review-bot-nine"
+    local lines, winid = card_lines(make_record({
+      body = "w",
+      author = author,
+      meta = { github = { id = 7, imported = true } },
+    }))
+    local expected = "[gh] " .. author .. " · just now"
+    -- Untruncated: the width math budgeted for the badge.
+    assert.are.equal(expected, lines[2])
+    assert.are.equal(vim.fn.strdisplaywidth(expected), tonumber(vim.api.nvim_win_get_config(winid).width))
+  end)
+
+  it("keeps the origin badge on resolved records — resolution is not a card badge", function()
+    require("manicule.config").current.ui.icons = false
+    local gh_lines = card_lines(make_record({
+      id = "badge-resolved-gh",
+      body = "resolved github body",
+      resolved = true,
+      meta = { github = { id = 7, imported = true, resolved = true } },
+    }))
+    assert.are.equal("[gh] octocat · just now", gh_lines[2])
+    assert.is_nil(table.concat(gh_lines, "\n"):find("✓", 1, true))
+
+    local local_lines = card_lines(make_record({
+      id = "badge-resolved-local",
+      body = "resolved local body",
+      resolved = true,
+    }))
+    assert.are.equal("octocat · just now", local_lines[2])
+    assert.is_nil(table.concat(local_lines, "\n"):find("✓", 1, true))
+  end)
+end)
