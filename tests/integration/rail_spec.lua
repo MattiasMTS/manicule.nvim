@@ -210,7 +210,12 @@ describe("manicule rail expansion", function()
     assert.is_truthy(joined:find("└", 1, true))
     assert.is_truthy(joined:find("│", 1, true))
 
-    -- Card highlights land as extmarks on the right rows.
+    -- Card highlights land as extmarks on the right rows — including
+    -- the per-chunk split: the quote row carries BOTH the accent bar
+    -- group and the dim quote-text group, the author row both the bold
+    -- author group and the dim time-tail group, and the hint row the
+    -- quietest border-gray hint group (the same mapping the inline box
+    -- uses — the rail materializes append_inline_box's chunks).
     local hl = rail_hl_rows(rail_win)
     local function row_of(needle)
       for index, line in ipairs(lines) do
@@ -220,9 +225,12 @@ describe("manicule rail expansion", function()
       end
       return nil
     end
+    assert.is_truthy(hl[row_of('▍ "local value = 1"')]["ManiculeCommentQuoteBar"])
     assert.is_truthy(hl[row_of('▍ "local value = 1"')]["ManiculeInlineQuote"])
+    assert.is_truthy(hl[row_of("· just now")]["ManiculeCommentAuthor"])
     assert.is_truthy(hl[row_of("· just now")]["ManiculeInlineMeta"])
     assert.is_truthy(hl[row_of("rail body first")]["ManiculeInlineBody"])
+    assert.is_truthy(hl[row_of("edit gca | delete gcd")]["ManiculeCommentHint"])
     assert.is_truthy(hl[row_of("┌")]["ManiculeInlineBorder"])
   end)
 

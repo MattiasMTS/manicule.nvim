@@ -481,11 +481,13 @@ describe("manicule eol display mode", function()
   end)
 end)
 
--- Origin badges on the collapsed eol marker: the leading bullet chunk is
--- the record's origin badge — github-imported records (`meta.github`)
--- show the GitHub badge, local records the local one. With icons
--- disabled the local ASCII fallback IS today's `●`, so the icons-off
--- default look stays byte-identical to before badges existed.
+-- Origin badges on the collapsed eol marker: the leading chunk is the
+-- record's origin badge — github-imported records (`meta.github`) show
+-- the GitHub badge on ManiculeBadgeGithubEol, local records the local
+-- one on ManiculeBadgeLocalEol (fg-only variants of the card badge
+-- groups: the marker sits on the editor line, never on a card). With
+-- icons disabled the local ASCII fallback IS today's `●`, so the
+-- icons-off default look stays byte-identical to before badges existed.
 describe("manicule eol origin badges", function()
   before_each(setup_env)
 
@@ -550,10 +552,11 @@ describe("manicule eol origin badges", function()
     render.reconcile(bufnr, { record }, { record })
 
     assert.are.equal("[gh] cghimpo · imported note", eol_virt_text(bufnr, 0))
-    -- The badge chunk keeps the bullet highlight.
+    -- The badge chunk carries the fg-only eol GitHub badge group (no
+    -- card surface — the marker sits on the editor line).
     local chunk = first_eol_chunk(bufnr, 0)
     assert.are.equal("[gh] ", chunk[1])
-    assert.are.equal("ManiculeEolBullet", chunk[2])
+    assert.are.equal("ManiculeBadgeGithubEol", chunk[2])
   end)
 
   it("marks imported records with the github glyph when a provider is loadable", function()
@@ -565,7 +568,7 @@ describe("manicule eol origin badges", function()
 
     local chunk = first_eol_chunk(bufnr, 0)
     assert.are.equal("\u{F09B} ", chunk[1])
-    assert.are.equal("ManiculeEolBullet", chunk[2])
+    assert.are.equal("ManiculeBadgeGithubEol", chunk[2])
   end)
 
   it("marks local records with the local glyph when a provider is loadable", function()
@@ -579,7 +582,7 @@ describe("manicule eol origin badges", function()
 
     local chunk = first_eol_chunk(bufnr, 0)
     assert.are.equal("\u{F0B79} ", chunk[1])
-    assert.are.equal("ManiculeEolBullet", chunk[2])
+    assert.are.equal("ManiculeBadgeLocalEol", chunk[2])
   end)
 
   it("keeps today's ● marker byte-identically for local records with icons off", function()
@@ -634,14 +637,39 @@ describe("manicule inline display mode", function()
       assert.is_truthy(line:find("│", 1, true) or line:find("─", 1, true))
     end
 
-    -- Quote and author rows carry the card highlights; body rows keep
-    -- the box body group. Row chunks are indent, left border, text,
-    -- right border — the text chunk is [3].
+    -- Card rows split into per-chunk highlights: the quote's `▍ ` bar
+    -- is its own accent chunk ahead of the dim quote text, the author
+    -- name is bold and separate from the dim time tail, body rows keep
+    -- the box body group, and the hint row is the quietest (border
+    -- gray). Helpers find a row's chunk by text / by group since the
+    -- frame adds indent/border/padding chunks around the card content.
     local chunks = inline_virt_chunks(bufnr, 0)
-    assert.are.equal("ManiculeInlineQuote", chunks[2][3][2])
-    assert.are.equal("ManiculeInlineMeta", chunks[3][3][2])
-    assert.are.equal("ManiculeInlineBody", chunks[5][3][2])
-    assert.are.equal("ManiculeInlineMeta", chunks[7][3][2])
+    local function hl_of(row_chunks, needle)
+      for _, chunk in ipairs(row_chunks) do
+        if chunk[1]:find(needle, 1, true) then
+          return chunk[2]
+        end
+      end
+      return nil
+    end
+    local function text_of(row_chunks, hl)
+      for _, chunk in ipairs(row_chunks) do
+        if chunk[2] == hl then
+          return chunk[1]
+        end
+      end
+      return nil
+    end
+    assert.are.equal("ManiculeCommentQuoteBar", hl_of(chunks[2], "▍"))
+    assert.are.equal("ManiculeInlineQuote", hl_of(chunks[2], '"local value = 1"'))
+    assert.are.equal("▍ ", text_of(chunks[2], "ManiculeCommentQuoteBar"))
+    -- Author row: bold author-name chunk + dim `· just now` tail.
+    assert.is_truthy(text_of(chunks[3], "ManiculeCommentAuthor"))
+    assert.are.equal("ManiculeInlineMeta", hl_of(chunks[3], "· just now"))
+    assert.is_truthy(text_of(chunks[3], "ManiculeInlineMeta"):find("· just now", 1, true))
+    assert.is_nil(text_of(chunks[3], "ManiculeCommentAuthor"):find("·", 1, true))
+    assert.are.equal("ManiculeInlineBody", hl_of(chunks[5], "boxed body first"))
+    assert.are.equal("ManiculeCommentHint", hl_of(chunks[7], "edit gca | delete gcd"))
 
     -- The code lines themselves are untouched — the box is virtual only.
     assert.are.same(before, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))

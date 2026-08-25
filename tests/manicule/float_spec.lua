@@ -182,20 +182,25 @@ describe("manicule float transparency", function()
     assert.are.equal(50, vim.wo[winid].winblend)
   end)
 
-  it("uses the float background for border and title cells", function()
+  it("uses the derived card surface for border and title cells", function()
     vim.api.nvim_set_hl(0, "Normal", { fg = 0xeeeeee, bg = 0x111111 })
     vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0xdddddd, bg = 0x222222 })
     vim.api.nvim_set_hl(0, "FloatBorder", { fg = 0xaaaaaa, bg = 0x333333 })
     vim.api.nvim_set_hl(0, "Comment", { fg = 0x999999 })
 
-    require("manicule.ui.render").refresh_highlights()
+    local render = require("manicule.ui.render")
+    render.refresh_highlights()
 
     local border_hl = vim.api.nvim_get_hl(0, { name = "ManiculeCommentBorder", link = false })
     local meta_hl = vim.api.nvim_get_hl(0, { name = "ManiculeCommentMeta", link = false })
 
-    assert.are.equal(0x222222, border_hl.bg)
-    assert.are.equal(0x222222, meta_hl.bg)
-    assert.are.equal(0xaaaaaa, border_hl.fg)
+    -- Card surface: Normal bg nudged 6% toward Normal fg; the border fg
+    -- recedes 45% toward the bg (render_spec's palette suite covers the
+    -- full derivation).
+    local surface = render.blend(0x111111, 0xeeeeee, 0.06)
+    assert.are.equal(surface, border_hl.bg)
+    assert.are.equal(surface, meta_hl.bg)
+    assert.are.equal(render.blend(0xaaaaaa, 0x111111, 0.45), border_hl.fg)
     assert.are.equal(0x999999, meta_hl.fg)
   end)
 end)

@@ -107,9 +107,9 @@ local str = require("manicule.str")
 ---@type table<integer, table<string, manicule.ui.render.Handle>>
 local handles = {}
 
--- Namespace for the card line highlights inside popup scratch buffers
--- (quote + author rows). Separate from `anchor.ns`, which lives in the
--- annotated source buffers.
+-- Namespace for the card chunk highlights inside popup scratch buffers
+-- (quote bar/text, badge, author, meta regions). Separate from
+-- `anchor.ns`, which lives in the annotated source buffers.
 local card_ns = vim.api.nvim_create_namespace("manicule.card")
 
 -- Transient visibility flag. When true, every render path is gated off
@@ -189,23 +189,74 @@ local function get_highlight(name)
   return {}
 end
 
+---Per-channel linear mix of two 24-bit RGB colors: returns `a` moved
+---toward `b` by `t` — `t = 0` yields `a` unchanged, `t = 1` yields `b`,
+---`0.5` the rounded midpoint. Pure; exported so the palette formulas in
+---`setup_comment_highlights` are unit-testable.
+---@param a integer 24-bit RGB color (0xRRGGBB)
+---@param b integer 24-bit RGB color (0xRRGGBB)
+---@param t number Mix fraction in [0, 1]
+---@return integer
+function M.blend(a, b, t)
+  local function mix(shift)
+    local ca = math.floor(a / shift) % 0x100
+    local cb = math.floor(b / shift) % 0x100
+    return math.floor(ca + (cb - ca) * t + 0.5)
+  end
+  return mix(0x10000) * 0x10000 + mix(0x100) * 0x100 + mix(1)
+end
+
+---Foreground of the first of `names` that defines one, else nil.
+---@param names string[]
+---@return integer?
+local function first_defined_fg(names)
+  for _, name in ipairs(names) do
+    local fg = get_highlight(name).fg
+    if type(fg) == "number" then
+      return fg
+    end
+  end
+  return nil
+end
+
+-- Card palette. Every value is DERIVED from the active colorscheme (no
+-- hardcoded hex beyond the last-resort DEFAULT_BORDER_FG):
+--   * surface (ManiculeCardBg): Normal bg nudged 6% toward Normal fg —
+--     just enough contrast to read as a card. Transparent themes
+--     (Normal bg unset) skip the tint entirely: no bg on any card
+--     group, every fg still applies.
+--   * border: the border fg pulled 45% toward the editor bg so the
+--     frame recedes behind the content (plain border fg when there is
+--     no bg to recede to).
+--   * quote bar (`▍ `): DiagnosticSignInfo fg (accent); the quote TEXT
+--     stays the dim italic meta fg.
+--   * author: Normal fg, bold — the card's strongest row; the
+--     "· 12h ago" tail stays meta.
+--   * badges: GitHub = Special fg; local = the first teal-ish theme
+--     color of @string / Identifier / DiagnosticSignInfo. The *Eol
+--     variants carry the same fg WITHOUT the card bg — the collapsed
+--     eol marker sits on the editor line, not on a card (origin varies
+--     per record, so the eol badge cannot be one linked group).
+--   * hint ("edit gca | delete gcd"): the border gray — quietest row.
+-- Recomputed on ColorScheme via `M.refresh_highlights` (autocmd wired
+-- in init.lua's setup). Computed groups are set unconditionally (a
+-- user override loses on the next recompute — same semantics as
+-- before); linked groups use `default = true` so user overrides win.
 local function setup_comment_highlights()
-  local border_fg = DEFAULT_BORDER_FG
   local normal_hl = get_highlight("Normal")
   local normal_float_hl = get_highlight("NormalFloat")
   local float_border_hl = get_highlight("FloatBorder")
 
+  local normal_fg = type(normal_hl.fg) == "number" and normal_hl.fg or nil
+  local normal_bg = type(normal_hl.bg) == "number" and normal_hl.bg or nil
+
+  local border_fg = DEFAULT_BORDER_FG
   if type(float_border_hl.fg) == "number" then
     border_fg = float_border_hl.fg
   elseif type(normal_float_hl.fg) == "number" then
     border_fg = normal_float_hl.fg
-  elseif type(normal_hl.fg) == "number" then
-    border_fg = normal_hl.fg
-  end
-
-  local float_bg = normal_float_hl.bg
-  if type(float_bg) ~= "number" and type(normal_hl.bg) == "number" then
-    float_bg = normal_hl.bg
+  elseif normal_fg then
+    border_fg = normal_fg
   end
 
   local meta_fg = border_fg
@@ -214,42 +265,68 @@ local function setup_comment_highlights()
     meta_fg = comment_hl.fg
   end
 
-  local border_hl = { fg = border_fg }
-  local meta_hl = { fg = meta_fg }
-  -- Card quote line ("▍ \"…\""): the meta foreground italicised, so the
-  -- cited code reads as a citation, not as part of the comment body.
-  local quote_hl = { fg = meta_fg, italic = true }
-  if type(float_bg) == "number" then
-    border_hl.bg = float_bg
-    meta_hl.bg = float_bg
-    quote_hl.bg = float_bg
+  -- Card surface: nil on transparent themes. A theme with a Normal bg
+  -- but no Normal fg (rare) keeps the plain bg — blend toward itself.
+  local card_bg
+  if normal_bg then
+    card_bg = M.blend(normal_bg, normal_fg or normal_bg, 0.06)
   end
 
-  vim.api.nvim_set_hl(0, "ManiculeCommentBorder", border_hl)
-  vim.api.nvim_set_hl(0, "ManiculeCommentMeta", meta_hl)
-  vim.api.nvim_set_hl(0, "ManiculeCommentQuote", quote_hl)
+  ---The group with the card surface added (no-op when the theme has none).
+  ---@param hl table
+  ---@return table
+  local function on_card(hl)
+    hl.bg = card_bg
+    return hl
+  end
+
+  local frame_fg = normal_bg and M.blend(border_fg, normal_bg, 0.45) or border_fg
+  local accent_fg = first_defined_fg({ "DiagnosticSignInfo" })
+  local github_fg = first_defined_fg({ "Special" })
+  local local_fg = first_defined_fg({ "@string", "Identifier", "DiagnosticSignInfo" })
+
+  vim.api.nvim_set_hl(0, "ManiculeCardBg", { bg = card_bg })
+  vim.api.nvim_set_hl(0, "ManiculeCommentBorder", on_card({ fg = frame_fg }))
+  vim.api.nvim_set_hl(0, "ManiculeCommentMeta", on_card({ fg = meta_fg }))
+  -- Card quote line text ("\"…\"" past the bar): the meta foreground
+  -- italicised, so the cited code reads as a citation, not as part of
+  -- the comment body.
+  vim.api.nvim_set_hl(0, "ManiculeCommentQuote", on_card({ fg = meta_fg, italic = true }))
+  vim.api.nvim_set_hl(0, "ManiculeCommentQuoteBar", on_card({ fg = accent_fg }))
+  vim.api.nvim_set_hl(0, "ManiculeCommentAuthor", on_card({ fg = normal_fg, bold = true }))
+  vim.api.nvim_set_hl(0, "ManiculeBadgeGithub", on_card({ fg = github_fg }))
+  vim.api.nvim_set_hl(0, "ManiculeBadgeLocal", on_card({ fg = local_fg }))
+  vim.api.nvim_set_hl(0, "ManiculeBadgeGithubEol", { fg = github_fg })
+  vim.api.nvim_set_hl(0, "ManiculeBadgeLocalEol", { fg = local_fg })
+
   vim.api.nvim_set_hl(0, "ManiculeLineNr", { link = "DiagnosticSignInfo", default = true })
-  -- "eol" display-mode marker: accent bullet, dim id/counter, dim body.
-  -- `default` links so user overrides win.
-  vim.api.nvim_set_hl(0, "ManiculeEolBullet", { link = "DiagnosticSignInfo", default = true })
+  -- Edit/delete hint: the receded border gray — the card's quietest row.
+  vim.api.nvim_set_hl(0, "ManiculeCommentHint", { link = "ManiculeCommentBorder", default = true })
+  -- "eol" display-mode marker: origin badge (the fg-only *Eol groups
+  -- above), dim id/counter, dim body. `default` links so user
+  -- overrides win.
   vim.api.nvim_set_hl(0, "ManiculeEolMeta", { link = "NonText", default = true })
   vim.api.nvim_set_hl(0, "ManiculeEolBody", { link = "Comment", default = true })
-  -- "inline" display-mode box: border/meta reuse the float popup's
+  -- "inline" display-mode box: border/meta/quote reuse the float popup's
   -- computed groups so both modes share one look; body text sits on the
-  -- float's NormalFloat. `default` links so user overrides win.
+  -- card surface. `default` links so user overrides win.
   vim.api.nvim_set_hl(0, "ManiculeInlineBorder", { link = "ManiculeCommentBorder", default = true })
   vim.api.nvim_set_hl(0, "ManiculeInlineMeta", { link = "ManiculeCommentMeta", default = true })
   vim.api.nvim_set_hl(0, "ManiculeInlineQuote", { link = "ManiculeCommentQuote", default = true })
-  vim.api.nvim_set_hl(0, "ManiculeInlineBody", { link = "NormalFloat", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeInlineBody", { link = "ManiculeCardBg", default = true })
 end
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers
 -- ---------------------------------------------------------------------------
 
+---The popup window paints its whole background (text rows, padding,
+---border cells) with the card surface via NormalFloat → ManiculeCardBg;
+---the footer hint takes the receded border gray. Shared with the
+---comment editor (`M.winhighlight`) so both floats read as one surface.
 ---@return string
 local function comment_winhighlight()
-  return "NormalFloat:NormalFloat,FloatBorder:ManiculeCommentBorder,FloatTitle:ManiculeCommentMeta,FloatFooter:ManiculeCommentMeta"
+  return "NormalFloat:ManiculeCardBg,FloatBorder:ManiculeCommentBorder,FloatTitle:ManiculeCommentMeta,FloatFooter:ManiculeCommentHint"
 end
 
 -- `split_lines` (newline split with empty-line guard) and `truncate_text`
@@ -301,6 +378,46 @@ local function truncate_display(text, max_cells)
   end
   -- Reserve the ellipsis cell.
   return fit_chars(text, max_cells - 1) .. "…"
+end
+
+---Truncate a `{text, kind}` chunk list to at most `max_cells` display
+---cells, preserving each surviving chunk's kind; the single-cell
+---ellipsis lands at the end of the last kept chunk. Chunk texts carry
+---no tabs, so the concatenated truncation (a byte prefix + "…") maps
+---back onto chunk boundaries by byte count.
+---@param chunks { [1]: string, [2]: string }[]
+---@param max_cells integer
+---@return { [1]: string, [2]: string }[]
+local function truncate_chunk_list(chunks, max_cells)
+  local parts = {}
+  for index, chunk in ipairs(chunks) do
+    parts[index] = chunk[1]
+  end
+  local text = table.concat(parts)
+  local truncated = truncate_display(text, max_cells)
+  if truncated == text then
+    return chunks
+  end
+  local prefix_len = #truncated - #"…"
+  local out = {}
+  local taken = 0
+  for _, chunk in ipairs(chunks) do
+    if taken >= prefix_len then
+      break
+    end
+    local piece = chunk[1]:sub(1, prefix_len - taken)
+    if piece ~= "" then
+      table.insert(out, { piece, chunk[2] })
+      taken = taken + #piece
+    end
+  end
+  if #out == 0 then
+    -- Budget below one glyph: the whole line collapsed to the ellipsis
+    -- (or nothing); keep the first chunk's kind.
+    return { { truncated, chunks[1] and chunks[1][2] or "meta" } }
+  end
+  out[#out][1] = out[#out][1] .. "…"
+  return out
 end
 
 ---Word-wrap `text` into lines of at most `max_cells` display cells.
@@ -490,7 +607,9 @@ local function resolve_quote_text(record, bufnr)
 end
 
 ---Fit the quoted excerpt into at most `QUOTE_MAX_LINES` display lines
----of `width` cells: `▍ "<text>"`, word-wrapped past the prefix, the
+---of `width` cells: `"<text>"` word-wrapped past the `▍ ` prefix (each
+---returned line EXCLUDES the prefix — the card builder emits it as its
+---own "quotebar" chunk, so the bar can carry its accent group), the
 ---last kept line ellipsis-truncated to `…"` when the text overflows.
 ---Empty when there is nothing to quote or the width leaves no room.
 ---@param quote string?
@@ -514,11 +633,7 @@ local function quote_display_lines(quote, width)
     kept[QUOTE_MAX_LINES] = fit_chars(kept[QUOTE_MAX_LINES], budget - 2) .. '…"'
     wrapped = kept
   end
-  local out = {}
-  for _, line in ipairs(wrapped) do
-    table.insert(out, QUOTE_PREFIX .. line)
-  end
-  return out
+  return wrapped
 end
 
 ---Origin of a record, for the card / eol badge: "github" when the
@@ -561,28 +676,47 @@ local function author_badge(record)
   return badge .. " "
 end
 
----The card's author line: "<badge> <author> · <relative time>". The
----badge is the record's origin (see `author_badge`); the author is
----the record's stored value (what `M.add` persisted — an email keeps
----only its local part for display; GitHub imports store the GitHub
----login), falling back to $USER, then "you"; the time is
----`M.relative_time` of the record's timestamp (updated_at preferred,
----matching the old footer). No time suffix when the record carries no
----timestamp.
+---The card's author line as `{text, kind}` chunks:
+---`[<badge> ][<author>][ · <relative time>]`. The badge is the record's
+---origin (see `author_badge`) under its origin badge kind; the author
+---name is the record's stored value (what `M.add` persisted — an email
+---keeps only its local part for display; GitHub imports store the
+---GitHub login), falling back to $USER, then "you", under the "author"
+---kind (bold Normal fg); the time tail is `M.relative_time` of the
+---record's timestamp (updated_at preferred, matching the old footer)
+---and keeps the dim "meta" kind. No time tail when the record carries
+---no timestamp.
 ---@param record table
----@return string
-local function author_line_text(record)
+---@return { [1]: string, [2]: "badge_github"|"badge_local"|"author"|"meta" }[]
+local function author_line_chunks(record)
+  local chunks = {}
+  local badge = author_badge(record)
+  if badge ~= "" then
+    table.insert(chunks, { badge, record_origin(record) == "github" and "badge_github" or "badge_local" })
+  end
   local author = record and record.author
   if type(author) ~= "string" or author == "" then
     author = vim.env.USER or "you"
   end
   author = author:match("^([^@]+)@") or author
-  author = author_badge(record) .. author
+  table.insert(chunks, { author, "author" })
   local ts = record and (record.updated_at or record.created_at)
-  if type(ts) ~= "number" then
-    return author
+  if type(ts) == "number" then
+    table.insert(chunks, { " · " .. M.relative_time(ts), "meta" })
   end
-  return author .. " · " .. M.relative_time(ts)
+  return chunks
+end
+
+---Plain text of the author line — the card width math measures the
+---full string.
+---@param record table
+---@return string
+local function author_line_text(record)
+  local parts = {}
+  for index, chunk in ipairs(author_line_chunks(record)) do
+    parts[index] = chunk[1]
+  end
+  return table.concat(parts)
 end
 
 ---@param a table
@@ -1112,11 +1246,17 @@ local function fallback_direction(anchor_win, anchor_line, total_height)
   return "above"
 end
 
+---Per-chunk card kind. Every render path (float popup, inline box,
+---rail) consumes the SAME `{text, kind}` chunks from
+---`build_popup_content` and maps each kind onto its highlight groups
+---(`POPUP_CARD_HL` / `INLINE_CARD_HL`).
+---@alias manicule.ui.render.CardKind "quotebar"|"quote"|"badge_github"|"badge_local"|"author"|"meta"|"body"
+
 ---@class manicule.ui.render.PopupContent
 ---@field title string Title: " c<short-id> <n>/<m> "
 ---@field footer string Edit/delete hint (bottom of the card)
 ---@field lines string[] Card lines fitted to `width` cells: quote → author → blank → body
----@field kinds ("quote"|"meta"|"body")[] Per-line highlight kind, parallel to `lines`
+---@field chunks { [1]: string, [2]: manicule.ui.render.CardKind }[][] Per-line `{text, kind}` chunks, parallel to `lines`
 ---@field width integer Content width in display cells
 
 ---Build the formatted comment card shared by the float popup, the
@@ -1125,11 +1265,16 @@ end
 ---excerpt (`▍ "…"`, at most `QUOTE_MAX_LINES` rows, skipped when
 ---nothing is quotable), the author + relative-time line, a blank
 ---separator, the body lines, with the edit/delete hint as the footer.
----The content width is the widest card line clamped to `max_width` — so
----a short comment stays narrow. `wrap = false` ellipsis-truncates each
----body line (float popups keep one row per body line); `wrap = true`
----word-wraps long lines across rows instead (the inline box has no
----expanded popup to reveal the rest, so it must show the whole body).
+---Lines are emitted as `{text, kind}` chunk arrays so the renderers can
+---highlight sub-line regions: the quote's `▍ ` bar is its own
+---"quotebar" chunk ahead of the "quote" text, and the author line
+---splits into origin badge / "author" name / dim "meta" time-tail
+---chunks. The content width is the widest card line clamped to
+---`max_width` — so a short comment stays narrow. `wrap = false`
+---ellipsis-truncates each body line (float popups keep one row per body
+---line); `wrap = true` word-wraps long lines across rows instead (the
+---inline box has no expanded popup to reveal the rest, so it must show
+---the whole body).
 ---@param record table
 ---@param max_width integer Content-width cap in display cells
 ---@param display_index integer
@@ -1141,24 +1286,28 @@ local function build_popup_content(record, max_width, display_index, display_tot
   local content_width = popup_content_width(record, max_width, bufnr)
 
   local lines = {}
-  local kinds = {}
-  local function push(line, kind)
-    table.insert(lines, line)
-    table.insert(kinds, kind)
+  local chunks = {}
+  local function push(line_chunks)
+    local parts = {}
+    for index, chunk in ipairs(line_chunks) do
+      parts[index] = chunk[1]
+    end
+    table.insert(lines, table.concat(parts))
+    table.insert(chunks, line_chunks)
   end
 
   for _, quote_line in ipairs(quote_display_lines(resolve_quote_text(record, bufnr), content_width)) do
-    push(quote_line, "quote")
+    push({ { QUOTE_PREFIX, "quotebar" }, { quote_line, "quote" } })
   end
-  push(truncate_display(author_line_text(record), content_width), "meta")
-  push("", "body")
+  push(truncate_chunk_list(author_line_chunks(record), content_width))
+  push({ { "", "body" } })
   for _, line in ipairs(split_lines(record.body)) do
     if wrap then
       for _, wrapped in ipairs(wrap_display(line, content_width)) do
-        push(wrapped, "body")
+        push({ { wrapped, "body" } })
       end
     else
-      push(truncate_text(line, content_width), "body")
+      push({ { truncate_text(line, content_width), "body" } })
     end
   end
 
@@ -1166,10 +1315,24 @@ local function build_popup_content(record, max_width, display_index, display_tot
     title = string.format(" c%s %d/%d ", short_id(record.id), display_index, display_total),
     footer = COMMENT_HINT,
     lines = lines,
-    kinds = kinds,
+    chunks = chunks,
     width = content_width,
   }
 end
+
+---Card kind → highlight group inside the float popup's scratch buffer.
+---"body" is absent on purpose: body rows ride the window's card surface
+---(winhighlight NormalFloat → ManiculeCardBg), which also paints the
+---cells past every chunk's text.
+---@type table<manicule.ui.render.CardKind, string>
+local POPUP_CARD_HL = {
+  quotebar = "ManiculeCommentQuoteBar",
+  quote = "ManiculeCommentQuote",
+  badge_github = "ManiculeBadgeGithub",
+  badge_local = "ManiculeBadgeLocal",
+  author = "ManiculeCommentAuthor",
+  meta = "ManiculeCommentMeta",
+}
 
 ---Render (or reconfigure) the comment popup for `record`. Returns true
 ---when the handle is healthy (regardless of whether the popup ended up
@@ -1326,14 +1489,23 @@ local function render_comment_popup(record, handle, layout)
   vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, content.lines)
   vim.bo[popup_bufnr].modifiable = false
 
-  -- Card line highlights: quote and author/meta rows; body rows keep
-  -- the float's NormalFloat. Cleared first — the scratch buffer (and
-  -- its marks) is reused across renders.
+  -- Card chunk highlights: quote bar/text, badge, author, meta regions;
+  -- body rows keep the window's card surface (see POPUP_CARD_HL).
+  -- Cleared first — the scratch buffer (and its marks) is reused across
+  -- renders.
   vim.api.nvim_buf_clear_namespace(popup_bufnr, card_ns, 0, -1)
-  for row, kind in ipairs(content.kinds) do
-    local hl = kind == "quote" and "ManiculeCommentQuote" or kind == "meta" and "ManiculeCommentMeta" or nil
-    if hl then
-      pcall(vim.api.nvim_buf_set_extmark, popup_bufnr, card_ns, row - 1, 0, { line_hl_group = hl })
+  for row, line_chunks in ipairs(content.chunks) do
+    local col = 0
+    for _, chunk in ipairs(line_chunks) do
+      local hl = POPUP_CARD_HL[chunk[2]]
+      local len = #chunk[1]
+      if hl and len > 0 then
+        pcall(vim.api.nvim_buf_set_extmark, popup_bufnr, card_ns, row - 1, col, {
+          end_col = col + len,
+          hl_group = hl,
+        })
+      end
+      col = col + len
     end
   end
 
@@ -1614,8 +1786,11 @@ local function render_eol_virt_text(record, handle, ctx)
   local line = vim.api.nvim_buf_get_lines(handle.bufnr, row, row + 1, false)[1] or ""
   local avail = win_width - vim.fn.strdisplaywidth(line) - 1
 
+  local origin = record_origin(record)
   local chunks = {
-    { icons.badge(record_origin(record)) .. " ", "ManiculeEolBullet" },
+    -- Origin badge: the fg-only *Eol badge groups — the marker sits on
+    -- the editor line, so it must not carry the card surface bg.
+    { icons.badge(origin) .. " ", origin == "github" and "ManiculeBadgeGithubEol" or "ManiculeBadgeLocalEol" },
     { "c" .. short_id(record.id), "ManiculeEolMeta" },
   }
   if avail >= EOL_MIN_WIDTH then
@@ -1666,6 +1841,24 @@ local INLINE_INDENT = " "
 -- the whole box fits the window.
 local INLINE_FRAME_CELLS = 5
 
+---Card kind → highlight group inside the inline box / rail rows. The
+---quote text, meta tail, and body keep the Inline* indirection (a user
+---override seam, default-linked to the popup's groups); the quote bar,
+---author, and origin badges use the shared card groups directly. The
+---"hint" kind is box-only — the float popup renders the hint in its
+---border footer (FloatFooter → ManiculeCommentHint) instead.
+---@type table<string, string>
+local INLINE_CARD_HL = {
+  quotebar = "ManiculeCommentQuoteBar",
+  quote = "ManiculeInlineQuote",
+  badge_github = "ManiculeBadgeGithub",
+  badge_local = "ManiculeBadgeLocal",
+  author = "ManiculeCommentAuthor",
+  meta = "ManiculeInlineMeta",
+  body = "ManiculeInlineBody",
+  hint = "ManiculeCommentHint",
+}
+
 ---Append one record's bordered box to `out` (a virt_lines list — each
 ---entry is one virtual line as `[text, hl]` chunks):
 ---  ┌ c<short-id> <n>/<m> ─────────────┐
@@ -1687,27 +1880,33 @@ local function append_inline_box(content, out)
     { string.rep("─", math.max(0, inner - vim.fn.strdisplaywidth(title))) .. "┐", "ManiculeInlineBorder" },
   })
 
-  local function body_row(text, hl)
-    local pad = math.max(0, content.width - vim.fn.strdisplaywidth(text))
-    table.insert(out, {
+  ---One content row: `│ <chunks><padding> │`. Each card chunk carries
+  ---its own mapped group; the inner padding rides ManiculeInlineBody so
+  ---the whole row sits on the card surface.
+  ---@param line_chunks { [1]: string, [2]: string }[]
+  local function body_row(line_chunks)
+    local row = {
       { INLINE_INDENT, "NonText" },
       { "│", "ManiculeInlineBorder" },
-      { " " .. text .. string.rep(" ", pad) .. " ", hl },
-      { "│", "ManiculeInlineBorder" },
-    })
-  end
-  for index, line in ipairs(content.lines) do
-    local kind = content.kinds[index]
-    local hl = "ManiculeInlineBody"
-    if kind == "quote" then
-      hl = "ManiculeInlineQuote"
-    elseif kind == "meta" then
-      hl = "ManiculeInlineMeta"
+      { " ", "ManiculeInlineBody" },
+    }
+    local text_width = 0
+    for _, chunk in ipairs(line_chunks) do
+      if chunk[1] ~= "" then
+        text_width = text_width + vim.fn.strdisplaywidth(chunk[1])
+        table.insert(row, { chunk[1], INLINE_CARD_HL[chunk[2]] or "ManiculeInlineBody" })
+      end
     end
-    body_row(line, hl)
+    local pad = math.max(0, content.width - text_width)
+    table.insert(row, { string.rep(" ", pad) .. " ", "ManiculeInlineBody" })
+    table.insert(row, { "│", "ManiculeInlineBorder" })
+    table.insert(out, row)
+  end
+  for _, line_chunks in ipairs(content.chunks) do
+    body_row(line_chunks)
   end
   if content.footer then
-    body_row(truncate_display(content.footer, content.width), "ManiculeInlineMeta")
+    body_row({ { truncate_display(content.footer, content.width), "hint" } })
   end
 
   table.insert(out, {

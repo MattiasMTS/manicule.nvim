@@ -263,7 +263,12 @@ describe("manicule render lifecycle", function()
     render.update_viewport_popups(bufnr, records, records)
     assert.are.equal(winid, floating_windows_containing("reuse options")[1])
     assert.is_true(vim.w[winid].manicule_popup)
-    assert.is_truthy(vim.wo[winid].winhighlight:find("ManiculeCommentBorder", 1, true))
+    local winhighlight = vim.wo[winid].winhighlight
+    assert.is_truthy(winhighlight:find("FloatBorder:ManiculeCommentBorder", 1, true))
+    -- The card surface paints the whole popup window; the footer hint
+    -- takes the receded border gray.
+    assert.is_truthy(winhighlight:find("NormalFloat:ManiculeCardBg", 1, true))
+    assert.is_truthy(winhighlight:find("FloatFooter:ManiculeCommentHint", 1, true))
     assert.is_false(vim.wo[winid].wrap)
   end)
 
@@ -1022,5 +1027,266 @@ describe("manicule card origin badges", function()
     }))
     assert.are.equal("octocat · just now", local_lines[2])
     assert.is_nil(table.concat(local_lines, "\n"):find("✓", 1, true))
+  end)
+end)
+
+-- Card palette: every color DERIVED from the active colorscheme — the
+-- surface is Normal bg nudged 6% toward Normal fg, the border recedes
+-- 45% toward the bg, the quote bar takes the DiagnosticSignInfo accent,
+-- the author is bold Normal fg, badges take Special / teal-chain fgs —
+-- recomputed on ColorScheme. Tests stub the scheme's SOURCE groups,
+-- recompute, and assert the computed groups equal the formulas' output
+-- (never hardcoded theme hex). Stubbed groups are snapshotted and
+-- restored after each test so palette changes don't leak across specs.
+describe("manicule card palette", function()
+  local STUB_GROUPS =
+    { "Normal", "NormalFloat", "FloatBorder", "Comment", "DiagnosticSignInfo", "Special", "@string", "Identifier" }
+  local saved_hls
+
+  before_each(function()
+    setup_env()
+    saved_hls = {}
+    for _, name in ipairs(STUB_GROUPS) do
+      saved_hls[name] = vim.api.nvim_get_hl(0, { name = name, link = true })
+    end
+  end)
+
+  after_each(function()
+    for name, group in pairs(saved_hls) do
+      vim.api.nvim_set_hl(0, name, group)
+    end
+    require("manicule.ui.render").refresh_highlights()
+    package.preload["mini.icons"] = nil
+    package.loaded["mini.icons"] = nil
+    pcall(function()
+      require("manicule.ui.icons")._reset()
+    end)
+    teardown_env()
+  end)
+
+  local function hl(name)
+    return vim.api.nvim_get_hl(0, { name = name, link = false })
+  end
+
+  ---Stub a complete colorscheme surface (fields overridable per test)
+  ---and recompute the palette from it.
+  local function stub_colorscheme(over)
+    local colors = vim.tbl_extend("force", {
+      normal = { fg = 0xCDD6F4, bg = 0x1E1E2E },
+      float_border = { fg = 0x6C7086 },
+      comment = { fg = 0x9399B2 },
+      sign_info = { fg = 0x89B4FA },
+      special = { fg = 0xF5C2E7 },
+      ts_string = { fg = 0x94E2D5 },
+      identifier = { fg = 0xB4BEFE },
+    }, over or {})
+    vim.api.nvim_set_hl(0, "Normal", colors.normal)
+    vim.api.nvim_set_hl(0, "NormalFloat", {})
+    vim.api.nvim_set_hl(0, "FloatBorder", colors.float_border)
+    vim.api.nvim_set_hl(0, "Comment", colors.comment)
+    vim.api.nvim_set_hl(0, "DiagnosticSignInfo", colors.sign_info)
+    vim.api.nvim_set_hl(0, "Special", colors.special)
+    vim.api.nvim_set_hl(0, "@string", colors.ts_string)
+    vim.api.nvim_set_hl(0, "Identifier", colors.identifier)
+    require("manicule.ui.render").refresh_highlights()
+    return colors
+  end
+
+  it("blend mixes per channel: t=0 keeps a, t=1 yields b, 0.5 the midpoint", function()
+    local blend = require("manicule.ui.render").blend
+    assert.are.equal(0x000000, blend(0x000000, 0xFFFFFF, 0.0))
+    assert.are.equal(0xFFFFFF, blend(0x000000, 0xFFFFFF, 1.0))
+    assert.are.equal(0x808080, blend(0x000000, 0xFFFFFF, 0.5))
+    -- Channels mix independently — no cross-channel bleed.
+    assert.are.equal(0x800080, blend(0xFF0000, 0x0000FF, 0.5))
+    assert.are.equal(0x123456, blend(0x123456, 0x654321, 0.0))
+    assert.are.equal(0x654321, blend(0x123456, 0x654321, 1.0))
+    -- Rounded, not truncated: 0x10 half-way to 0x11 is 16.5 → 17.
+    assert.are.equal(0x111111, blend(0x101010, 0x111111, 0.5))
+  end)
+
+  it("derives every card group from the stubbed colorscheme", function()
+    local blend = require("manicule.ui.render").blend
+    stub_colorscheme()
+    local surface = blend(0x1E1E2E, 0xCDD6F4, 0.06)
+
+    local card = hl("ManiculeCardBg")
+    assert.are.equal(surface, card.bg)
+    assert.is_nil(card.fg)
+
+    local border = hl("ManiculeCommentBorder")
+    assert.are.equal(blend(0x6C7086, 0x1E1E2E, 0.45), border.fg)
+    assert.are.equal(surface, border.bg)
+
+    local bar = hl("ManiculeCommentQuoteBar")
+    assert.are.equal(0x89B4FA, bar.fg)
+    assert.are.equal(surface, bar.bg)
+
+    local quote = hl("ManiculeCommentQuote")
+    assert.are.equal(0x9399B2, quote.fg)
+    assert.is_true(quote.italic)
+    assert.are.equal(surface, quote.bg)
+
+    local author = hl("ManiculeCommentAuthor")
+    assert.are.equal(0xCDD6F4, author.fg)
+    assert.is_true(author.bold)
+    assert.are.equal(surface, author.bg)
+
+    local meta = hl("ManiculeCommentMeta")
+    assert.are.equal(0x9399B2, meta.fg)
+    assert.are.equal(surface, meta.bg)
+
+    local github = hl("ManiculeBadgeGithub")
+    assert.are.equal(0xF5C2E7, github.fg)
+    assert.are.equal(surface, github.bg)
+
+    -- @string wins the local badge's teal chain.
+    local local_badge = hl("ManiculeBadgeLocal")
+    assert.are.equal(0x94E2D5, local_badge.fg)
+    assert.are.equal(surface, local_badge.bg)
+
+    -- Eol badge variants: same fg, no card bg — the collapsed marker
+    -- sits on the editor line, not on a card.
+    assert.are.equal(0xF5C2E7, hl("ManiculeBadgeGithubEol").fg)
+    assert.is_nil(hl("ManiculeBadgeGithubEol").bg)
+    assert.are.equal(0x94E2D5, hl("ManiculeBadgeLocalEol").fg)
+    assert.is_nil(hl("ManiculeBadgeLocalEol").bg)
+
+    -- The hint is the quietest row: default-linked to the receded border.
+    local hint = vim.api.nvim_get_hl(0, { name = "ManiculeCommentHint", link = true })
+    assert.are.equal("ManiculeCommentBorder", hint.link)
+  end)
+
+  it("falls back through Identifier then DiagnosticSignInfo for the local badge", function()
+    stub_colorscheme({ ts_string = {} })
+    assert.are.equal(0xB4BEFE, hl("ManiculeBadgeLocal").fg)
+    stub_colorscheme({ ts_string = {}, identifier = {} })
+    assert.are.equal(0x89B4FA, hl("ManiculeBadgeLocal").fg)
+  end)
+
+  it("skips the surface tint on a transparent theme, keeping every fg", function()
+    stub_colorscheme({ normal = { fg = 0xCDD6F4 } })
+    for _, name in ipairs({
+      "ManiculeCardBg",
+      "ManiculeCommentBorder",
+      "ManiculeCommentMeta",
+      "ManiculeCommentQuote",
+      "ManiculeCommentQuoteBar",
+      "ManiculeCommentAuthor",
+      "ManiculeBadgeGithub",
+      "ManiculeBadgeLocal",
+    }) do
+      assert.is_nil(hl(name).bg)
+    end
+    -- The border has no bg to recede toward: plain border fg.
+    assert.are.equal(0x6C7086, hl("ManiculeCommentBorder").fg)
+    -- Every other fg still applies.
+    assert.are.equal(0x89B4FA, hl("ManiculeCommentQuoteBar").fg)
+    assert.are.equal(0xCDD6F4, hl("ManiculeCommentAuthor").fg)
+    assert.is_true(hl("ManiculeCommentAuthor").bold)
+
+    -- And rendering still works: a card comes up without erroring.
+    require("manicule").add({
+      body = "transparent card",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("transparent card", 1))
+  end)
+
+  it("recomputes the palette when ColorScheme fires", function()
+    local blend = require("manicule.ui.render").blend
+    stub_colorscheme()
+    assert.are.equal(0x89B4FA, hl("ManiculeCommentQuoteBar").fg)
+
+    -- Change the source colors WITHOUT calling refresh directly — the
+    -- setup() ColorScheme autocmd must recompute the groups.
+    vim.api.nvim_set_hl(0, "DiagnosticSignInfo", { fg = 0x00FF00 })
+    vim.api.nvim_set_hl(0, "Normal", { fg = 0x111111, bg = 0xEEEEEE })
+    vim.api.nvim_exec_autocmds("ColorScheme", {})
+
+    assert.are.equal(0x00FF00, hl("ManiculeCommentQuoteBar").fg)
+    assert.are.equal(blend(0xEEEEEE, 0x111111, 0.06), hl("ManiculeCardBg").bg)
+    assert.are.equal(0x111111, hl("ManiculeCommentAuthor").fg)
+  end)
+
+  it("splits the popup card into quote-bar, badge, author, and meta hl regions", function()
+    require("manicule.config").current.ui.icons = false
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    local record = {
+      id = "palette-gh-1",
+      uri = require("manicule.uri").for_bufnr(bufnr),
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "palette body",
+      author = "octocat",
+      created_at = os.time(),
+      updated_at = os.time(),
+      resolved = false,
+      meta = { github = { id = 7, imported = true } },
+    }
+    render.reconcile(bufnr, { record }, { record })
+    render.update_viewport_popups(bufnr, { record }, { record })
+    assert.is_true(wait_for_popup_count("palette body", 1))
+
+    local winid = floating_windows_containing("palette body")[1]
+    local popup_buf = vim.api.nvim_win_get_buf(winid)
+    local lines = vim.api.nvim_buf_get_lines(popup_buf, 0, -1, false)
+    assert.are.equal('▍ "local value = 1"', lines[1])
+    assert.are.equal("[gh] octocat · just now", lines[2])
+
+    -- Collect the card marks: regions[row][group] = { start_col, end_col }.
+    local marks = vim.api.nvim_buf_get_extmarks(popup_buf, -1, 0, -1, { details = true })
+    local regions = {}
+    for _, mark in ipairs(marks) do
+      local row, col, details = mark[2], mark[3], mark[4] or {}
+      if details.hl_group then
+        regions[row] = regions[row] or {}
+        regions[row][details.hl_group] = { col, details.end_col }
+      end
+    end
+
+    -- Quote row: the `▍ ` bar and the quote text are separate regions.
+    assert.are.same({ 0, #"▍ " }, regions[0]["ManiculeCommentQuoteBar"])
+    assert.are.same({ #"▍ ", #lines[1] }, regions[0]["ManiculeCommentQuote"])
+
+    -- Author row: badge → bold author name → dim time tail, adjacent.
+    assert.are.same({ 0, #"[gh] " }, regions[1]["ManiculeBadgeGithub"])
+    assert.are.same({ #"[gh] ", #"[gh] octocat" }, regions[1]["ManiculeCommentAuthor"])
+    assert.are.same({ #"[gh] octocat", #lines[2] }, regions[1]["ManiculeCommentMeta"])
+
+    -- Body rows carry no card mark: the popup window's card surface
+    -- (winhighlight NormalFloat → ManiculeCardBg) paints them.
+    assert.is_nil(regions[3])
+  end)
+
+  it("maps the local badge chunk in glyph mode", function()
+    package.preload["mini.icons"] = function()
+      return {
+        get = function()
+          return "X", "MiniIconsAzure", false
+        end,
+      }
+    end
+    require("manicule.config").current.ui.icons = "auto"
+    require("manicule.ui.icons")._reset()
+
+    require("manicule").add({
+      body = "glyph local palette",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("glyph local palette", 1))
+
+    local winid = floating_windows_containing("glyph local palette")[1]
+    local popup_buf = vim.api.nvim_win_get_buf(winid)
+    local found
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(popup_buf, -1, 0, -1, { details = true })) do
+      local details = mark[4] or {}
+      if details.hl_group == "ManiculeBadgeLocal" then
+        found = mark
+      end
+    end
+    assert.is_truthy(found)
+    -- The badge leads the author line.
+    assert.are.equal(0, found[3])
   end)
 end)
