@@ -5,11 +5,13 @@
 -- `meta.github = { id, url, imported = true }`, which (a) dedupes
 -- re-imports on `meta.github.id` and (b) excludes them from
 -- `review.finish()` and the github sink so GitHub's own comments are
--- never echoed back as a new review. A dedupe hit still BACKFILLS
--- thread data (thread_id/thread_node/resolved) onto the existing
--- record, so re-running `:ManiculeReview pr N` refreshes resolve
--- support on records imported before the thread query existed (or
--- when it previously failed).
+-- never echoed back as a new review. Records also get `meta.excerpt`
+-- (the anchored worktree line, same capture the add path stamps) so
+-- their cards quote without a live buffer read. A dedupe hit still
+-- BACKFILLS thread data (thread_id/thread_node/resolved) and a missing
+-- excerpt onto the existing record, so re-running `:ManiculeReview pr N`
+-- refreshes resolve support on records imported before the thread
+-- query existed (or when it previously failed).
 
 local M = {}
 
@@ -209,6 +211,35 @@ function M.github_pr(root, number)
   local store = require("manicule.store")
   local uri_mod = require("manicule.uri")
   local id_mod = require("manicule.id")
+  local str_util = require("manicule.str")
+
+  -- Worktree file lines keyed by relative path: several comments often
+  -- land in the same file and the import pass is one-shot, so each file
+  -- is read at most once. `false` = unreadable (excerpt skipped).
+  ---@type table<string, string[]|false>
+  local file_lines = {}
+
+  ---Excerpt of the worktree text a record anchors to — the same capture
+  ---the add path stamps at creation time (init.lua), so imported cards
+  ---quote without a live buffer read on every render. The import runs
+  ---with the PR head checked out, so the anchored coordinates name real
+  ---worktree lines. Nil when the file or line is unavailable.
+  ---@param path string path relative to `root`
+  ---@param start_line integer 1-based first line of the anchored range
+  ---@param end_line integer 1-based last line of the anchored range
+  ---@return string|nil
+  local function excerpt_for(path, start_line, end_line)
+    local lines = file_lines[path]
+    if lines == nil then
+      local ok, read = pcall(vim.fn.readfile, root .. "/" .. path)
+      lines = ok and read or false
+      file_lines[path] = lines
+    end
+    if not lines then
+      return nil
+    end
+    return str_util.excerpt(lines[start_line], end_line > start_line)
+  end
 
   -- Dedupe against every record already carrying a GitHub comment id.
   -- Map id -> record (not a boolean) so a dedupe hit can backfill.
@@ -243,6 +274,22 @@ function M.github_pr(root, number)
       if gh.resolved ~= thread.resolved then
         gh.resolved = thread.resolved
         changed = true
+      end
+    end
+    -- Records imported before excerpt capture existed: stamp the same
+    -- worktree excerpt new imports get, so their cards stop re-reading
+    -- the live buffer on every render. The record's own (re-anchored)
+    -- range is the line its card cites today.
+    if record.meta.excerpt == nil and type(comment.path) == "string" then
+      local range = type(record.range) == "table" and record.range or {}
+      local start_row = type(range.start) == "table" and num(range.start[1]) or nil
+      if start_row then
+        local end_row = type(range.end_) == "table" and num(range.end_[1]) or start_row
+        local excerpt = excerpt_for(comment.path, start_row + 1, end_row + 1)
+        if excerpt then
+          record.meta.excerpt = excerpt
+          changed = true
+        end
       end
     end
     return changed
@@ -290,6 +337,7 @@ function M.github_pr(root, number)
           updated_at = now,
           resolved = false,
           meta = {
+            excerpt = excerpt_for(comment.path, start_line, line),
             github = {
               id = comment.id,
               url = str(comment.html_url),

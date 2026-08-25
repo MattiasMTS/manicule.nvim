@@ -358,6 +358,31 @@ describe("manicule eol display mode", function()
     assert.is_true(math.abs(first_row - second_row) >= 3)
   end)
 
+  it("refreshes the expanded counter after a mutation on another line", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    require("manicule").add({
+      body = "memo first",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+    move_cursor(bufnr, 2)
+    assert.is_true(wait_for_popup_count("memo first", 1))
+    assert.is_truthy(popup_title(floating_windows_containing("memo first")[1]):find("1/1", 1, true))
+
+    -- A second record lands on ANOTHER line while the cursor stays put,
+    -- so line 2's covering set is unchanged: the mutation's reconcile
+    -- must drop any memoized display positions, and the refreshed
+    -- expansion must read 1/2, not a stale 1/1.
+    require("manicule").add({
+      body = "memo second",
+      range = { start = { 2, 0 }, end_ = { 2, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("memo first", 1))
+    assert.is_true(vim.wait(1000, function()
+      local winid = floating_windows_containing("memo first")[1]
+      return winid ~= nil and popup_title(winid):find("1/2", 1, true) ~= nil
+    end, 10))
+  end)
+
   it("keeps the expanded popup open while the comment editor is up", function()
     local bufnr = vim.api.nvim_get_current_buf()
     require("manicule").add({

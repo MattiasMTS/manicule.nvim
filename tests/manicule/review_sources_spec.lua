@@ -411,6 +411,66 @@ describe("manicule review sources", function()
       assert.is_true(r.meta.github.imported)
     end)
 
+    it("stamps the anchored worktree excerpt on imported comments", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments({
+        {
+          id = 4001,
+          path = "a.lua",
+          line = 2,
+          body = "single line comment",
+          html_url = "https://example.test/r/4001",
+          user = { login = "octocat" },
+        },
+        {
+          id = 4002,
+          path = "a.lua",
+          line = 4,
+          start_line = 2,
+          body = "range comment",
+          html_url = "https://example.test/r/4002",
+          user = { login = "octocat" },
+        },
+      })
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s24" }))
+
+      local by_id = {}
+      for _, r in ipairs(require("manicule.store").all(root)) do
+        by_id[r.meta.github.id] = r
+      end
+      -- Head worktree line 2 is "-- two"; the range comment (2..4) gets
+      -- the multi-line continuation ellipsis, exactly like the add path.
+      assert.are.equal("-- two", by_id[4001].meta.excerpt)
+      assert.are.equal("-- two…", by_id[4002].meta.excerpt)
+
+      -- The excerpt is STORED, not a live read: changing the anchored
+      -- worktree line afterwards leaves the citation on what was
+      -- commented on (mirrors the add-path capture).
+      vim.fn.writefile({ "return 2", "-- changed", "-- three", "-- four", "-- five" }, root .. "/a.lua")
+      local record = require("manicule.store").get(root, by_id[4001].id)
+      assert.are.equal("-- two", record.meta.excerpt)
+    end)
+
+    it("backfills the excerpt onto existing imported records on re-import", function()
+      local S = require("manicule.review.sources")
+      local root, _, gh = pr_repo_with_comments()
+      vim.env.PATH = gh.bin .. ":" .. saved_path
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s25" }))
+      local store = require("manicule.store")
+      local record = store.all(root)[1]
+      -- Simulate a record imported before excerpt capture existed.
+      record.meta.excerpt = nil
+      store.put_record(record)
+      assert(store.save(root))
+
+      assert(S.resolve({ "pr", "42" }, { cwd = root, stage_dir = ctx.artifact_root .. "/s26" }))
+
+      assert.are.equal("-- two…", store.all(root)[1].meta.excerpt)
+    end)
+
     it("records thread ids and the PR number on imported comments", function()
       local S = require("manicule.review.sources")
       local root, _, gh = pr_repo_with_comments({

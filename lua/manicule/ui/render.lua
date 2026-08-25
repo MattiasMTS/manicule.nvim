@@ -656,6 +656,21 @@ local function record_origin(record)
   return "local"
 end
 
+---Badge text for `origin` under an already-resolved icon mode —
+---`icons.badge` minus the per-call config read (`icons.enabled()`),
+---which every render pass resolves ONCE (`ctx.icons_enabled`) instead
+---of per record.
+---@param origin "github"|"local"
+---@param icons_enabled boolean
+---@return string
+local function origin_badge(origin, icons_enabled)
+  local badge = icons.badges[origin]
+  if not badge then
+    return ""
+  end
+  return icons_enabled and badge.glyph or badge.ascii
+end
+
 ---Origin badge prefixing the card's author line ("<badge> " or "").
 ---GitHub-imported records badge in every icon mode; local records badge
 ---only in glyph mode — the ASCII local fallback (`●`) is a plain bullet
@@ -663,13 +678,14 @@ end
 ---nothing (local is the unmarked default), so with icons disabled the
 ---card looks exactly as it did before badges existed.
 ---@param record table
+---@param icons_enabled boolean Pass-invariant `icons.enabled()` read
 ---@return string
-local function author_badge(record)
+local function author_badge(record, icons_enabled)
   local origin = record_origin(record)
-  if origin == "local" and not icons.enabled() then
+  if origin == "local" and not icons_enabled then
     return ""
   end
-  local badge = icons.badge(origin)
+  local badge = origin_badge(origin, icons_enabled)
   if badge == "" then
     return ""
   end
@@ -687,10 +703,11 @@ end
 ---and keeps the dim "meta" kind. No time tail when the record carries
 ---no timestamp.
 ---@param record table
+---@param ctx {icons_enabled: boolean, now: integer} Pass-invariant reads (icon mode, clock)
 ---@return { [1]: string, [2]: "badge_github"|"badge_local"|"author"|"meta" }[]
-local function author_line_chunks(record)
+local function author_line_chunks(record, ctx)
   local chunks = {}
-  local badge = author_badge(record)
+  local badge = author_badge(record, ctx.icons_enabled)
   if badge ~= "" then
     table.insert(chunks, { badge, record_origin(record) == "github" and "badge_github" or "badge_local" })
   end
@@ -702,21 +719,9 @@ local function author_line_chunks(record)
   table.insert(chunks, { author, "author" })
   local ts = record and (record.updated_at or record.created_at)
   if type(ts) == "number" then
-    table.insert(chunks, { " · " .. M.relative_time(ts), "meta" })
+    table.insert(chunks, { " · " .. M.relative_time(ts, ctx.now), "meta" })
   end
   return chunks
-end
-
----Plain text of the author line — the card width math measures the
----full string.
----@param record table
----@return string
-local function author_line_text(record)
-  local parts = {}
-  for index, chunk in ipairs(author_line_chunks(record)) do
-    parts[index] = chunk[1]
-  end
-  return table.concat(parts)
 end
 
 ---@param a table
@@ -888,6 +893,33 @@ local function precompute_display_positions(records, counter_records)
     out[id] = { index = index, total = total }
   end
   return out
+end
+
+-- Memo for the viewport passes' display-position precompute. Every
+-- cursor move on a commented line reruns `precompute_display_positions`
+-- for the same rendered records against the same counter pool — an
+-- O(P log P) sort of the whole project pool per keystroke. Remember the
+-- last result keyed by buffer + rendered record ids; `M.reconcile` runs
+-- on every mutation and clears it (as does `_reset_for_tests`), so a
+-- changed pool can never serve a stale map.
+local display_memo = { key = nil, map = nil }
+
+---`precompute_display_positions`, memoized on (bufnr, record ids).
+---@param bufnr integer
+---@param records table[] records that will be rendered (stable order)
+---@param counter_records table[]
+---@return table<string, {index: integer, total: integer}>
+local function display_positions_memoized(bufnr, records, counter_records)
+  local parts = { tostring(bufnr) }
+  for index, record in ipairs(records) do
+    parts[index + 1] = tostring(record.id or "")
+  end
+  local key = table.concat(parts, "\0")
+  if display_memo.key ~= key then
+    display_memo.key = key
+    display_memo.map = precompute_display_positions(records, counter_records)
+  end
+  return display_memo.map
 end
 
 -- ---------------------------------------------------------------------------
@@ -1109,21 +1141,6 @@ end
 -- anchor line's column 0, mirroring the inline box's one-cell gutter.
 local FLOAT_FALLBACK_COL = 1
 
----Popup card height in content rows (borders add 2): quote lines +
----author line + blank separator + one row per body line — exactly what
----`build_popup_content` renders for a float popup (`wrap = false` keeps
----one row per body line; the inline box wraps and never reads this).
----Shared by the stack layout, the viewport cascade, and the occlusion
----measurement so they all agree on how tall a record's popup is.
----@param record table
----@param bufnr integer? Buffer the record renders in (quote fallback)
----@param content_width integer The card's content width in display cells
----@return integer
-local function popup_card_height(record, bufnr, content_width)
-  local quote_rows = #quote_display_lines(resolve_quote_text(record, bufnr), content_width)
-  return quote_rows + 2 + math.max(1, #split_lines(record.body))
-end
-
 ---Widest content a float popup may take in a `win_width`-cell window.
 ---Shared by the popup renderer, the viewport layout pass, and the
 ---inline box's cap so every mode sizes content identically.
@@ -1131,30 +1148,6 @@ end
 ---@return integer
 local function popup_width_cap(win_width)
   return math.max(24, math.floor(win_width * 0.52))
-end
-
----Content display width of `record`'s card: the widest of the quote
----line, the author line, the body lines, and the hint footer, clamped
----to `max_width` — a short comment stays narrow. Shared by
----`build_popup_content` and the float placement measurement (which
----needs widths for a whole stack without building every popup's
----content), so the measured spot is the placed spot. `bufnr` feeds the
----quote's live-line fallback.
----@param record table
----@param max_width integer Content-width cap in display cells
----@param bufnr integer? Buffer the record renders in (quote fallback)
----@return integer
-local function popup_content_width(record, max_width, bufnr)
-  local max_line_width = vim.fn.strdisplaywidth(COMMENT_HINT)
-  for _, line in ipairs(split_lines(record.body)) do
-    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(line))
-  end
-  local quote = resolve_quote_text(record, bufnr)
-  if quote then
-    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(QUOTE_PREFIX .. '"' .. quote .. '"'))
-  end
-  max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(author_line_text(record)))
-  return math.min(max_line_width, math.max(1, max_width))
 end
 
 ---Left column of a margin-placed popup (cells right of the anchor
@@ -1255,35 +1248,59 @@ end
 ---@class manicule.ui.render.PopupContent
 ---@field title string Title: " c<short-id> <n>/<m> "
 ---@field footer string Edit/delete hint (bottom of the card)
----@field lines string[] Card lines fitted to `width` cells: quote → author → blank → body
+---@field lines string[] Card lines fitted to `width` cells: quote → author → blank → body. A float popup (`wrap = false`) is exactly `#lines` content rows tall (borders add 2)
 ---@field chunks { [1]: string, [2]: manicule.ui.render.CardKind }[][] Per-line `{text, kind}` chunks, parallel to `lines`
 ---@field width integer Content width in display cells
 
 ---Build the formatted comment card shared by the float popup, the
----inline virt_lines box, and the eol cursor-expansion: the title (short
----id + display counter), then — in card order — the quoted anchor
----excerpt (`▍ "…"`, at most `QUOTE_MAX_LINES` rows, skipped when
+---inline virt_lines box, the rail, and the eol cursor-expansion: the
+---title (short id + display counter), then — in card order — the quoted
+---anchor excerpt (`▍ "…"`, at most `QUOTE_MAX_LINES` rows, skipped when
 ---nothing is quotable), the author + relative-time line, a blank
 ---separator, the body lines, with the edit/delete hint as the footer.
 ---Lines are emitted as `{text, kind}` chunk arrays so the renderers can
 ---highlight sub-line regions: the quote's `▍ ` bar is its own
 ---"quotebar" chunk ahead of the "quote" text, and the author line
 ---splits into origin badge / "author" name / dim "meta" time-tail
----chunks. The content width is the widest card line clamped to
----`max_width` — so a short comment stays narrow. `wrap = false`
----ellipsis-truncates each body line (float popups keep one row per body
----line); `wrap = true` word-wraps long lines across rows instead (the
----inline box has no expanded popup to reveal the rest, so it must show
----the whole body).
+---chunks. The content width is the widest card line (quote, author,
+---body, hint footer) clamped to `max_width` — so a short comment stays
+---narrow. `wrap = false` ellipsis-truncates each body line (float
+---popups keep one row per body line); `wrap = true` word-wraps long
+---lines across rows instead (the inline box has no expanded popup to
+---reveal the rest, so it must show the whole body).
+---
+---This is the SINGLE source of a card's content, width, and height —
+---placement measurement reads the built card (via `card_for`) instead
+---of re-deriving any of it, so the measured card is the placed card.
 ---@param record table
 ---@param max_width integer Content-width cap in display cells
 ---@param display_index integer
 ---@param display_total integer
 ---@param wrap boolean
 ---@param bufnr integer? Buffer the record renders in (quote fallback)
+---@param ctx {icons_enabled: boolean, now: integer} Pass-invariant reads (icon mode, clock)
 ---@return manicule.ui.render.PopupContent
-local function build_popup_content(record, max_width, display_index, display_total, wrap, bufnr)
-  local content_width = popup_content_width(record, max_width, bufnr)
+local function build_popup_content(record, max_width, display_index, display_total, wrap, bufnr, ctx)
+  -- Each raw ingredient exactly once: quote, author chunks, and body
+  -- lines feed both the width measurement and the line layout below.
+  local quote = resolve_quote_text(record, bufnr)
+  local body_lines = split_lines(record.body)
+  local author_chunks = author_line_chunks(record, ctx)
+
+  local author_parts = {}
+  for index, chunk in ipairs(author_chunks) do
+    author_parts[index] = chunk[1]
+  end
+
+  local widest = vim.fn.strdisplaywidth(COMMENT_HINT)
+  for _, line in ipairs(body_lines) do
+    widest = math.max(widest, vim.fn.strdisplaywidth(line))
+  end
+  if quote then
+    widest = math.max(widest, vim.fn.strdisplaywidth(QUOTE_PREFIX .. '"' .. quote .. '"'))
+  end
+  widest = math.max(widest, vim.fn.strdisplaywidth(table.concat(author_parts)))
+  local content_width = math.min(widest, math.max(1, max_width))
 
   local lines = {}
   local chunks = {}
@@ -1296,12 +1313,12 @@ local function build_popup_content(record, max_width, display_index, display_tot
     table.insert(chunks, line_chunks)
   end
 
-  for _, quote_line in ipairs(quote_display_lines(resolve_quote_text(record, bufnr), content_width)) do
+  for _, quote_line in ipairs(quote_display_lines(quote, content_width)) do
     push({ { QUOTE_PREFIX, "quotebar" }, { quote_line, "quote" } })
   end
-  push(truncate_chunk_list(author_line_chunks(record), content_width))
+  push(truncate_chunk_list(author_chunks, content_width))
   push({ { "", "body" } })
-  for _, line in ipairs(split_lines(record.body)) do
+  for _, line in ipairs(body_lines) do
     if wrap then
       for _, wrapped in ipairs(wrap_display(line, content_width)) do
         push({ { wrapped, "body" } })
@@ -1318,6 +1335,50 @@ local function build_popup_content(record, max_width, display_index, display_tot
     chunks = chunks,
     width = content_width,
   }
+end
+
+---Pass-scoped card context: the slice of the reconcile `PassCtx` the
+---card builders consume. The viewport pass builds its own via
+---`new_card_ctx`; `M.reconcile`'s PassCtx is a superset.
+---@class manicule.ui.render.CardCtx
+---@field cards table<string, manicule.ui.render.PopupContent> Per-pass card cache, keyed by record id
+---@field display table<string, {index: integer, total: integer}> id → title counter
+---@field icons_enabled boolean Pass-invariant `icons.enabled()`
+---@field now integer Pass-invariant `os.time()`
+
+---A fresh pass-scoped card context.
+---@param display table<string, {index: integer, total: integer}>?
+---@return manicule.ui.render.CardCtx
+local function new_card_ctx(display)
+  return {
+    cards = {},
+    display = display or {},
+    icons_enabled = icons.enabled(),
+    now = os.time(),
+  }
+end
+
+---The pass-cached card for `record`, built on first use. Keyed by
+---record id alone: within one pass the width cap, wrap flag, buffer,
+---and the record's display counter are all fixed, and a pass is atomic
+---— so a plain per-pass table needs no invalidation. Every consumer of
+---a record's card (placement measurement, popup render, inline box)
+---reads the same table.
+---@param ctx manicule.ui.render.CardCtx
+---@param record table
+---@param max_width integer Content-width cap in display cells
+---@param wrap boolean
+---@param bufnr integer? Buffer the record renders in (quote fallback)
+---@return manicule.ui.render.PopupContent
+local function card_for(ctx, record, max_width, wrap, bufnr)
+  local id = tostring(record.id or "")
+  local card = ctx.cards[id]
+  if not card then
+    local pos = ctx.display[id]
+    card = build_popup_content(record, max_width, pos and pos.index or 1, pos and pos.total or 1, wrap, bufnr, ctx)
+    ctx.cards[id] = card
+  end
+  return card
 end
 
 ---Card kind → highlight group inside the float popup's scratch buffer.
@@ -1340,16 +1401,19 @@ local POPUP_CARD_HL = {
 ---handle alive).
 ---
 ---Every caller precomputes its pass-invariant data ONCE and threads it
----through `layout`: the viewport pass supplies full placement geometry
----(`placement`/`row`/`col_shift`), the sticky reconcile path supplies
----the record's same-line `stack` and lets this function make the
----occlusion-aware placement decision. Both supply the title counter
----(`display`), the anchor window and the config `opacity`.
+---through `layout` and `ctx`: the viewport pass supplies full placement
+---geometry (`placement`/`row`/`col_shift`), the sticky reconcile path
+---supplies the record's same-line `stack` and lets this function make
+---the occlusion-aware placement decision. Both supply the anchor window
+---and the config `opacity` via `layout`, and the pass-scoped card
+---context `ctx` (card cache + title counters + invariant reads) — every
+---card is built at most once per pass, wherever it is first needed.
 ---@param record table
 ---@param handle manicule.ui.render.Handle
----@param layout? {winid?: integer, placement?: "margin"|"below"|"above", row?: integer, col_shift?: integer, display?: {index: integer, total: integer}, stack?: table[], opacity?: number}
+---@param layout? {winid?: integer, placement?: "margin"|"below"|"above", row?: integer, col_shift?: integer, stack?: table[], opacity?: number}
+---@param ctx manicule.ui.render.CardCtx
 ---@return boolean
-local function render_comment_popup(record, handle, layout)
+local function render_comment_popup(record, handle, layout, ctx)
   if not vim.api.nvim_buf_is_valid(handle.bufnr) then
     return false
   end
@@ -1371,12 +1435,9 @@ local function render_comment_popup(record, handle, layout)
     return true
   end
 
-  local display = layout.display or {}
-  local display_index, display_total = display.index or 1, display.total or 1
-
   local win_width = vim.api.nvim_win_get_width(anchor_win)
   local width_cap = popup_width_cap(win_width)
-  local content = build_popup_content(record, width_cap, display_index, display_total, false, handle.bufnr)
+  local content = card_for(ctx, record, width_cap, false, handle.bufnr)
 
   local my_line = record_start_line(record)
   local my_id = tostring(record.id or "")
@@ -1403,8 +1464,10 @@ local function render_comment_popup(record, handle, layout)
     local entries = {}
     local total = 0
     for index, other in ipairs(stack) do
-      local other_width = popup_content_width(other, width_cap, handle.bufnr)
-      local height = popup_card_height(other, handle.bufnr, other_width)
+      -- The member's real card, from the pass cache — its own render in
+      -- this batch (and every sibling's measurement) reuses it.
+      local card = card_for(ctx, other, width_cap, false, handle.bufnr)
+      local height = #card.lines
       if tostring(other.id or "") == my_id then
         stack_index = index
         stack_offset = total
@@ -1412,7 +1475,7 @@ local function render_comment_popup(record, handle, layout)
       table.insert(entries, {
         row = total,
         height = height,
-        col = margin_col(win_width, other_width, math.min((index - 1) * 2, 12)),
+        col = margin_col(win_width, card.width, math.min((index - 1) * 2, 12)),
       })
       total = total + height + 2
     end
@@ -1680,8 +1743,8 @@ local function dispatch_rail_expansion(bufnr, records, counter_records, active_r
   table.sort(covering, record_layout_less)
 
   -- Title counters match the float expansion's: scope-wide display
-  -- positions, precomputed once for the covering set.
-  local display = precompute_display_positions(covering, counter_records or records)
+  -- positions, memoized across cursor moves that keep the covering set.
+  local display = display_positions_memoized(bufnr, covering, counter_records or records)
   local entries = {}
   for _, record in ipairs(covering) do
     local pos = display[tostring(record.id or "")]
@@ -1790,7 +1853,10 @@ local function render_eol_virt_text(record, handle, ctx)
   local chunks = {
     -- Origin badge: the fg-only *Eol badge groups — the marker sits on
     -- the editor line, so it must not carry the card surface bg.
-    { icons.badge(origin) .. " ", origin == "github" and "ManiculeBadgeGithubEol" or "ManiculeBadgeLocalEol" },
+    {
+      origin_badge(origin, ctx.icons_enabled) .. " ",
+      origin == "github" and "ManiculeBadgeGithubEol" or "ManiculeBadgeLocalEol",
+    },
     { "c" .. short_id(record.id), "ManiculeEolMeta" },
   }
   if avail >= EOL_MIN_WIDTH then
@@ -1968,12 +2034,7 @@ local function render_inline_virt_lines(record, handle, ctx)
 
   local virt_lines = {}
   for _, member in ipairs(stack) do
-    local pos = ctx.display[tostring(member.id or "")]
-    local display_index, display_total = pos and pos.index or 1, pos and pos.total or 1
-    append_inline_box(
-      build_popup_content(member, max_width, display_index, display_total, true, handle.bufnr),
-      virt_lines
-    )
+    append_inline_box(card_for(ctx, member, max_width, true, handle.bufnr), virt_lines)
   end
 
   local opts = {
@@ -1998,15 +2059,16 @@ end
 
 ---Pass-invariant context built ONCE per `M.reconcile` call and threaded
 ---through every per-record render, replacing what used to be per-record
----re-derivation: config reads (`mode`/`sticky`/`opacity`), the window +
----line-count resolution, the same-line stack map, and the title-counter
----display positions.
----@class manicule.ui.render.PassCtx
+---re-derivation: config reads (`mode`/`sticky`/`opacity`, the icon
+---mode), the clock, the window + line-count resolution, the same-line
+---stack map, the title-counter display positions, and the per-pass card
+---cache. A superset of `CardCtx` (cards/display/icons_enabled/now), so
+---it threads straight into the card builders.
+---@class manicule.ui.render.PassCtx : manicule.ui.render.CardCtx
 ---@field mode "float"|"eol"|"inline"|"hidden" Live display mode
 ---@field sticky boolean `mode == "float"` and config `ui.sticky`
 ---@field opacity number Config `ui.opacity` (float mode only, else 0)
 ---@field stacks table<string, table[]> uri+line → sorted same-line stack
----@field display table<string, {index: integer, total: integer}> id → title counter
 ---@field line_count integer Buffer line count (buffer text is stable across the pass)
 ---@field winid integer? Window showing the buffer (nil when hidden)
 ---@field win_width integer Width of `winid`, or the full screen width for hidden buffers
@@ -2095,10 +2157,9 @@ local function reconcile_record(bufnr, record, ctx, tab)
       end
       render_comment_popup(record, hdl, {
         winid = ctx.winid,
-        display = ctx.display[id],
         stack = stack_for_record(ctx.stacks, record),
         opacity = ctx.opacity,
-      })
+      }, ctx)
       -- Coalesce the orphan-prune + dedup sweeps to ONCE per reconcile
       -- batch instead of per-record. The sweeps are global and run on a
       -- later scheduled tick, so every record's float in this batch is
@@ -2169,7 +2230,10 @@ end
 function M._rail_card_rows(record, rail_width, display_index, display_total, bufnr)
   local max_width = math.max(8, rail_width - INLINE_FRAME_CELLS)
   local rows = {}
-  append_inline_box(build_popup_content(record, max_width, display_index, display_total, true, bufnr), rows)
+  append_inline_box(
+    build_popup_content(record, max_width, display_index, display_total, true, bufnr, new_card_ctx()),
+    rows
+  )
   return rows
 end
 
@@ -2185,6 +2249,10 @@ end
 ---@param records table[]
 ---@param counter_records? table[]
 function M.reconcile(bufnr, records, counter_records)
+  -- Every mutation lands here: drop the viewport passes' memoized
+  -- display positions so the next cursor-move pass recomputes against
+  -- the fresh record pool.
+  display_memo.key, display_memo.map = nil, nil
   if hidden then
     return
   end
@@ -2196,10 +2264,11 @@ function M.reconcile(bufnr, records, counter_records)
   local live = {}
 
   -- Pass-invariant context, built once instead of re-derived per record:
-  -- config reads, window + line-count resolution, the same-line stack
-  -- map, and the title-counter positions. The stack/display maps are
-  -- only consumed by the eol/inline/sticky-float paths, so skip building
-  -- them for modes that never read them.
+  -- config reads (incl. the icon mode), the clock, window + line-count
+  -- resolution, the same-line stack map, the title-counter positions,
+  -- and the pass's card cache. The stack/display maps are only consumed
+  -- by the eol/inline/sticky-float paths, so skip building them for
+  -- modes that never read them.
   local mode = current_display_mode()
   local sticky = mode == "float" and is_sticky()
   local needs_stacks = sticky or mode == "eol" or mode == "inline"
@@ -2212,6 +2281,9 @@ function M.reconcile(bufnr, records, counter_records)
     opacity = mode == "float" and (((config.get() or {}).ui or {}).opacity or 0) or 0,
     stacks = needs_stacks and build_line_stacks(records) or {},
     display = needs_display and precompute_display_positions(records, counter_records or records) or {},
+    cards = {},
+    icons_enabled = icons.enabled(),
+    now = os.time(),
     line_count = vim.api.nvim_buf_line_count(bufnr),
     winid = winid,
     win_width = winid and vim.api.nvim_win_get_width(winid) or vim.o.columns,
@@ -2267,13 +2339,20 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     -- full comment — a cursor-line popup would only duplicate visible
     -- content (and, being `focusable = false`, add no interaction;
     -- edit/delete go through `record_at_cursor` on the anchor line).
-    -- Sweep untracked tagged floats too so a mode switch clears strays —
-    -- coalesced, since this branch runs on every CursorMoved in these
-    -- modes and the sweep walks every window.
+    -- The sweep is only scheduled when this pass actually closed a
+    -- popup (e.g. right after a mode switch): this branch runs on every
+    -- CursorMoved in these modes, and with nothing open there is
+    -- nothing a sweep could change.
+    local hid = false
     for _, handle in pairs(tab) do
-      hide_popup(handle)
+      if handle.popup_winid then
+        hide_popup(handle)
+        hid = true
+      end
     end
-    schedule_popup_sweeps()
+    if hid then
+      schedule_popup_sweeps()
+    end
     return
   end
 
@@ -2304,16 +2383,26 @@ function M.update_viewport_popups(bufnr, records, counter_records)
   -- expand = "float" is configured — this branch is simply never taken.
   if mode == "eol" and current_expand_mode() == "rail" then
     -- No float ever expands on this path; drop any popup left over from
-    -- a float-expansion pass (e.g. the expand mode changed) and sweep.
+    -- a float-expansion pass (e.g. the expand mode changed) and sweep —
+    -- but only when something was actually open (this runs per
+    -- CursorMoved).
+    local hid = false
     for _, handle in pairs(tab) do
-      hide_popup(handle)
+      if handle.popup_winid then
+        hide_popup(handle)
+        hid = true
+      end
     end
-    schedule_popup_sweeps()
+    if hid then
+      schedule_popup_sweeps()
+    end
     dispatch_rail_expansion(bufnr, records, counter_records, active_range)
     return
   end
 
   local layouts = {}
+  ---@type manicule.ui.render.CardCtx
+  local pass
   if active_range then
     local visible = {}
     if mode == "eol" then
@@ -2340,10 +2429,13 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     end
     table.sort(visible, record_layout_less)
 
-    -- Precompute title-counter positions ONCE for the whole viewport
-    -- (sharing each scope group's sort) instead of letting every
-    -- per-record `render_comment_popup` re-scan + re-sort the counter set.
-    local display = precompute_display_positions(visible, counter_records or records)
+    -- Title-counter positions for the whole viewport, memoized across
+    -- passes: a cursor move that keeps the same visible set (the common
+    -- case while typing/moving on a commented line) reuses the last map
+    -- instead of re-sorting the whole counter pool per keystroke. The
+    -- pass-scoped card context carries them into every card build.
+    local display = display_positions_memoized(bufnr, visible, counter_records or records)
+    pass = new_card_ctx(display)
 
     -- Group the visible records by anchor line (adjacent after the
     -- sort): the occlusion-aware placement decision is made per
@@ -2377,8 +2469,10 @@ function M.update_viewport_popups(bufnr, records, counter_records)
       local natural_top = group.line - active_range.top
       for _, record in ipairs(group.records) do
         group_stagger = group_stagger + 1
-        local record_width = popup_content_width(record, width_cap, bufnr)
-        local card_height = popup_card_height(record, bufnr, record_width)
+        -- The record's real card, cached on the pass — the render loop
+        -- below reuses it instead of rebuilding the content.
+        local card = card_for(pass, record, width_cap, false, bufnr)
+        local card_height = #card.lines
         local row = 0
         if group_next_top and natural_top < group_next_top then
           row = group_next_top - natural_top
@@ -2390,7 +2484,7 @@ function M.update_viewport_popups(bufnr, records, counter_records)
           row = row,
           height = card_height,
           col_shift = col_shift,
-          col = margin_col(win_width, record_width, col_shift),
+          col = margin_col(win_width, card.width, col_shift),
         })
       end
 
@@ -2405,7 +2499,6 @@ function M.update_viewport_popups(bufnr, records, counter_records)
             placement = "margin",
             row = entry.row,
             col_shift = entry.col_shift,
-            display = display[tostring(entry.record.id or "")],
           }
         end
       else
@@ -2424,7 +2517,6 @@ function M.update_viewport_popups(bufnr, records, counter_records)
             placement = direction,
             row = offset,
             col_shift = 0,
-            display = display[tostring(entry.record.id or "")],
           }
           offset = offset + entry.height + 2
         end
@@ -2434,6 +2526,7 @@ function M.update_viewport_popups(bufnr, records, counter_records)
 
   -- Config read hoisted out of the per-record render.
   local opacity = ((config.get() or {}).ui or {}).opacity or 0
+  local sweep_needed = false
   for _, record in ipairs(records or {}) do
     local id = tostring(record.id or "")
     local handle = tab[id]
@@ -2441,9 +2534,11 @@ function M.update_viewport_popups(bufnr, records, counter_records)
       local layout = layouts[id]
       if layout then
         layout.opacity = opacity
-        render_comment_popup(record, handle, layout)
-      else
+        render_comment_popup(record, handle, layout, pass)
+        sweep_needed = true
+      elseif handle.popup_winid then
         hide_popup(handle)
+        sweep_needed = true
       end
     end
   end
@@ -2452,12 +2547,15 @@ function M.update_viewport_popups(bufnr, records, counter_records)
   -- the next viewport update, then collapse duplicate *tracked* popups
   -- (a same-URI sibling buffer, e.g. a codediff view, tracks its own
   -- float for the same record id — close all but one, following focus).
-  -- Coalesced via `schedule_popup_sweeps`: this function runs on every
-  -- CursorMoved/scroll, and both sweeps are global cross-buffer window
-  -- walks — one scheduled run after the burst yields the same final
-  -- popup set. Every popup rendered above is already tracked, so the
+  -- Coalesced via `schedule_popup_sweeps` AND gated on the pass having
+  -- actually rendered or hidden a popup: this function runs on every
+  -- CursorMoved/scroll, both sweeps are global cross-buffer window
+  -- walks, and a pass that touched nothing leaves nothing for a sweep
+  -- to change. Every popup rendered above is already tracked, so the
   -- later sweep can only close untracked/duplicate floats.
-  schedule_popup_sweeps()
+  if sweep_needed then
+    schedule_popup_sweeps()
+  end
 end
 
 --- Hide every popup owned for `bufnr`. Extmarks + handles survive so
@@ -2722,6 +2820,7 @@ end
 function M._reset_for_tests()
   hidden = false
   display_mode = nil
+  display_memo.key, display_memo.map = nil, nil
   close_rail_if_loaded()
   M.clear_all()
 end
