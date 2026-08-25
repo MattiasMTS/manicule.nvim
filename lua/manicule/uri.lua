@@ -13,7 +13,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("manicule.config")
 
 ---Normalised absolute path to Neovim's per-session runtime dir

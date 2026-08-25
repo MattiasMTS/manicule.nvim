@@ -62,7 +62,7 @@ local function shorten(value, max)
 end
 
 local function now_ms()
-  return math.floor((vim.uv or vim.loop).hrtime() / 1000000)
+  return math.floor(vim.uv.hrtime() / 1000000)
 end
 
 local function patterns_key(patterns)
@@ -748,7 +748,7 @@ end
 local function send_chunked(opts, ref, text, chunk_bytes, done)
   local chunks = chunk_text(text, chunk_bytes)
   local total = #chunks
-  local stamp = string.format("%d", (vim.uv or vim.loop).hrtime())
+  local stamp = string.format("%d", vim.uv.hrtime())
   local function buffer_name(idx)
     return "manicule-" .. stamp .. "-" .. idx
   end

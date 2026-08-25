@@ -132,43 +132,35 @@ end
 ---@return manicule.Config
 function M.setup(opts)
   opts = opts or {}
-  vim.validate({
-    opts = { opts, "table" },
-    store = { opts.store, "table", true },
-    sinks = { opts.sinks, "table", true },
-    review = { opts.review, "table", true },
-    ui = { opts.ui, "table", true },
-  })
+  vim.validate("opts", opts, "table")
+  vim.validate("store", opts.store, "table", true)
+  vim.validate("sinks", opts.sinks, "table", true)
+  vim.validate("review", opts.review, "table", true)
+  vim.validate("ui", opts.ui, "table", true)
   if opts.store then
-    vim.validate({
-      ["store.dir"] = { opts.store.dir, "string", true },
-      ["store.format"] = { opts.store.format, "string", true },
-      ["store.branch"] = { opts.store.branch, "boolean", true },
-      ["store.persist_unrooted"] = { opts.store.persist_unrooted, "boolean", true },
-      ["store.canonicalize_symlinks"] = { opts.store.canonicalize_symlinks, "boolean", true },
-      ["store.root_markers"] = { opts.store.root_markers, "table", true },
-      ["store.poll_interval_ms"] = { opts.store.poll_interval_ms, "number", true },
-    })
+    vim.validate("store.dir", opts.store.dir, "string", true)
+    vim.validate("store.format", opts.store.format, "string", true)
+    vim.validate("store.branch", opts.store.branch, "boolean", true)
+    vim.validate("store.persist_unrooted", opts.store.persist_unrooted, "boolean", true)
+    vim.validate("store.canonicalize_symlinks", opts.store.canonicalize_symlinks, "boolean", true)
+    vim.validate("store.root_markers", opts.store.root_markers, "table", true)
+    vim.validate("store.poll_interval_ms", opts.store.poll_interval_ms, "number", true)
     if opts.store.format ~= nil and opts.store.format ~= "mpack" and opts.store.format ~= "json" then
       error(('manicule: store.format must be "mpack" or "json", got %q'):format(tostring(opts.store.format)))
     end
   end
   if opts.sinks then
-    vim.validate({
-      -- Both sinks may be a boolean (enable/disable) or a table of sink
-      -- options; allow both forms.
-      ["sinks.clipboard"] = { opts.sinks.clipboard, { "boolean", "table" }, true },
-      ["sinks.cmux"] = { opts.sinks.cmux, { "boolean", "table" }, true },
-      ["sinks.github"] = { opts.sinks.github, { "boolean", "table" }, true },
-      ["sinks.socket"] = { opts.sinks.socket, { "boolean", "table" }, true },
-    })
+    -- Each sink may be a boolean (enable/disable) or a table of sink
+    -- options; allow both forms.
+    vim.validate("sinks.clipboard", opts.sinks.clipboard, { "boolean", "table" }, true)
+    vim.validate("sinks.cmux", opts.sinks.cmux, { "boolean", "table" }, true)
+    vim.validate("sinks.github", opts.sinks.github, { "boolean", "table" }, true)
+    vim.validate("sinks.socket", opts.sinks.socket, { "boolean", "table" }, true)
   end
   if opts.review then
-    vim.validate({
-      ["review.mode"] = { opts.review.mode, "string", true },
-      ["review.fold_unchanged"] = { opts.review.fold_unchanged, "boolean", true },
-      ["review.context"] = { opts.review.context, "number", true },
-    })
+    vim.validate("review.mode", opts.review.mode, "string", true)
+    vim.validate("review.fold_unchanged", opts.review.fold_unchanged, "boolean", true)
+    vim.validate("review.context", opts.review.context, "number", true)
     if opts.review.mode ~= nil and opts.review.mode ~= "split" and opts.review.mode ~= "unified" then
       error(('manicule: review.mode must be "split" or "unified", got %q'):format(tostring(opts.review.mode)))
     end
@@ -178,19 +170,17 @@ function M.setup(opts)
     end
   end
   if opts.ui then
-    vim.validate({
-      ["ui.width"] = { opts.ui.width, "number", true },
-      ["ui.height"] = { opts.ui.height, "number", true },
-      ["ui.editor_mode"] = { opts.ui.editor_mode, "string", true },
-      ["ui.submit_keys"] = { opts.ui.submit_keys, "table", true },
-      ["ui.cancel_keys"] = { opts.ui.cancel_keys, "table", true },
-      ["ui.opacity"] = { opts.ui.opacity, "number", true },
-      ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
-      ["ui.display"] = { opts.ui.display, "string", true },
-      ["ui.expand"] = { opts.ui.expand, "string", true },
-      ["ui.icons"] = { opts.ui.icons, { "boolean", "string" }, true },
-      ["ui.sink_picker"] = { opts.ui.sink_picker, "function", true },
-    })
+    vim.validate("ui.width", opts.ui.width, "number", true)
+    vim.validate("ui.height", opts.ui.height, "number", true)
+    vim.validate("ui.editor_mode", opts.ui.editor_mode, "string", true)
+    vim.validate("ui.submit_keys", opts.ui.submit_keys, "table", true)
+    vim.validate("ui.cancel_keys", opts.ui.cancel_keys, "table", true)
+    vim.validate("ui.opacity", opts.ui.opacity, "number", true)
+    vim.validate("ui.sticky", opts.ui.sticky, "boolean", true)
+    vim.validate("ui.display", opts.ui.display, "string", true)
+    vim.validate("ui.expand", opts.ui.expand, "string", true)
+    vim.validate("ui.icons", opts.ui.icons, { "boolean", "string" }, true)
+    vim.validate("ui.sink_picker", opts.ui.sink_picker, "function", true)
     local opacity = opts.ui.opacity
     if opacity ~= nil and (opacity ~= opacity or opacity < 0 or opacity > 1) then
       error(("manicule: ui.opacity must be between 0.0 and 1.0, got %s"):format(tostring(opacity)))

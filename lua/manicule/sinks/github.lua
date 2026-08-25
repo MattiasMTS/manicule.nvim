@@ -13,7 +13,7 @@ local helpers = require("manicule.sinks.helpers")
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local VALID_EVENTS = { COMMENT = true, REQUEST_CHANGES = true, APPROVE = true }
 

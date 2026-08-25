@@ -12,14 +12,14 @@ local M = {}
 -- the high-resolution monotonic clock with the pid and wall-clock time
 -- so two near-simultaneous Neovim starts don't share a seed.
 do
-  local hr = (vim.uv or vim.loop).hrtime()
+  local hr = vim.uv.hrtime()
   math.randomseed(hr % 0x7fffffff + vim.fn.getpid() + os.time())
 end
 
 ---Generate a new unique id.
 ---@return string
 function M.new()
-  local hr = (vim.uv or vim.loop).hrtime()
+  local hr = vim.uv.hrtime()
   return string.format("%x-%04x", hr, math.random(0, 0xffff))
 end
 

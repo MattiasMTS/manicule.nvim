@@ -1,3 +1,8 @@
+if vim.fn.has("nvim-0.12") ~= 1 then
+  vim.notify("manicule.nvim requires Neovim >= 0.12", vim.log.levels.ERROR)
+  return
+end
+
 if vim.g.loaded_manicule then
   return
 end
@@ -52,7 +57,7 @@ local completion_cache = {}
 ---@return string[]
 local function cached(key, fn)
   local hit = completion_cache[key]
-  local now = (vim.uv or vim.loop).hrtime() / 1e6
+  local now = vim.uv.hrtime() / 1e6
   if hit and now - hit.at < COMPLETION_CACHE_TTL_MS then
     return hit.items
   end
@@ -67,7 +72,7 @@ end
 ---@param arglead string
 ---@return string[]
 local function position_completer(arglead)
-  local items = cached("positions:" .. tostring((vim.uv or vim.loop).cwd()), function()
+  local items = cached("positions:" .. tostring(vim.uv.cwd()), function()
     local records = require("manicule").list({ _quiet = true })
     local out = {}
     for i = 1, #records do

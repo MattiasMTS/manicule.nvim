@@ -7,7 +7,7 @@
 local M = {}
 
 local registry = {}
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---Create a staging directory that does NOT match the nvim runtime staged-path
 ---pattern (nvim.<user>/<run-id>/<N>/...), so adapter.identify won't refuse
@@ -136,7 +136,7 @@ M.register({
   end,
   resolve = function(fargs, opts)
     local G = require("manicule.review.git")
-    local cwd = opts.cwd or (vim.uv or vim.loop).cwd()
+    local cwd = opts.cwd or vim.uv.cwd()
     local root = G.root(cwd)
     if not root then
       return nil, "manicule: not a git repository and arguments are not directories"
@@ -185,7 +185,7 @@ M.register({
     if vim.fn.executable("gh") ~= 1 then
       return nil, "manicule: pr resolver requires the gh CLI (https://cli.github.com)"
     end
-    local cwd = opts.cwd or (vim.uv or vim.loop).cwd()
+    local cwd = opts.cwd or vim.uv.cwd()
     local root = G.root(cwd)
     if not root then
       return nil, "manicule: not a git repository"

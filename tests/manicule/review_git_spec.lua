@@ -219,7 +219,7 @@ describe("manicule review git plumbing", function()
 
   it("self-heals an archive chunk containing a path absent from the base", function()
     local G = require("manicule.review.git")
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
     local root = H.git_repo(ctx, {
       ["src/a.lua"] = { "return 1" },
       ["src/b.lua"] = { "return 2" },
@@ -243,7 +243,7 @@ describe("manicule review git plumbing", function()
 
   it("stages a baseline symlink blob as a regular file", function()
     local G = require("manicule.review.git")
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
     local root, git = H.git_repo(ctx, { ["target.txt"] = { "target content" } })
     local ok, linked = pcall(uv.fs_symlink, "target.txt", root .. "/link.txt")
     if not ok or not linked then

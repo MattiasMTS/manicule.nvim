@@ -8,7 +8,7 @@ local tmp_root
 local saved_home
 
 local function project_subdir(name)
-  local cwd = vim.loop.cwd() or vim.fn.getcwd()
+  local cwd = vim.uv.cwd() or vim.fn.getcwd()
   local base = vim.fs.normalize(vim.fn.fnamemodify(cwd .. "/" .. name, ":p"))
   vim.fn.mkdir(base, "p")
   return base
@@ -98,7 +98,7 @@ describe("manicule.adapter reverse-map", function()
 
     -- cd into tmp_root so `vim.fs.root(0, ...)` has a chance at the
     -- marker (we also push the project root explicitly via `store`).
-    local prev_cwd = vim.loop.cwd()
+    local prev_cwd = vim.uv.cwd()
     vim.cmd("cd " .. vim.fn.fnameescape(tmp_root))
 
     vim.cmd.edit(vim.fn.fnameescape(staged))
@@ -120,7 +120,7 @@ describe("manicule.adapter reverse-map", function()
     -- Stage a file whose suffix does NOT exist anywhere below the
     -- project root / cwd / HOME.
     local staged = make_staged_file("nonexistent/deep/path/does-not-exist.lua", { "x" })
-    local prev_cwd = vim.loop.cwd()
+    local prev_cwd = vim.uv.cwd()
     vim.cmd("cd " .. vim.fn.fnameescape(tmp_root))
 
     vim.cmd.edit(vim.fn.fnameescape(staged))
@@ -144,7 +144,7 @@ describe("manicule.adapter reverse-map", function()
     vim.fn.writefile({ "b" }, vim.env.HOME .. "/.config/ambig/x.txt")
 
     local staged = make_staged_file(".config/ambig/x.txt", { "c" })
-    local prev_cwd = vim.loop.cwd()
+    local prev_cwd = vim.uv.cwd()
     vim.cmd("cd " .. vim.fn.fnameescape(tmp_root))
 
     vim.cmd.edit(vim.fn.fnameescape(staged))
@@ -241,7 +241,7 @@ describe("manicule M.list adapter-routed project root", function()
     vim.fn.writefile({ "real contents" }, tmp_root .. "/src/feature.lua")
 
     local staged = make_staged_file("src/feature.lua", { "real contents" })
-    local prev_cwd = vim.loop.cwd()
+    local prev_cwd = vim.uv.cwd()
     vim.cmd("cd " .. vim.fn.fnameescape(tmp_root))
 
     -- Open the staged path. From the plugin's perspective the current

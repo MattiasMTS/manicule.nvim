@@ -174,7 +174,7 @@ describe("manicule review session", function()
     vim.cmd("runtime plugin/manicule.lua")
     local root = H.git_repo(ctx, { ["own.lua"] = { "return 1" } })
     vim.fn.writefile({ "return 2" }, root .. "/own.lua")
-    local saved = (vim.uv or vim.loop).cwd()
+    local saved = vim.uv.cwd()
     vim.cmd.cd(root)
     vim.cmd("ManiculeReview HEAD")
     vim.cmd.cd(saved)
@@ -304,7 +304,7 @@ describe("manicule review session", function()
     vim.cmd("runtime plugin/manicule.lua")
     local root = H.git_repo(ctx, { ["cmd.lua"] = { "return 1" } })
     vim.fn.writefile({ "return 2" }, root .. "/cmd.lua")
-    local saved = (vim.uv or vim.loop).cwd()
+    local saved = vim.uv.cwd()
     vim.cmd.cd(root)
 
     vim.cmd("ManiculeReview HEAD")
@@ -346,7 +346,7 @@ describe("manicule review session", function()
 
     local saved_path = vim.env.PATH
     vim.env.PATH = bin .. ":" .. saved_path
-    local saved_cwd = (vim.uv or vim.loop).cwd()
+    local saved_cwd = vim.uv.cwd()
     vim.cmd.cd(root)
 
     local original_select = vim.ui.select
@@ -372,7 +372,7 @@ describe("manicule review session", function()
     local root = H.git_repo(ctx, { ["gone.lua"] = { "return 1" } })
     -- Delete the file from worktree so git resolver stages status=D.
     vim.fn.delete(root .. "/gone.lua")
-    local saved = (vim.uv or vim.loop).cwd()
+    local saved = vim.uv.cwd()
     vim.cmd.cd(root)
 
     vim.cmd("ManiculeReview HEAD")
@@ -727,7 +727,7 @@ describe("manicule review session", function()
     -- Realpath the staged dir: records store canonical uris, and the
     -- macOS TMPDIR symlink (/var -> /private/var) would otherwise make
     -- the pair uri miss the record uri.
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
     local left_dir = uv.fs_realpath(ctx.artifact_root .. "/left") or (ctx.artifact_root .. "/left")
     local left = left_dir .. "/gone.lua"
     vim.fn.writefile({ "return 0 -- deleted" }, left)
@@ -1097,7 +1097,7 @@ describe("manicule review session", function()
     -- comment would be silently dropped ("review has no comments to send").
     local elsewhere = ctx.artifact_root .. "/elsewhere"
     vim.fn.mkdir(elsewhere, "p")
-    local saved = (vim.uv or vim.loop).cwd()
+    local saved = vim.uv.cwd()
     vim.cmd.enew()
     vim.cmd.cd(elsewhere)
 

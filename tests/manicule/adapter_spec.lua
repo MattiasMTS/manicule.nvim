@@ -13,7 +13,7 @@ local tmp_root
 ---lives under `/var/folders/...`, which would make a working-tree
 ---buffer look like a reference side to the heuristic.
 local function project_subdir(name)
-  local base = vim.fs.normalize(vim.fn.fnamemodify(vim.loop.cwd() .. "/" .. name, ":p"))
+  local base = vim.fs.normalize(vim.fn.fnamemodify(vim.uv.cwd() .. "/" .. name, ":p"))
   vim.fn.mkdir(base, "p")
   return base
 end

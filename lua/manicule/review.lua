@@ -14,7 +14,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@class manicule.ReviewSession
 ---@field files {left: string, right: string, status: string, path: string}[]

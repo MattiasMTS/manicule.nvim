@@ -19,10 +19,12 @@ a review batch.
 - Four comment display modes — end-of-line virtual text (default), floating
   popups, inline boxes, or hidden anchors — cycled live with
   `:ManiculeDisplay`.
+- Diff-review sessions (`:ManiculeReview`) over uncommitted changes, a git
+  ref, a GitHub PR, or two directories.
 - Quickfix list for scanning, jumping, editing, and deleting comments.
 - Project-scoped and session-scoped persistence.
-- Pluggable sinks for sending comments elsewhere.
-- Built-in clipboard sink and cmux integration.
+- Pluggable sinks for sending comments elsewhere; clipboard, cmux, and
+  GitHub sinks are built in.
 - Native `User` autocmd events for lifecycle hooks.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the deeper implementation notes and
@@ -30,14 +32,14 @@ event payloads.
 
 ## Requirements
 
-Neovim >= 0.10.
-
-The default project store uses the local SQLite library through LuaJIT FFI.
-Most Neovim builds on macOS and Linux can load `libsqlite3` already; run
-`:checkhealth manicule` to confirm.
+- Neovim >= 0.12.
+- macOS or Linux (`git`, `tar`, and unix sockets at runtime); Windows is
+  untested and unsupported.
+- The default project store uses the local SQLite library through LuaJIT
+  FFI; most Neovim builds can load `libsqlite3` already.
 
 Run `:checkhealth manicule` after setup to verify the store directory, SQLite
-support, Neovim API support, clipboard support, and registered sinks.
+support, clipboard support, and registered sinks.
 
 ## Install
 
@@ -85,64 +87,39 @@ records to loaded buffers.
 :ManiculeSend [sink]    " send comments to a sink
 ```
 
-`:ManiculeAdd` opens a small markdown buffer in insert mode. Press `<CR>` to
-insert a newline, `<Esc>` then `<CR>` to submit, or `q` in normal mode to
-cancel. Moving focus out of the floating editor, including clicking back into
-the main buffer, also cancels and discards the draft.
+`:ManiculeAdd` opens a small markdown buffer in insert mode. `<Esc>` then
+`<CR>` submits, `q` in normal mode cancels, and moving focus out of the
+floating editor discards the draft.
 
-Default keymaps:
+Default keymaps (set `vim.g.manicule_no_default_keymaps = 1` before loading
+to opt out):
 
-- `gca` edits the comment at or covering the cursor.
-- `gcd` deletes the comment at or covering the cursor.
-- `]m` jumps to the next comment in the current buffer.
-- `[m` jumps to the previous comment in the current buffer.
+- `gca` / `gcd` edit / delete the comment at or covering the cursor.
+- `]m` / `[m` jump to the next / previous comment in the current buffer.
 
-Set `vim.g.manicule_no_default_keymaps = 1` before loading the plugin to opt
-out. Core actions are exposed as `<Plug>` maps so you can choose your own
-leader bindings:
-
-```lua
-vim.keymap.set({ "n", "x" }, "<leader>ca", "<Plug>(manicule-add)")
-vim.keymap.set("n", "<leader>cl", "<Plug>(manicule-list)")
-vim.keymap.set("n", "]c", "<Plug>(manicule-next)")
-vim.keymap.set("n", "[c", "<Plug>(manicule-prev)")
-```
+Core actions are also exposed as `<Plug>` maps for your own bindings:
+`(manicule-add)`, `(manicule-list)`, `(manicule-next)`, `(manicule-prev)`,
+`(manicule-edit)`, `(manicule-delete)`, `(manicule-toggle)`,
+`(manicule-display-cycle)`, `(manicule-review-next)`,
+`(manicule-review-prev)`, and `(manicule-review-diff-mode)`.
 
 ### Display modes
 
-Comments paint in one of four display modes:
-
-- `eol` — a collapsed end-of-line marker per comment; the full popup expands
-  while the cursor sits on the line.
-- `float` — anchored floating popups, gated by the viewport (or always shown
-  with `ui.sticky = true`).
+- `eol` (default) — a collapsed end-of-line marker per comment showing the
+  short id and first body line; the full popup expands while the cursor
+  sits on the line.
+- `float` — anchored floating popups with occlusion-aware placement, gated
+  by the viewport (or always shown with `ui.sticky = true`).
 - `inline` — a bordered virtual-line box below each commented line; code is
   pushed down, never covered.
 - `hidden` — anchor extmarks and line-number tint only.
 
-`eol` is the default because floating popups cover code on long lines.
 `:ManiculeDisplay <mode>` switches live; a bare `:ManiculeDisplay` cycles
 `float → eol → inline → hidden`. The startup mode comes from `ui.display`;
-runtime switches are in-memory and reset when Neovim restarts. No key is
-bound by default — map `<Plug>(manicule-display-cycle)` to cycle from a
-keymap.
+runtime switches are in-memory and reset when Neovim restarts. Map
+`<Plug>(manicule-display-cycle)` to cycle from a keymap.
 
-The collapsed `eol` marker shows the comment's short id and first body
-line, truncated to the space left on the line (with an `n/m` position when
-several comments share the line, and degrading to `● c<short-id>` when
-almost no space is left):
-
-```
-local sum = 0                     ● c4f2a1c · handle the empty items ca…
-```
-
-The leading `●` is an origin badge: comments imported from a GitHub PR
-show a GitHub badge instead (`[gh]`, or a Nerd Font glyph when icons are
-on — see `ui.icons`), and the same badge prefixes the author line inside
-the comment card.
-
-Moving the cursor onto the line expands the real popup; moving off
-collapses it again:
+The expanded comment card (shared by `eol` and `float`):
 
 ```
 local sum = 0                      ┌ c4f2a1c 1/2 ───────────────────┐
@@ -152,46 +129,12 @@ end                                │ before summing                 │
                                    └────────────────────────────────┘
 ```
 
-An `inline` box shows the whole comment below the anchor line (long body
-lines word-wrap instead of truncating):
-
-```
-local sum = 0
- ┌ c4f2a1c 1/2 ─────────────────────────┐
- │ handle the empty items case          │
- │ Aug 20 14:05 · edit gca | delete gcd │
- └──────────────────────────────────────┘
-for _, item in ipairs(items) do
-```
-
-`float` placement (which `eol`'s expanded popups reuse) is
-occlusion-aware: the right-margin spot is used only when it would rest on
-empty cells, otherwise the popup drops below (or above) the anchor line
-instead of covering code.
-
-`ui.expand` chooses where `eol`'s cursor expansion renders. The default
-`"float"` keeps the popups above; `"rail"` renders the same cards into a
-comments rail — a real `vertical botright` window on the far right
-(width 30–46 columns), so cards can never cover code and the occlusion
-logic becomes irrelevant. The rail opens when the cursor enters a
-commented line, aligns the card stack with the anchor line's screen row,
-stays open (empty) while the cursor is on uncommented lines, and closes
-when the display mode leaves `eol`, the buffer's comments disappear, or
-its code window closes. `ui.expand` is read when the expansion runs, but
-there is no runtime command in v1 — set it in `setup()`.
-
-```
-local sum = 0            ● c4f2a1c · handle… │ ┌ c4f2a1c 1/1 ──────┐
-for _, i in ipairs(x) do                     │ │ ▍ "local sum = 0" │
-end                                          │ │ mts · 2h ago      │
-                                             │ │                   │
-                                             │ │ handle the empty  │
-                                             │ │ items case        │
-                                             │ └───────────────────┘
-```
-
-`gca`/`gcd` (and the `<Plug>` edit/delete maps) work from the commented
-line in every mode.
+A leading badge marks each comment's origin: `●` for local comments,
+`[gh]` (or a Nerd Font glyph — see `ui.icons`) for comments imported from
+a GitHub PR. `ui.expand = "rail"` renders `eol`'s expanded cards into a
+real side window on the far right instead of popups, so cards can never
+cover code (config-at-setup; no runtime command in v1). `gca`/`gcd` work
+from the commented line in every mode.
 
 ## Quickfix
 
@@ -222,76 +165,43 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
     :ManiculeReviewStop          " close the session
     :ManiculeReviewDiffMode      " toggle split <-> unified (or name one)
 
-### Split and unified diffs
-
-`review.mode` picks how a pair renders. `:ManiculeReviewDiffMode` flips
-between the two mid-session and re-renders the file on screen.
-
-`split` (default) is a side-by-side `:diffsplit` pair: read-only baseline
-on the left, worktree file on the right.
-
-`unified` shows one window — the worktree file — with the diff painted
-onto it. Added lines are highlighted, removed lines appear as virtual
-text where they used to sit, and unchanged regions fold away:
-
-```
-  4   local sum = 0
-  5   for _, item in ipairs(items) do
-    ▏    sum = sum + item.price          <- removed (virtual line, no number)
-  6     sum = sum + (item.price * item.qty)   <- added (highlighted)
-  7   end
- 10   ⋯ 31 unchanged lines ⋯
-```
-
-Unified mode paints the *real* file rather than building a synthetic diff
-buffer, so comments anchor to true worktree line numbers with no
-translation layer — `:ManiculeSend github` posts them at the same lines it
-would from split mode. The trade-off is that removed lines are virtual and
-therefore not commentable, which matches split mode, where the baseline
-side is read-only.
-
-`]h` / `[h` jump between hunks (wrapping), and folds behave like any
-other: `za` toggles, `zR` opens them all. Set `review.fold_unchanged =
-false` to skip folding entirely, or `review.context` to change how much
-code stays visible around each hunk.
+`review.mode` picks how a pair renders; `:ManiculeReviewDiffMode` flips it
+mid-session. `split` (default) is a side-by-side `:diffsplit` pair.
+`unified` shows one window — the worktree file — with the diff painted on:
+added lines highlighted, removed lines drawn as virtual text where they
+used to sit, and unchanged regions folded away (tune with
+`review.fold_unchanged` and `review.context`; `za`/`zR` behave as usual).
+Comments anchor to true worktree line numbers in both modes, so
+`:ManiculeSend github` posts them at the same lines either way; removed
+lines and the read-only baseline side are not commentable. `]h` / `[h`
+jump between hunks (wrapping).
 
 A bottom panel opens automatically: a plain `manicule://panel` buffer
-(filetype `manicule-panel`) in a fixed-height split, so `j`/`k`, search,
-and every other motion behave like any normal buffer — and the global
-quickfix list stays free for your own `:grep`/diagnostics during the
-review. Each line shows one file with its status and a live comment
-count (files get colored filetype icons when an icon provider is
-installed — see `ui.icons`), and the pair currently on screen is marked
-with a `▸`, a highlighted line (`ManiculePanelCurrent`), and a bold
-filename.
+(filetype `manicule-panel`) in a fixed-height split, so the global
+quickfix list stays free during the review. Each line shows one file with
+its status and a live comment count (colored filetype icons when an icon
+provider is installed — see `ui.icons`), and the pair on screen is marked
+with `▸`, a highlighted line, and a bold filename.
 
-Panel keymaps (buffer-local): `<Tab>` toggles between files view and
-comments view. `<CR>` on a commented file drills into a comments view
-scoped to that file (`<CR>` jumps to a comment, `dd` deletes, `ce`
-edits, `u`/`<C-r>` undo/redo a deletion, `<Esc>` goes back to the file
-list); `<CR>` on a file without comments switches the diff to that
-pair, and `o` always opens the pair regardless of comment count. From a
-scoped comments view `<Tab>` widens to all session comments.
-`:ManiculeToggle` shows/hides the panel during a review (the session
-and panel view are preserved). Running `:ManiculeReview pr` with no
-number opens a picker over the repository's open PRs.
+Panel keymaps (buffer-local): `<CR>` on a commented file drills into a
+comments view scoped to that file (`<CR>` jumps to a comment, `dd`
+deletes, `ce` edits, `u`/`<C-r>` undo/redo a deletion, `<Esc>` goes
+back); `<CR>` on a file without comments switches the diff to that pair,
+and `o` always opens the pair. `<Tab>` toggles between files view and
+comments view (from a scoped view it widens to all session comments).
+`:ManiculeToggle` shows/hides the panel during a review. Running
+`:ManiculeReview pr` with no number opens a picker over the repository's
+open PRs.
 
-When you review a PR with its head checked out (`:ManiculeReview pr 123`
-on the PR branch), existing GitHub review comments are imported as
-manicule records and render inline during the review. Imported comments
-are read-only-ish: they live in the normal project store, so you can edit
-or delete them locally, but those changes never sync back to GitHub. They
-are also excluded from `:ManiculeReviewFinish` and the `github` sink, so
-GitHub's own comments are never echoed back as a new review; re-running
-`:ManiculeReview pr N` never duplicates them. When the PR head is not
-checked out (both sides staged from temp files), the import is skipped.
-
-Imported comments support two GitHub interactions from the panel's
-comments view: `r` replies to the comment's thread — it opens the normal
-comment editor and stores the reply as a regular local record that the
-next `github` send posts to the thread (instead of the review payload) —
-and `gr` toggles the thread's resolved state on GitHub directly.
-GitHub-resolved threads are prefixed with `✓` in the comments view.
+When you review a PR with its head checked out, existing GitHub review
+comments are imported as manicule records and render inline. They can be
+edited or deleted locally (changes never sync back to GitHub) and are
+excluded from `:ManiculeReviewFinish` and the `github` sink, so GitHub's
+own comments are never echoed back as a new review; re-running
+`:ManiculeReview pr N` never duplicates them. In the panel's comments
+view, `r` replies to an imported comment's thread (the reply is stored
+locally and posted by the next `github` send) and `gr` toggles the
+thread's resolved state on GitHub; resolved threads are prefixed with `✓`.
 
 External tools can drive a review session by writing a JSON job file and
 calling `require("manicule.review").start_from_job(path)`; comments return
@@ -345,38 +255,24 @@ require("manicule").setup({
 })
 ```
 
-`ui.opacity` is fractional float transparency: `0` is opaque, `0.5` is
-half transparent, `0.99` is 99% transparent, and `1` is fully transparent.
-
 `ui.icons` controls icon rendering: `"auto"` (default) turns icons on only
-when an icon provider —
-[mini.icons](https://github.com/echasnovski/mini.icons) or
-[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) — is
+when [mini.icons](https://github.com/echasnovski/mini.icons) or
+[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) is
 installed (both are optional; neither is a dependency), `true` forces the
-Nerd Font badges on without a provider (the review panel's filetype icons
-still need one), and `false` keeps everything plain text (`[gh]`, `●`,
-`✓`).
+Nerd Font badges on without a provider, and `false` keeps everything plain
+text (`[gh]`, `●`, `✓`).
 
 ## Storage
 
-Project comments are stored in one SQLite database per project root. The
-database uses WAL mode and keeps both a current `records` projection and an
-append-only `events` log, so separate Neovim sessions in the same project can
-observe each other's changes without rewriting one whole store file.
-
-Session comments share a `session.<format>` file for unrooted or special
-buffers. Stores live under `store.dir`; by default that is:
+Project comments are stored in one SQLite database per project root (WAL
+mode, a current `records` projection plus an append-only `events` log), so
+separate Neovim sessions in the same project observe each other's changes.
+Session comments for unrooted or special buffers share a `session.<format>`
+file. Stores live under `store.dir`; by default that is:
 
 ```vim
 :echo stdpath("state") . "/manicule/"
 ```
-
-The session file schema is:
-
-```lua
-{ version = 1, records = { ... } }
-```
-
 
 ## Sinks
 
@@ -385,34 +281,21 @@ Sinks receive comment batches from `:ManiculeSend`.
 Built-ins:
 
 - `clipboard` copies formatted comments to the `+` register.
-- `cmux` sends a markdown review batch to a cmux coding-agent surface and keeps
-  comments in Manicule by default so you can verify fixes before resolving them.
-- `github` posts the batch as a pull-request review via the `gh` CLI (options:
-  `event`, `pre_text`, `clear_on_success`; PR taken from `ctx.pr` or the
-  current branch). `:ManiculeSend github [comment|approve|request-changes]`
-  picks the review verdict for that send, overriding the configured `event`.
-  Records created with the review panel's `r` reply action are posted as
-  thread replies instead of review comments.
+- `cmux` sends a markdown review batch to a cmux coding-agent surface
+  (Claude Code, Codex, Amp, and Pi are discovered through cmux metadata)
+  and keeps comments in Manicule by default so you can verify fixes before
+  resolving them. Pasting and submission behavior is tuned with the `cmux`
+  options shown in the configuration example above.
+- `github` posts the batch as a pull-request review via the `gh` CLI
+  (options: `event`, `pre_text`, `clear_on_success`; PR taken from `ctx.pr`
+  or the current branch). `:ManiculeSend github
+  [comment|approve|request-changes]` picks the review verdict for that
+  send, overriding the configured `event`. Records created with the review
+  panel's `r` reply action are posted as thread replies instead of review
+  comments.
 
-`cmux.enabled` is boolean. When enabled, the integration registers only when a
-cmux workspace and usable cmux executable are available. Agent discovery
-supports Claude Code, Codex, Amp, and Pi through cmux metadata, titles, process
-commands, and terminal contents.
-`cmux.auto_submit` controls whether Manicule presses Enter after pasting the
-review into the agent prompt. Set it to `false` if you want to inspect or edit
-the prompt manually before submission. `cmux.submit_delay_ms` adds a delay
-before that Enter key (default 120ms); values around 100-250ms can help large
-pasted prompts settle before submission.
-Large reviews are automatically split into chunks (`cmux.paste_chunk_bytes`,
-default 1024) with a short delay between them (`cmux.paste_chunk_delay_ms`,
-default 80ms) to avoid the receiving terminal dropping the middle of the
-payload.
-Set `cmux.clear_on_success = true` if you want a successful cmux handoff to
-delete the sent comments immediately.
-The bundled text sinks, currently `clipboard` and `cmux`, also accept
-`pre_text` and `post_text` strings. These are inserted before and after the
-formatted comments while Manicule still owns comment IDs and file/range
-formatting.
+The bundled text sinks (`clipboard`, `cmux`) also accept `pre_text` and
+`post_text` strings inserted before and after the formatted comments.
 
 Register a custom sink:
 

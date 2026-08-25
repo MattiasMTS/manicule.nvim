@@ -1,5 +1,5 @@
 local H = {}
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local function unique_name(prefix)
   return ("%s-%d-%d"):format(prefix, os.time(), math.random(1000000))
 end

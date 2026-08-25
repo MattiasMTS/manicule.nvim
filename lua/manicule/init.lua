@@ -28,7 +28,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local sync_timer
 
 local delete_undo_stack = {} -- LIFO stack of pre-delete record snapshots

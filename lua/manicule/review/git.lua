@@ -5,7 +5,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@param argv string[]
 ---@param opts? {cwd?: string}

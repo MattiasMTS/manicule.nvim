@@ -1,6 +1,6 @@
 #!/usr/bin/env -S nvim --clean --headless -l
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local project = uv.cwd()
 vim.opt.runtimepath:prepend(project)
 package.path = table.concat({ project .. "/lua/?.lua", project .. "/lua/?/init.lua", package.path }, ";")

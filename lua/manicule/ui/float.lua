@@ -88,7 +88,7 @@ end
 
 ---Attach title/footer to a win_config table. Does nothing for the
 ---"none" border. Both fields exist on every supported Neovim (floor is
----0.10: title since 0.9, footer since 0.10) — no version checks.
+---0.12; title/footer landed long before) — no version checks.
 ---@param win_config table
 ---@param border any
 ---@param title string?

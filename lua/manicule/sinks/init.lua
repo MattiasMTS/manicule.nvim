@@ -94,20 +94,18 @@ end
 ---                               For sinks that only work with a caller-supplied
 ---                               ctx (e.g. socket). default: false.
 function M.register(spec)
-  vim.validate({
-    name = { spec.name, "string" },
-    send = { spec.send, "function" },
-    type = { spec.type, "string", true },
-    label = { spec.label, "string", true },
-    description = { spec.description, "string", true },
-    pre_text = { spec.pre_text, "string", true },
-    post_text = { spec.post_text, "string", true },
-    format = { spec.format, "function", true },
-    validate = { spec.validate, "function", true },
-    health = { spec.health, "function", true },
-    clear_on_success = { spec.clear_on_success, "boolean", true },
-    hidden = { spec.hidden, "boolean", true },
-  })
+  vim.validate("name", spec.name, "string")
+  vim.validate("send", spec.send, "function")
+  vim.validate("type", spec.type, "string", true)
+  vim.validate("label", spec.label, "string", true)
+  vim.validate("description", spec.description, "string", true)
+  vim.validate("pre_text", spec.pre_text, "string", true)
+  vim.validate("post_text", spec.post_text, "string", true)
+  vim.validate("format", spec.format, "function", true)
+  vim.validate("validate", spec.validate, "function", true)
+  vim.validate("health", spec.health, "function", true)
+  vim.validate("clear_on_success", spec.clear_on_success, "boolean", true)
+  vim.validate("hidden", spec.hidden, "boolean", true)
   spec.type = spec.type or "sink"
   sinks[spec.name] = spec
 end

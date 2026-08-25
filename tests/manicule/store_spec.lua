@@ -38,7 +38,7 @@ describe("manicule.store session scope", function()
 
   it("session_put then session_save lands records on disk and reloads", function()
     local store = require("manicule.store")
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
 
     local record = {
       id = "abc123",
@@ -174,7 +174,7 @@ describe("manicule.store session scope", function()
 
   it("flush_all flushes both caches", function()
     local store = require("manicule.store")
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
     store.put(tmp_root, {
       id = "p1",
       uri = "file://" .. tmp_root .. "/a.lua",
@@ -212,7 +212,7 @@ describe("manicule.store session scope", function()
     local info = store.sqlite_info(tmp_root)
     assert.is_true(info.available)
     assert.are.equal("wal", info.journal_mode)
-    assert.is_truthy((vim.uv or vim.loop).fs_stat(store.path(tmp_root)))
+    assert.is_truthy(vim.uv.fs_stat(store.path(tmp_root)))
   end)
 
   it("syncs project records written by another store client", function()

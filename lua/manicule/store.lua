@@ -27,7 +27,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("manicule.config")
 
 -- Seed the RNG once at module load so `client_id`'s random suffix is not
@@ -204,25 +204,6 @@ function M.schema_version()
   return STORE_VERSION
 end
 
----@param value any
----@return boolean
-local function is_list(value)
-  if type(value) ~= "table" then
-    return false
-  end
-  if vim.islist then
-    return vim.islist(value)
-  end
-  local count = 0
-  for key, _ in pairs(value) do
-    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
-      return false
-    end
-    count = count + 1
-  end
-  return count == #value
-end
-
 ---Encode records per the configured format as a versioned envelope.
 ---@param records table[]
 ---@return string|nil data, string? err
@@ -280,7 +261,7 @@ local function decode(data, path)
   end
 
   local records = decoded.records
-  if not is_list(records) then
+  if not vim.islist(records) then
     vim.notify(("manicule: unrecognised records shape at %s; starting fresh"):format(path), vim.log.levels.WARN)
     return {}
   end

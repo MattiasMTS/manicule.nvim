@@ -2,7 +2,7 @@
 -- realpath memo's rename invalidation) and ephemeral-buffer URIs.
 
 local H = require("helpers")
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local ctx
 

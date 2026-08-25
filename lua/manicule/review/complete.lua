@@ -6,7 +6,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local CACHE_TTL_MS = 10 * 1000
 

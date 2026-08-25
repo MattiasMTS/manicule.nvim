@@ -9,6 +9,13 @@ The plugin is local-first. There is no hosted service or network broker.
 Project comments use a local SQLite database in WAL mode; session comments
 for unrooted and special buffers use a small file store under Neovim state.
 
+## Platform
+
+Neovim >= 0.12 (enforced at plugin load and reported by
+`:checkhealth manicule`). The runtime leans on unix domain sockets (socket
+sink), `tar` (review baseline staging), and `git` (review resolvers), so
+macOS and Linux are supported; Windows is untested and unsupported.
+
 ## Design Principles
 
 - URI identity is the source of truth. Buffers, quickfix entries, and sinks

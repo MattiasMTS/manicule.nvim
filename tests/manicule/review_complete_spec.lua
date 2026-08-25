@@ -24,7 +24,7 @@ describe("manicule review completion", function()
 
   before_each(function()
     ctx = H.setup()
-    saved_cwd = (vim.uv or vim.loop).cwd()
+    saved_cwd = vim.uv.cwd()
     saved_path = vim.env.PATH
     require("manicule.review.complete")._reset_for_tests()
   end)

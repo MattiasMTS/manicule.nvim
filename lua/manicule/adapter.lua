@@ -127,7 +127,7 @@ end
 local function reverse_map_temp_path(abs)
   local config = require("manicule.config")
   local uri_mod = require("manicule.uri")
-  local uv = vim.uv or vim.loop
+  local uv = vim.uv
 
   local suffix = uri_mod.nvim_runtime_staged_suffix(abs)
   if not suffix or suffix == "" or not suffix:find("/", 1, true) then

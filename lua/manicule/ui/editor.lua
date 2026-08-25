@@ -293,7 +293,7 @@ function M.open(opts, cb)
     move_cursor_to_end(winid, opts.default)
   end
 
-  local editor_id = tostring((vim.uv or vim.loop).hrtime())
+  local editor_id = tostring(vim.uv.hrtime())
   local closed = false
   local result_sent = false
   -- Records whether an EXPLICIT submit/cancel chose the focus behavior.
