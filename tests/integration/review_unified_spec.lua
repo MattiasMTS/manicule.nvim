@@ -35,7 +35,8 @@ end
 
 describe("manicule review unified mode", function()
   before_each(function()
-    ctx = H.setup({ review = { mode = "unified" } })
+    -- fold_unchanged defaults to false; the fold tests below opt in.
+    ctx = H.setup({ review = { mode = "unified", fold_unchanged = true } })
   end)
   after_each(function()
     pcall(function()
@@ -159,6 +160,54 @@ describe("manicule review unified mode", function()
 
     assert.are_not.equal("expr", vim.wo.foldmethod)
     assert.are.equal(-1, vim.fn.foldclosed(20))
+  end)
+
+  it("does not fold by default (fold_unchanged defaults to false)", function()
+    require("manicule").setup({
+      store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
+      review = { mode = "unified" },
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "unified" }))
+    vim.api.nvim_set_current_win(file_window())
+
+    assert.are_not.equal("expr", vim.wo.foldmethod)
+    assert.are.equal(-1, vim.fn.foldclosed(20))
+  end)
+
+  it("split mode drops the native diff folds by default", function()
+    require("manicule").setup({
+      store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
+      review = { mode = "split" },
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "split" }))
+
+    local diff_wins = 0
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.wo[winid].diff then
+        diff_wins = diff_wins + 1
+        assert.is_false(vim.wo[winid].foldenable)
+      end
+    end
+    assert.are.equal(2, diff_wins)
+  end)
+
+  it("split mode keeps native diff folds when fold_unchanged is on", function()
+    require("manicule").setup({
+      store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
+      review = { mode = "split", fold_unchanged = true },
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pair(), label = "split" }))
+
+    local folding_wins = 0
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.wo[winid].diff and vim.wo[winid].foldenable then
+        folding_wins = folding_wins + 1
+      end
+    end
+    assert.are.equal(2, folding_wins)
   end)
 
   it("maps ]h / [h to walk hunks and unmaps them on stop", function()

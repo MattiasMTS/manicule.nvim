@@ -237,7 +237,7 @@ require("manicule").setup({
   },
   review = {
     mode = "split", -- "split" (side-by-side) or "unified" (inline)
-    fold_unchanged = true, -- unified: collapse everything outside a hunk
+    fold_unchanged = false, -- collapse unchanged code into folds while reviewing
     context = 3, -- unified: lines kept visible around each hunk
   },
   ui = {

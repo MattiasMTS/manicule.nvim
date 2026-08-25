@@ -28,7 +28,7 @@ local M = {}
 
 ---@class manicule.ReviewConfig
 ---@field mode "split"|"unified" Diff rendering for `:ManiculeReview`. "split" opens a side-by-side `:diffsplit` pair; "unified" paints the diff inline on the worktree buffer.
----@field fold_unchanged boolean Unified mode only: collapse unchanged regions into folds.
+---@field fold_unchanged boolean Collapse unchanged regions into folds (default false; split mode gets nofoldenable when off).
 ---@field context integer Unified mode only: lines of context kept around each hunk (and the fold's minimum size).
 
 ---@class manicule.SinksConfig
@@ -80,8 +80,10 @@ M.defaults = {
     --             cost is that removed lines are not commentable
     --             (same as the read-only baseline side in split mode).
     mode = "split",
-    -- Unified mode: collapse everything outside a hunk into a fold.
-    fold_unchanged = true,
+    -- Collapse unchanged code into folds while reviewing. Off by default:
+    -- the full file stays visible; opt in for a hunks-only view. In split
+    -- mode `false` disables the native diff folds in both windows.
+    fold_unchanged = false,
     -- Unified mode: context lines kept around each hunk.
     context = 3,
   },

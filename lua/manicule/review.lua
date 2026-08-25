@@ -173,10 +173,17 @@ function M.open(index)
   vim.cmd.edit(vim.fn.fnameescape(pair.right))
   local right_buf = vim.api.nvim_get_current_buf()
   vim.cmd("leftabove vertical diffsplit " .. vim.fn.fnameescape(pair.left))
+  local left_win = vim.api.nvim_get_current_win()
   protect_left(vim.api.nvim_get_current_buf())
   map_navigation(vim.api.nvim_get_current_buf())
   map_navigation(right_buf)
   vim.cmd.wincmd("p") -- focus back on the right / worktree side
+  if cfg.fold_unchanged == false then
+    -- Native :diffsplit folds unchanged regions (foldmethod=diff); the
+    -- default is the whole file visible, so drop the folds in both sides.
+    vim.wo[left_win].foldenable = false
+    vim.wo[vim.api.nvim_get_current_win()].foldenable = false
+  end
   -- Keep the panel's files view pointing at the pair now on screen.
   require("manicule.review.panel").sync_index(index)
 end
