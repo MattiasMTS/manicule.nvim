@@ -72,6 +72,10 @@ function H.teardown(ctx)
   pcall(vim.cmd, "silent! tabonly")
   pcall(vim.cmd, "silent! only")
   pcall(vim.cmd, "silent! %bwipeout!")
+  -- Free all quickfix lists so a spec that populates one (e.g. the
+  -- "user's quickfix is untouched" coverage) can't leak it into a later
+  -- spec's "manicule never creates a qf list" assertion.
+  pcall(vim.fn.setqflist, {}, "f")
   pcall(function()
     require("manicule")._stop_sync_timer_for_tests()
   end)
