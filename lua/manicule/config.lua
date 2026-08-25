@@ -13,6 +13,7 @@ local M = {}
 ---@field opacity number Floating-window transparency (0.0 = opaque, 1.0 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
 ---@field display "float"|"eol"|"inline"|"hidden" Startup comment display mode. "float" anchored popups, "eol" end-of-line virtual text expanding to the popup on the cursor line, "inline" bordered virtual-line boxes below commented lines (code pushed down, never covered), "hidden" anchors only. Runtime changes via `:ManiculeDisplay`.
+---@field icons boolean|"auto" Filetype icons + Nerd Font badges in review UI. "auto" (default) enables them iff an icon provider (mini.icons or nvim-web-devicons) is loadable; `true` forces Nerd Font glyphs even without a provider; `false` disables them.
 ---@field sink_picker? manicule.SinkPicker Custom picker for choosing a send sink
 
 ---@class manicule.StoreConfig
@@ -100,6 +101,11 @@ M.defaults = {
     -- cover code on long lines; this is only the startup mode — cycle
     -- live with `:ManiculeDisplay`.
     display = "eol",
+    -- Filetype icons and Nerd Font badges in the review UI. "auto"
+    -- enables them iff mini.icons or nvim-web-devicons is loadable;
+    -- `true` forces glyphs on (your font has them even without a
+    -- provider plugin); `false` keeps everything plain text.
+    icons = "auto",
   },
 }
 
@@ -173,6 +179,7 @@ function M.setup(opts)
       ["ui.opacity"] = { opts.ui.opacity, "number", true },
       ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
       ["ui.display"] = { opts.ui.display, "string", true },
+      ["ui.icons"] = { opts.ui.icons, { "boolean", "string" }, true },
       ["ui.sink_picker"] = { opts.ui.sink_picker, "function", true },
     })
     local opacity = opts.ui.opacity
@@ -182,6 +189,10 @@ function M.setup(opts)
     local display = opts.ui.display
     if display ~= nil and display ~= "float" and display ~= "eol" and display ~= "inline" and display ~= "hidden" then
       error(('manicule: ui.display must be "float", "eol", "inline", or "hidden", got %q'):format(tostring(display)))
+    end
+    local icons = opts.ui.icons
+    if icons ~= nil and icons ~= true and icons ~= false and icons ~= "auto" then
+      error(('manicule: ui.icons must be "auto", true, or false, got %q'):format(tostring(icons)))
     end
   end
   -- `tbl_deep_extend("force", …)` replaces list/array values wholesale

@@ -44,12 +44,24 @@ local function build_files_items()
     counts[record.uri] = (counts[record.uri] or 0) + 1
   end
 
+  local icons = require("manicule.ui.icons")
+  local with_icons = icons.enabled()
+
   local items = {}
   for idx, pair in ipairs(state.files) do
+    local text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[state.uris[idx]] or 0)
+    if with_icons then
+      -- Quickfix item text is plain — the provider's highlight group
+      -- can't ride along per item without rebuilding the panel's
+      -- rendering, so the glyph goes in uncolored. One glyph + one
+      -- space (a blank cell when the provider yields nothing) keeps
+      -- the column aligned.
+      text = (icons.file_icon(pair.path) or " ") .. " " .. text
+    end
     table.insert(items, {
       filename = review.pair_path(pair),
       lnum = 1,
-      text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[state.uris[idx]] or 0),
+      text = text,
       -- Store index for <CR> mapping
       user_data = { pair_index = idx },
     })

@@ -88,3 +88,94 @@ describe("manicule review panel with a location list open", function()
     assert.is_false(vim.api.nvim_win_is_valid(qf_win), "toggle left the panel window open")
   end)
 end)
+
+describe("manicule review panel file icons", function()
+  local function stub_mini_icons(icon, hl)
+    package.preload["mini.icons"] = function()
+      return {
+        get = function(_category, _name)
+          return icon or "@", hl or "MiniIconsAzure", false
+        end,
+      }
+    end
+  end
+
+  local function clear_provider_stubs()
+    package.preload["mini.icons"] = nil
+    package.loaded["mini.icons"] = nil
+    package.preload["nvim-web-devicons"] = nil
+    package.loaded["nvim-web-devicons"] = nil
+  end
+
+  before_each(function()
+    clear_provider_stubs()
+    ctx = H.setup()
+    require("manicule.ui.icons")._reset()
+  end)
+
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    clear_provider_stubs()
+    pcall(function()
+      require("manicule.ui.icons")._reset()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  local function panel_items()
+    local info = vim.fn.getqflist({ title = 1, items = 1 })
+    assert.are.equal(1, info.title:find("manicule-review", 1, true), "current qf list is not the panel: " .. info.title)
+    return info.items
+  end
+
+  it("prepends the filetype icon to files-view items when icons are enabled", function()
+    -- ui.icons defaults to "auto"; the stubbed provider makes it live.
+    stub_mini_icons("@")
+    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "panel-icons" }))
+    local items = panel_items()
+    assert.are.equal(2, #items)
+    for i, item in ipairs(items) do
+      assert.are.equal("@ ", item.text:sub(1, 2), ("item %d missing icon prefix: %q"):format(i, item.text))
+      assert.are.equal(
+        ("[M] f%d.lua  (0 comments)"):format(i),
+        item.text:sub(3),
+        ("item %d body changed shape: %q"):format(i, item.text)
+      )
+    end
+  end)
+
+  it("omits the icon when ui.icons = false", function()
+    stub_mini_icons("@")
+    require("manicule.config").current.ui.icons = false
+    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-off" }))
+    local items = panel_items()
+    assert.are.equal(1, #items)
+    assert.are.equal("[M] f1.lua  (0 comments)", items[1].text)
+  end)
+
+  it("omits the icon when no provider is loadable (auto)", function()
+    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-auto-none" }))
+    local items = panel_items()
+    assert.are.equal(1, #items)
+    assert.are.equal("[M] f1.lua  (0 comments)", items[1].text)
+  end)
+
+  it("keeps the icon column aligned when the provider yields no icon", function()
+    package.preload["mini.icons"] = function()
+      return {
+        get = function()
+          error("mini.icons not set up")
+        end,
+      }
+    end
+    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-erroring" }))
+    local items = panel_items()
+    assert.are.equal(1, #items)
+    -- Provider loadable (icons enabled) but erroring: a blank cell
+    -- keeps the column so mixed successes/failures still line up.
+    assert.are.equal("  [M] f1.lua  (0 comments)", items[1].text)
+  end)
+end)
