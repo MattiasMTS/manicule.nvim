@@ -7,18 +7,24 @@
 -- full-width "bottom" split (default), a full-height "left"/"right"
 -- column, or a centered "float" (which takes focus; `q` closes it).
 --
--- Two views share the window. Files view (default) renders one line
--- per pair — `<icon> [M] path  +12 −4  · N comments` — with a per-file
--- diffstat and live comment counts; the
--- OPEN pair's line is marked with a `▸ ` overlay, a full-line
--- `ManiculePanelCurrent` background, and a bold filename; VIEWED pairs
--- (`v`, or auto-marked by next/prev) get a `✓ ` lead and dim, and the
--- window's winbar counts progress (`3/12 viewed`). <Tab>
--- toggles to the comments view (session-scoped records). In files
+-- Three views share the window, cycled by <Tab> (files → tree →
+-- comments → files). Files view (default) renders one line per pair —
+-- `<icon> [M] path  +12 −4  · N comments` — with a per-file diffstat
+-- and live comment counts; the OPEN pair's line is marked with a `▸ `
+-- overlay, a full-line `ManiculePanelCurrent` background, and a bold
+-- filename; VIEWED pairs (`v`, or auto-marked by next/prev) get a `✓ `
+-- lead and dim, and the window's winbar counts progress (`3/12
+-- viewed`). Tree view groups the same pairs by directory (Pierre
+-- style): `▾/▸` directory rows carry rolled-up diffstat/comment counts
+-- and a viewed indicator (`✓` all viewed, `●` otherwise), nest by two
+-- spaces per level with single-child chains collapsed into one row,
+-- and toggle collapse with <CR>/za (`v` marks the subtree viewed);
+-- file rows keep the files-view shape with basename labels. In files
 -- view, <CR> drills into a commented pair's comments (or opens the
--- pair when it has none); `o` always opens the pair. In a scoped
--- comments view, <Esc> returns to files and <Tab> widens to ALL
--- comments.
+-- pair when it has none); `o` always opens the pair; in tree view <CR>
+-- on a file row simply opens it. In a scoped comments view, <Esc>
+-- returns to files and <Tab> widens to ALL comments; <Esc> returns to
+-- files from every non-files view.
 --
 -- All rendering goes through one idempotent `render()` from
 -- review.state() + the store: buffer lines plus extmarks in the
@@ -41,13 +47,19 @@ local PANEL_FILETYPE = "manicule-panel"
 local ns = vim.api.nvim_create_namespace("manicule.review.panel")
 local ns_current = vim.api.nvim_create_namespace("manicule.review.panel.current")
 
----@type "files"|"comments"
+---@type "files"|"tree"|"comments"
 local current_view = "files"
 
 ---URI scoping the comments view to a single file (set by drill-down
 ---from the files view); nil means ALL session comments.
 ---@type string|nil
 local file_filter = nil
+
+---Collapsed directory rows in the tree view, keyed by the directory
+---node's full path. Session-scoped: survives refreshes and toggle
+---hide/reopen, reset by close() (session stop).
+---@type table<string, true>
+local collapsed = {}
 
 ---@type integer|nil winid of the panel window
 local panel_winid = nil
@@ -72,7 +84,7 @@ local line_data = {}
 ---the buffer is recreated on reopen, so nothing rendered survives.
 ---@type string[]|nil
 local last_lines = nil
----@type "files"|"comments"|nil
+---@type "files"|"tree"|"comments"|nil
 local last_view = nil
 
 ---Coalesces `User Manicule*` bursts into ONE refresh: a consuming send
@@ -129,6 +141,7 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculePanelCount", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelResolved", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelViewed", { link = "Comment", default = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelDir", { link = "Directory", default = true })
 end
 
 ---@class manicule.review.panel.Row
@@ -161,16 +174,15 @@ local function viewed_spans(spans, text_len)
   return out
 end
 
----Files view rows: one per session pair, `<lead><icon> [S] path  +A −R
----· N comments`. The two-cell lead reserves the current-pair marker
----column (`▸ ` overlays it on the open pair) so columns never shift;
----viewed pairs render a `✓ ` lead (same two cells) and dim.
----@return manicule.review.panel.Row[]
-local function build_file_rows()
+---Shared per-render inputs for pair/dir rows: live comment counts (ONE
+---list() call per render), icon availability, the cached session
+---diffstat, and viewed marks. nil without a session.
+---@return table|nil
+local function pair_row_ctx()
   local review = require("manicule.review")
   local state = review.state()
   if not state then
-    return {}
+    return nil
   end
 
   local counts = {}
@@ -184,82 +196,260 @@ local function build_file_rows()
   end
 
   local icons = require("manicule.ui.icons")
-  local with_icons = icons.enabled()
-  -- Per-pair {added, removed} counts, computed once per session on the
-  -- first render and cached on the session (see review.diffstat) —
-  -- deliberately NOT refreshed when the worktree side changes mid-review.
-  local diffstat = review.diffstat() or {}
+  return {
+    state = state,
+    counts = counts,
+    icons = icons,
+    with_icons = icons.enabled(),
+    -- Per-pair {added, removed} counts, computed once per session on the
+    -- first render and cached on the session (see review.diffstat) —
+    -- deliberately NOT refreshed when the worktree side changes mid-review.
+    diffstat = review.diffstat() or {},
+    viewed = state.viewed or {},
+  }
+end
 
-  local viewed = state.viewed or {}
-  local rows = {}
-  for idx, pair in ipairs(state.files) do
-    local is_viewed = viewed[idx] == true
-    local lead = is_viewed and "\u{2713} " or "  "
-    local parts = { lead }
-    local spans = {}
-    local col = #lead
-    if with_icons then
-      -- One glyph + one space (a blank cell when the provider yields
-      -- nothing) keeps the column aligned; the provider's highlight
-      -- group rides along as an extmark — the old quickfix substrate
-      -- could carry the glyph but never its color.
-      local icon, icon_hl = icons.file_icon(pair.path)
-      local glyph = icon or " "
-      parts[#parts + 1] = glyph .. " "
-      if icon and icon_hl then
-        spans[#spans + 1] = { col, col + #glyph, icon_hl }
-      end
-      col = col + #glyph + 1
-    end
-    local status = ("[%s]"):format(pair.status)
-    local status_hl = pair.status == "A" and "ManiculePanelStatusA"
-      or pair.status == "D" and "ManiculePanelStatusD"
-      or nil
-    parts[#parts + 1] = status .. " "
-    if status_hl then
-      spans[#spans + 1] = { col, col + #status, status_hl }
-    end
-    col = col + #status + 1
-    local path_start = col
-    parts[#parts + 1] = pair.path
-    col = col + #pair.path
-    -- `+A −R` between path and comment count, zero components omitted
-    -- (A/D pairs naturally show one side). An all-zero stat renders
-    -- nothing, keeping unchanged/unreadable pairs at the old row shape.
-    local stat = diffstat[idx]
-    if stat and (stat.added > 0 or stat.removed > 0) then
-      parts[#parts + 1] = "  "
-      col = col + 2
-      if stat.added > 0 then
-        local added = ("+%d"):format(stat.added)
-        parts[#parts + 1] = added
-        spans[#spans + 1] = { col, col + #added, "ManiculePanelAdded" }
-        col = col + #added
-        if stat.removed > 0 then
-          parts[#parts + 1] = " "
-          col = col + 1
-        end
-      end
-      if stat.removed > 0 then
-        local removed = ("\u{2212}%d"):format(stat.removed)
-        parts[#parts + 1] = removed
-        spans[#spans + 1] = { col, col + #removed, "ManiculePanelRemoved" }
-        col = col + #removed
-      end
-    end
-    local count = ("  \u{00B7} %d comments"):format(counts[state.uris[idx]] or 0)
-    parts[#parts + 1] = count
-    spans[#spans + 1] = { col, col + #count, "ManiculePanelCount" }
-    local text = table.concat(parts)
-    if is_viewed then
-      spans = viewed_spans(spans, #text)
-    end
-    rows[#rows + 1] = {
-      text = text,
-      spans = spans,
-      data = { pair_index = idx, path_start = path_start, path_end = path_start + #pair.path },
-    }
+---Append the `  +A −R` diffstat segment, zero components omitted (A/D
+---pairs naturally show one side; an all-zero stat renders nothing).
+---@param parts string[]
+---@param spans {[1]: integer, [2]: integer, [3]: string}[]
+---@param col integer current row byte length
+---@param added integer
+---@param removed integer
+---@return integer col after the segment
+local function append_stat(parts, spans, col, added, removed)
+  if added <= 0 and removed <= 0 then
+    return col
   end
+  parts[#parts + 1] = "  "
+  col = col + 2
+  if added > 0 then
+    local text = ("+%d"):format(added)
+    parts[#parts + 1] = text
+    spans[#spans + 1] = { col, col + #text, "ManiculePanelAdded" }
+    col = col + #text
+    if removed > 0 then
+      parts[#parts + 1] = " "
+      col = col + 1
+    end
+  end
+  if removed > 0 then
+    local text = ("\u{2212}%d"):format(removed)
+    parts[#parts + 1] = text
+    spans[#spans + 1] = { col, col + #text, "ManiculePanelRemoved" }
+    col = col + #text
+  end
+  return col
+end
+
+---Append the dim `  · N comments` tail.
+---@return integer col after the segment
+local function append_count(parts, spans, col, count)
+  local text = ("  \u{00B7} %d comments"):format(count)
+  parts[#parts + 1] = text
+  spans[#spans + 1] = { col, col + #text, "ManiculePanelCount" }
+  return col + #text
+end
+
+---One pair row: `<indent><lead><icon> [S] label  +A −R  · N comments`.
+---The files view renders the full pair path with no indent; the tree
+---view indents by nesting depth and labels with the basename. The
+---two-cell lead reserves the current-pair marker column (`▸ ` overlays
+---it on the open pair) so columns never shift; viewed pairs render a
+---`✓ ` lead (same two cells) and dim.
+---@param idx integer pair index
+---@param label string rendered path text
+---@param indent string leading spaces ("" in files view)
+---@param ctx table from pair_row_ctx
+---@return manicule.review.panel.Row
+local function pair_row(idx, label, indent, ctx)
+  local pair = ctx.state.files[idx]
+  local is_viewed = ctx.viewed[idx] == true
+  local lead = is_viewed and "\u{2713} " or "  "
+  local parts = { indent, lead }
+  local spans = {}
+  local col = #indent + #lead
+  if ctx.with_icons then
+    -- One glyph + one space (a blank cell when the provider yields
+    -- nothing) keeps the column aligned; the provider's highlight
+    -- group rides along as an extmark — the old quickfix substrate
+    -- could carry the glyph but never its color.
+    local icon, icon_hl = ctx.icons.file_icon(pair.path)
+    local glyph = icon or " "
+    parts[#parts + 1] = glyph .. " "
+    if icon and icon_hl then
+      spans[#spans + 1] = { col, col + #glyph, icon_hl }
+    end
+    col = col + #glyph + 1
+  end
+  local status = ("[%s]"):format(pair.status)
+  local status_hl = pair.status == "A" and "ManiculePanelStatusA"
+    or pair.status == "D" and "ManiculePanelStatusD"
+    or nil
+  parts[#parts + 1] = status .. " "
+  if status_hl then
+    spans[#spans + 1] = { col, col + #status, status_hl }
+  end
+  col = col + #status + 1
+  local path_start = col
+  parts[#parts + 1] = label
+  col = col + #label
+  local stat = ctx.diffstat[idx] or {}
+  col = append_stat(parts, spans, col, stat.added or 0, stat.removed or 0)
+  append_count(parts, spans, col, ctx.counts[ctx.state.uris[idx]] or 0)
+  local text = table.concat(parts)
+  if is_viewed then
+    spans = viewed_spans(spans, #text)
+  end
+  return {
+    text = text,
+    spans = spans,
+    data = {
+      kind = "file",
+      pair_index = idx,
+      path_start = path_start,
+      path_end = path_start + #label,
+      lead_col = #indent,
+    },
+  }
+end
+
+---Files view rows: one per session pair, full path, no indent.
+---@return manicule.review.panel.Row[]
+local function build_file_rows()
+  local ctx = pair_row_ctx()
+  if not ctx then
+    return {}
+  end
+  local rows = {}
+  for idx, pair in ipairs(ctx.state.files) do
+    rows[#rows + 1] = pair_row(idx, pair.path, "", ctx)
+  end
+  return rows
+end
+
+---@class manicule.review.panel.DirNode
+---@field name string row label; single-child chains collapse into "a/b"
+---@field path string full directory path — the collapse-state key
+---@field dirs manicule.review.panel.DirNode[] child dirs, first-seen order
+---@field files integer[] pair indexes directly in this directory
+
+---Group the session pairs by directory (pair.path split on "/").
+---Chains of single-child directories holding no files of their own
+---collapse into one node ("lua" → "manicule" renders as one
+---`lua/manicule` row) — Pierre does this to keep trees shallow.
+---@param files {path: string}[]
+---@return manicule.review.panel.DirNode root
+local function build_tree(files)
+  local root = { name = "", path = "", dirs = {}, files = {} }
+  local by_path = {}
+  for idx, pair in ipairs(files) do
+    local node = root
+    local parts = vim.split(pair.path, "/", { plain = true })
+    for i = 1, #parts - 1 do
+      local path = node.path == "" and parts[i] or (node.path .. "/" .. parts[i])
+      local child = by_path[path]
+      if not child then
+        child = { name = parts[i], path = path, dirs = {}, files = {} }
+        by_path[path] = child
+        node.dirs[#node.dirs + 1] = child
+      end
+      node = child
+    end
+    node.files[#node.files + 1] = idx
+  end
+  local function collapse_chains(node)
+    for _, child in ipairs(node.dirs) do
+      while #child.dirs == 1 and #child.files == 0 do
+        local only = child.dirs[1]
+        child.name = child.name .. "/" .. only.name
+        child.path = only.path
+        child.dirs = only.dirs
+        child.files = only.files
+      end
+      collapse_chains(child)
+    end
+  end
+  collapse_chains(root)
+  return root
+end
+
+---Recursive subtree totals for one directory node: summed diffstat,
+---summed comment counts, and whether EVERY file inside is viewed.
+---@return integer added, integer removed, integer comments, boolean all_viewed
+local function dir_rollup(node, ctx)
+  local added, removed, comments = 0, 0, 0
+  local all_viewed = true
+  for _, idx in ipairs(node.files) do
+    local stat = ctx.diffstat[idx]
+    if stat then
+      added = added + stat.added
+      removed = removed + stat.removed
+    end
+    comments = comments + (ctx.counts[ctx.state.uris[idx]] or 0)
+    if not ctx.viewed[idx] then
+      all_viewed = false
+    end
+  end
+  for _, child in ipairs(node.dirs) do
+    local a, r, c, v = dir_rollup(child, ctx)
+    added, removed, comments = added + a, removed + r, comments + c
+    if not v then
+      all_viewed = false
+    end
+  end
+  return added, removed, comments, all_viewed
+end
+
+---One directory row: `<indent>▾ name  +A −R  · N comments  ●` with a
+---`▸` disclosure when collapsed and a `✓` indicator once every file in
+---the subtree is viewed.
+---@return manicule.review.panel.Row
+local function dir_row(node, depth, is_collapsed, ctx)
+  local added, removed, comments, all_viewed = dir_rollup(node, ctx)
+  local indent = ("  "):rep(depth)
+  local glyph = is_collapsed and "\u{25B8}" or "\u{25BE}"
+  local parts = { indent, glyph, " ", node.name }
+  local col = #indent + #glyph + 1 + #node.name
+  local spans = { { #indent, col, "ManiculePanelDir" } }
+  col = append_stat(parts, spans, col, added, removed)
+  col = append_count(parts, spans, col, comments)
+  local mark = all_viewed and "\u{2713}" or "\u{25CF}"
+  parts[#parts + 1] = "  " .. mark
+  spans[#spans + 1] = { col + 2, col + 2 + #mark, "ManiculePanelViewed" }
+  return {
+    text = table.concat(parts),
+    spans = spans,
+    data = { kind = "dir", dir = node.path },
+  }
+end
+
+---Tree view rows: the node's own files first (basename labels), then
+---its child directories, depth-first, skipping the subtrees of
+---collapsed directories (their rows still show the full rollup).
+local function append_tree_rows(node, depth, rows, ctx)
+  local indent = ("  "):rep(depth)
+  for _, idx in ipairs(node.files) do
+    local path = ctx.state.files[idx].path
+    rows[#rows + 1] = pair_row(idx, path:match("[^/]+$") or path, indent, ctx)
+  end
+  for _, child in ipairs(node.dirs) do
+    local is_collapsed = collapsed[child.path] == true
+    rows[#rows + 1] = dir_row(child, depth, is_collapsed, ctx)
+    if not is_collapsed then
+      append_tree_rows(child, depth + 1, rows, ctx)
+    end
+  end
+end
+
+---@return manicule.review.panel.Row[]
+local function build_tree_rows()
+  local ctx = pair_row_ctx()
+  if not ctx then
+    return {}
+  end
+  local rows = {}
+  append_tree_rows(build_tree(ctx.state.files), 0, rows, ctx)
   return rows
 end
 
@@ -317,6 +507,7 @@ local function build_comment_rows(records)
       text = text,
       spans = spans,
       data = {
+        kind = "comment",
         id = record.id,
         scope = record.scope,
         project_root = record.project_root,
@@ -328,31 +519,47 @@ local function build_comment_rows(records)
   return rows
 end
 
----Mark the OPEN pair's row (files view only): a `▸ ` overlay on the
----lead column, a full-line `ManiculePanelCurrent` background, and a
----bold filename. Lives in its own namespace so a pair switch re-marks
----without a re-render (and without re-querying the store).
+---1-indexed panel row rendering the given pair, or nil when the row is
+---not on screen (tree view: hidden inside a collapsed directory). In
+---files view the row number equals the pair index; the scan keeps one
+---code path for both pair-row views.
+---@param pair_index integer
+---@return integer|nil
+local function pair_row_number(pair_index)
+  for row, data in ipairs(line_data) do
+    if data.pair_index == pair_index then
+      return row
+    end
+  end
+  return nil
+end
+
+---Mark the OPEN pair's row (files and tree views): a `▸ ` overlay on
+---the row's lead column, a full-line `ManiculePanelCurrent` background,
+---and a bold filename. Lives in its own namespace so a pair switch
+---re-marks without a re-render (and without re-querying the store).
+---No row is marked when the pair is hidden in a collapsed directory.
 local function apply_current_marks()
   if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
     return
   end
   vim.api.nvim_buf_clear_namespace(panel_bufnr, ns_current, 0, -1)
-  if current_view ~= "files" then
+  if current_view == "comments" then
     return
   end
   local state = require("manicule.review").state()
   local index = state and state.index
-  local data = index and line_data[index]
-  if not data or data.pair_index ~= index then
+  local row = index and pair_row_number(index)
+  if not row then
     return
   end
-  local row = index - 1
-  pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns_current, row, 0, {
+  local data = line_data[row]
+  pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns_current, row - 1, data.lead_col or 0, {
     line_hl_group = "ManiculePanelCurrent",
     virt_text = { { "\u{25B8} ", "ManiculePanelCurrent" } },
     virt_text_pos = "overlay",
   })
-  pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns_current, row, data.path_start, {
+  pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns_current, row - 1, data.path_start, {
     end_col = data.path_end,
     hl_group = "ManiculePanelCurrentFile",
   })
@@ -373,7 +580,13 @@ local function update_winbar()
   for _ in pairs(state.viewed or {}) do
     viewed = viewed + 1
   end
-  vim.wo[panel_winid].winbar = ("%d/%d viewed"):format(viewed, #state.files)
+  local progress = ("%d/%d viewed"):format(viewed, #state.files)
+  if current_view == "tree" then
+    -- The tree view names itself: its rows can look identical to the
+    -- files view for a flat session.
+    progress = progress .. " \u{00B7} tree"
+  end
+  vim.wo[panel_winid].winbar = progress
 end
 
 ---Rebuild the panel buffer from state: lines, content extmarks, and
@@ -389,6 +602,8 @@ local function render(comment_records)
   local rows
   if current_view == "files" then
     rows = build_file_rows()
+  elseif current_view == "tree" then
+    rows = build_tree_rows()
   else
     rows = build_comment_rows(comment_records)
   end
@@ -514,6 +729,59 @@ local function feed_default(lhs)
   vim.api.nvim_feedkeys(keys, "n", false)
 end
 
+---Flip one tree directory row between collapsed and expanded.
+---@param dir_path string
+local function toggle_dir(dir_path)
+  if collapsed[dir_path] then
+    collapsed[dir_path] = nil
+  else
+    collapsed[dir_path] = true
+  end
+  refresh()
+end
+
+---Pair indexes living under a directory row's subtree. Prefix-matching
+---pair.path covers collapsed-chain nodes ("lua/manicule") without
+---re-walking the tree.
+---@param dir_path string
+---@param state manicule.ReviewSession
+---@return integer[]
+local function subtree_pair_indexes(dir_path, state)
+  local prefix = dir_path .. "/"
+  local out = {}
+  for idx, pair in ipairs(state.files) do
+    if pair.path:sub(1, #prefix) == prefix then
+      out[#out + 1] = idx
+    end
+  end
+  return out
+end
+
+---Expand every collapsed ancestor directory of the given pair so its
+---tree row becomes visible. Returns true when any state changed (the
+---caller re-renders). Clearing a prefix that is not a rendered node
+---(chain-collapse swallows intermediates) is harmless.
+---@param pair_index integer
+---@return boolean changed
+local function expand_to(pair_index)
+  local state = require("manicule.review").state()
+  local pair = state and state.files[pair_index]
+  if not pair then
+    return false
+  end
+  local changed = false
+  local prefix
+  local parts = vim.split(pair.path, "/", { plain = true })
+  for i = 1, #parts - 1 do
+    prefix = prefix and (prefix .. "/" .. parts[i]) or parts[i]
+    if collapsed[prefix] then
+      collapsed[prefix] = nil
+      changed = true
+    end
+  end
+  return changed
+end
+
 local function setup_panel_keymaps(bufnr)
   local map_opts = { buffer = bufnr, nowait = true, silent = true }
   local function map(lhs, fn, desc)
@@ -521,9 +789,11 @@ local function setup_panel_keymaps(bufnr)
   end
 
   -- <CR> in files view drills into the pair's comments when it has
-  -- any, otherwise opens the pair. In comments view it jumps to the
-  -- comment through review.open (never a raw window jump, which could
-  -- stomp a diff window's buffer).
+  -- any, otherwise opens the pair. In tree view it toggles a directory
+  -- row's collapse and plainly opens a file row's pair (the tree keeps
+  -- no drill-down — <Tab> reaches the comments view directly). In
+  -- comments view it jumps to the comment through review.open (never a
+  -- raw window jump, which could stomp a diff window's buffer).
   map("<CR>", function()
     if current_view == "files" then
       local idx = pair_index_at_cursor()
@@ -547,15 +817,25 @@ local function setup_panel_keymaps(bufnr)
         end
       end
       require("manicule.review").open(idx)
+    elseif current_view == "tree" then
+      local data = data_at_cursor()
+      if type(data) ~= "table" then
+        return
+      end
+      if data.kind == "dir" then
+        toggle_dir(data.dir)
+      elseif data.pair_index then
+        require("manicule.review").open(data.pair_index)
+      end
     else
       jump_to_comment()
     end
-  end, "Manicule review: drill into comments or open pair")
+  end, "Manicule review: drill into comments, toggle directory, or open pair")
 
-  -- `o` in files view always opens the pair — the escape hatch when
-  -- <CR> would drill into comments instead.
+  -- `o` on any pair row (files or tree view) always opens the pair —
+  -- the escape hatch when <CR> would drill into comments instead.
   map("o", function()
-    if current_view ~= "files" then
+    if current_view == "comments" then
       feed_default("o")
       return
     end
@@ -564,6 +844,17 @@ local function setup_panel_keymaps(bufnr)
       require("manicule.review").open(idx)
     end
   end, "Manicule review: open pair (skip drill-down)")
+
+  -- `za` mirrors <CR> on tree directory rows — the native fold-toggle
+  -- key. Falls through to the default `za` everywhere else.
+  map("za", function()
+    local data = current_view == "tree" and data_at_cursor() or nil
+    if type(data) == "table" and data.kind == "dir" then
+      toggle_dir(data.dir)
+    else
+      feed_default("za")
+    end
+  end, "Manicule review: toggle directory collapse")
 
   -- `r` in comments view replies to an imported GitHub comment: opens
   -- the comment editor; the reply posts to the comment's thread on the
@@ -592,10 +883,10 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: toggle GitHub thread resolution")
 
-  -- <Esc> in a comments view returns to files (clearing any file
+  -- <Esc> in any non-files view returns to files (clearing any file
   -- filter); in files view it falls through to the default behavior.
   map("<Esc>", function()
-    if current_view == "comments" then
+    if current_view ~= "files" then
       current_view = "files"
       file_filter = nil
       refresh()
@@ -604,29 +895,48 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: back to files view")
 
-  -- `v` in files view toggles the row's pair viewed (next/prev also
-  -- auto-mark the pair they leave; `v` is the manual toggle/un-mark).
-  -- Falls through to the default `v` (visual mode) elsewhere.
+  -- `v` toggles viewed state (next/prev also auto-mark the pair they
+  -- leave; `v` is the manual toggle/un-mark): a pair row toggles that
+  -- pair; a tree directory row toggles its whole subtree — any unviewed
+  -- file marks everything viewed, an all-viewed subtree un-marks. Falls
+  -- through to the default `v` (visual mode) in comments view.
   map("v", function()
-    if current_view ~= "files" then
+    if current_view == "comments" then
       feed_default("v")
       return
     end
-    local idx = pair_index_at_cursor()
-    if not idx then
+    local data = data_at_cursor()
+    if type(data) ~= "table" then
       return
     end
     local review = require("manicule.review")
     local state = review.state()
-    if state then
-      review.set_viewed(idx, not state.viewed[idx])
+    if not state then
+      return
     end
-  end, "Manicule review: toggle viewed for the file under cursor")
+    if data.kind == "dir" then
+      local indexes = subtree_pair_indexes(data.dir, state)
+      local target = false
+      for _, idx in ipairs(indexes) do
+        if not state.viewed[idx] then
+          target = true
+          break
+        end
+      end
+      for _, idx in ipairs(indexes) do
+        review.set_viewed(idx, target)
+      end
+    elseif data.pair_index then
+      review.set_viewed(data.pair_index, not state.viewed[data.pair_index])
+    end
+  end, "Manicule review: toggle viewed for the file or directory under cursor")
 
-  -- <Tab> toggles files <-> ALL comments. From a drilled-down (scoped)
-  -- comments view it first widens to all comments.
+  -- <Tab> cycles the views: files → tree → comments → files. From a
+  -- drilled-down (scoped) comments view it first widens to ALL comments.
   map("<Tab>", function()
     if current_view == "files" then
+      current_view = "tree"
+    elseif current_view == "tree" then
       current_view = "comments"
       file_filter = nil
     elseif file_filter then
@@ -635,7 +945,7 @@ local function setup_panel_keymaps(bufnr)
       current_view = "files"
     end
     refresh()
-  end, "Manicule review: toggle files/comments view")
+  end, "Manicule review: cycle files/tree/comments view")
 
   -- Comment mutations, previously inherited from the quickfix keymap
   -- module: same keys, same opt-out flag, but the locator now comes
@@ -836,14 +1146,16 @@ local function open_window()
   })
 end
 
----Point the panel's files view at the given pair: re-mark the current
----line and move the panel window's cursor to that row, WITHOUT
----re-rendering, re-querying the store, or stealing focus. No-op when
----the panel is hidden, showing a comments view (including a
----drill-down), or there is no session.
+---Point the panel's files or tree view at the given pair: re-mark the
+---current line and move the panel window's cursor to that row, WITHOUT
+---re-querying the store or stealing focus. The tree view auto-expands
+---collapsed ancestors first — Pierre keeps the active file visible —
+---and only that expansion re-renders. No-op when the panel is hidden,
+---showing a comments view (including a drill-down), or there is no
+---session.
 ---@param pair_index integer
 function M.sync_index(pair_index)
-  if current_view ~= "files" then
+  if current_view == "comments" then
     return
   end
   if not require("manicule.review").state() then
@@ -852,9 +1164,14 @@ function M.sync_index(pair_index)
   if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return
   end
+  if current_view == "tree" and expand_to(pair_index) then
+    render()
+  end
   apply_current_marks()
-  local max_row = math.max(1, #line_data)
-  pcall(vim.api.nvim_win_set_cursor, panel_winid, { math.min(pair_index, max_row), 0 })
+  local row = pair_row_number(pair_index)
+  if row then
+    pcall(vim.api.nvim_win_set_cursor, panel_winid, { row, 0 })
+  end
 end
 
 ---Re-render the current view in place, preserving the panel cursor.
@@ -898,12 +1215,13 @@ function M.toggle()
   return true
 end
 
----Close the panel and reset ALL module state (view included) — the
----session-stop teardown. Idempotent.
+---Close the panel and reset ALL module state (view and tree collapse
+---state included) — the session-stop teardown. Idempotent.
 function M.close()
   hide()
   current_view = "files"
   file_filter = nil
+  collapsed = {}
 end
 
 ---True when the panel window is open.

@@ -148,7 +148,7 @@ describe("manicule review panel substrate", function()
         by_lhs[map.lhs:lower()] = true
       end
     end
-    for _, lhs in ipairs({ "<cr>", "o", "v", "r", "gr", "<esc>", "<tab>", "dd", "ce", "u", "<c-r>" }) do
+    for _, lhs in ipairs({ "<cr>", "o", "v", "r", "gr", "za", "<esc>", "<tab>", "dd", "ce", "u", "<c-r>" }) do
       assert.is_true(by_lhs[lhs] == true, "missing panel keymap " .. lhs)
     end
   end)
@@ -756,6 +756,250 @@ describe("manicule review panel viewed tracking", function()
     assert.is_true(R.state().viewed[1])
     assert.are.equal("\u{2713} [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
     assert.are.equal("1/2 viewed", vim.wo[assert(panel().winid())].winbar)
+  end)
+end)
+
+describe("manicule review panel tree view", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  ---Pairs over nested repo-relative paths, one changed line each (+1 −1).
+  local function make_nested_pairs(paths)
+    local files = {}
+    for i, path in ipairs(paths) do
+      local left = ctx.artifact_root .. "/left/" .. path
+      local right = ctx.root .. "/" .. path
+      vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+      vim.fn.mkdir(vim.fn.fnamemodify(right, ":h"), "p")
+      vim.fn.writefile({ ("return %d -- old"):format(i) }, left)
+      vim.fn.writefile({ ("return %d -- new"):format(i) }, right)
+      files[i] = { left = left, right = right, status = "M", path = path }
+    end
+    return files
+  end
+
+  ---Move focus out of the panel before editing files: press_in_panel
+  ---leaves the panel window current, and add_comment `:edit`s into the
+  ---current window.
+  local function focus_file_window()
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.bo[vim.api.nvim_win_get_buf(winid)].filetype ~= "manicule-panel" then
+        vim.api.nvim_set_current_win(winid)
+        return
+      end
+    end
+  end
+
+  ---Start a session over the canonical multi-dir shape and <Tab> into
+  ---the tree view. Rendered rows (two-space nesting, chains collapsed):
+  ---  1  ▾ lua/manicule …  ●
+  ---  2      [M] a.lua …
+  ---  3    ▾ review …  ●
+  ---  4        [M] b.lua …
+  ---  5  ▾ tests …  ●
+  ---  6      [M] c.lua …
+  local function start_tree()
+    local files = make_nested_pairs({ "lua/manicule/a.lua", "lua/manicule/review/b.lua", "tests/c.lua" })
+    assert.is_true(require("manicule.review").start({ files = files, label = "tree" }))
+    press_in_panel(1, "<Tab>")
+    return files
+  end
+
+  it("groups pairs by directory: nesting, chain collapsing, rollups", function()
+    start_tree()
+    -- `lua/manicule` is ONE row (the single-child `lua` chain collapses)
+    -- and rolls up its subtree: +2 −2 across a.lua and review/b.lua.
+    assert.are.same({
+      "\u{25BE} lua/manicule  +2 \u{2212}2  \u{00B7} 0 comments  \u{25CF}",
+      "    [M] a.lua  +1 \u{2212}1  \u{00B7} 0 comments",
+      "  \u{25BE} review  +1 \u{2212}1  \u{00B7} 0 comments  \u{25CF}",
+      "      [M] b.lua  +1 \u{2212}1  \u{00B7} 0 comments",
+      "\u{25BE} tests  +1 \u{2212}1  \u{00B7} 0 comments  \u{25CF}",
+      "    [M] c.lua  +1 \u{2212}1  \u{00B7} 0 comments",
+    }, panel_lines())
+  end)
+
+  it("<Tab> cycles files → tree → comments → files", function()
+    local files = start_tree()
+    press_in_panel(1, "<Esc>") -- back to files for a clean cycle start
+    focus_file_window()
+    add_comment(files[2].right, "cycle comment")
+    vim.wait(200)
+    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "not in files view")
+
+    press_in_panel(1, "<Tab>")
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "first <Tab> is not tree view")
+    press_in_panel(1, "<Tab>")
+    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "second <Tab> is not comments view")
+    press_in_panel(1, "<Tab>")
+    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "third <Tab> is not files view")
+  end)
+
+  it("rolls up live comment counts onto every enclosing directory row", function()
+    local files = start_tree()
+    focus_file_window()
+    add_comment(files[2].right, "nested note")
+    vim.wait(200)
+
+    local lines = panel_lines()
+    assert.is_truthy(lines[1]:find("\u{00B7} 1 comments", 1, true), "lua/manicule rollup missed the comment")
+    assert.is_truthy(lines[3]:find("\u{00B7} 1 comments", 1, true), "review rollup missed the comment")
+    assert.is_truthy(lines[5]:find("\u{00B7} 0 comments", 1, true), "tests rollup gained a phantom comment")
+  end)
+
+  it("flips a directory's indicator to ✓ once every file inside is viewed", function()
+    start_tree()
+    local R = require("manicule.review")
+
+    R.set_viewed(2, true) -- review/b.lua
+    local lines = panel_lines()
+    assert.is_truthy(lines[3]:find("\u{2713}", 1, true), "review dir not marked all-viewed")
+    assert.is_truthy(lines[1]:find("\u{25CF}", 1, true), "lua/manicule flipped with a.lua unviewed")
+
+    R.set_viewed(1, true) -- a.lua
+    lines = panel_lines()
+    assert.is_truthy(lines[1]:find("\u{2713}", 1, true), "lua/manicule not marked all-viewed")
+    assert.is_truthy(lines[5]:find("\u{25CF}", 1, true), "tests flipped without being viewed")
+  end)
+
+  it("<CR> on a directory row collapses its subtree; za expands it again", function()
+    start_tree()
+    press_in_panel(1, "<CR>")
+
+    local lines = panel_lines()
+    assert.are.equal(3, #lines)
+    assert.is_truthy(lines[1]:find("\u{25B8} lua/manicule", 1, true), "collapsed dir lost its ▸ disclosure")
+    -- The rollup survives the collapse.
+    assert.is_truthy(lines[1]:find("+2 \u{2212}2", 1, true))
+    assert.is_truthy(lines[2]:find("\u{25BE} tests", 1, true))
+
+    press_in_panel(1, "za")
+    assert.are.equal(6, #panel_lines())
+  end)
+
+  it("keeps collapse state across refreshes and panel toggles", function()
+    start_tree()
+    press_in_panel(1, "<CR>")
+    assert.are.equal(3, #panel_lines())
+
+    vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.are.equal(3, #panel_lines(), "refresh re-expanded the collapsed dir")
+
+    local p = panel()
+    assert.is_true(p.toggle()) -- hide
+    assert.is_true(p.toggle()) -- reopen
+    local lines = panel_lines()
+    assert.are.equal(3, #lines, "toggle lost the collapse state")
+    assert.is_truthy(lines[1]:find("\u{25B8} lua/manicule", 1, true), "toggle lost the tree view")
+  end)
+
+  it("auto-expands the chain to reveal the open pair on sync_index", function()
+    start_tree()
+    press_in_panel(1, "<CR>") -- collapse lua/manicule, hiding pair 2
+    assert.are.equal(3, #panel_lines())
+
+    require("manicule.review").open(2)
+
+    local lines = panel_lines()
+    assert.are.equal(6, #lines, "open pair stayed hidden in a collapsed dir")
+    -- Current-pair marking lands on b.lua's row (row 4, 0-indexed 3).
+    assert.are.same({ 3 }, current_rows())
+    local winid = assert(panel().winid())
+    assert.are.equal(4, vim.api.nvim_win_get_cursor(winid)[1])
+  end)
+
+  it("marks the open pair's row and follows it in tree view", function()
+    start_tree()
+    -- Pair 1 (a.lua) is open: its tree row is row 2 (0-indexed 1).
+    assert.are.same({ 1 }, current_rows())
+
+    require("manicule.review").open(3)
+    assert.are.same({ 5 }, current_rows())
+  end)
+
+  it("v on a directory row toggles the whole subtree viewed", function()
+    start_tree()
+    local R = require("manicule.review")
+
+    press_in_panel(1, "v")
+    assert.is_true(R.state().viewed[1])
+    assert.is_true(R.state().viewed[2])
+    assert.is_nil(R.state().viewed[3])
+    assert.is_truthy(panel_lines()[1]:find("\u{2713}", 1, true), "dir indicator did not flip")
+
+    press_in_panel(1, "v") -- all viewed: second press unmarks the subtree
+    assert.is_nil(R.state().viewed[1])
+    assert.is_nil(R.state().viewed[2])
+
+    -- Mixed subtree: v marks the REMAINING files viewed first.
+    R.set_viewed(1, true)
+    press_in_panel(1, "v")
+    assert.is_true(R.state().viewed[1])
+    assert.is_true(R.state().viewed[2])
+  end)
+
+  it("v on a tree file row toggles just that pair", function()
+    start_tree()
+    local R = require("manicule.review")
+    press_in_panel(4, "v") -- b.lua
+    assert.is_true(R.state().viewed[2])
+    assert.is_nil(R.state().viewed[1])
+    assert.is_truthy(panel_lines()[4]:find("\u{2713} %[M%] b.lua"), "viewed lead missing on the tree row")
+  end)
+
+  it("<CR> on a tree file row opens the pair even when it has comments", function()
+    local files = start_tree()
+    press_in_panel(1, "<Esc>")
+    focus_file_window()
+    add_comment(files[2].right, "no drill-down in tree view")
+    vim.wait(200)
+    press_in_panel(1, "<Tab>") -- back to tree
+
+    press_in_panel(4, "<CR>") -- b.lua, which has a comment
+    local R = require("manicule.review")
+    assert.are.equal(2, R.state().index)
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "left tree view")
+
+    press_in_panel(6, "o") -- c.lua
+    assert.are.equal(3, R.state().index)
+  end)
+
+  it("appends · tree to the winbar progress in tree view only", function()
+    start_tree()
+    local winid = assert(panel().winid())
+    assert.are.equal("0/3 viewed \u{00B7} tree", vim.wo[winid].winbar)
+
+    press_in_panel(1, "<Esc>")
+    assert.are.equal("0/3 viewed", vim.wo[winid].winbar)
+  end)
+
+  it("<Esc> returns to the files view", function()
+    start_tree()
+    press_in_panel(1, "<Esc>")
+    local lines = panel_lines()
+    assert.are.equal(3, #lines)
+    assert.is_truthy(lines[1]:find("lua/manicule/a.lua", 1, true))
+  end)
+
+  it("a fresh session starts with every directory expanded", function()
+    start_tree()
+    press_in_panel(1, "<CR>") -- collapse
+    assert.are.equal(3, #panel_lines())
+
+    require("manicule.review").stop()
+    start_tree()
+    assert.are.equal(6, #panel_lines(), "collapse state leaked into the new session")
   end)
 end)
 

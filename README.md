@@ -199,11 +199,21 @@ Panel keymaps (buffer-local): `<CR>` on a commented file drills into a
 comments view scoped to that file (`<CR>` jumps to a comment, `dd`
 deletes, `ce` edits, `u`/`<C-r>` undo/redo a deletion, `<Esc>` goes
 back); `<CR>` on a file without comments switches the diff to that pair,
-and `o` always opens the pair. `<Tab>` toggles between files view and
-comments view (from a scoped view it widens to all session comments),
-and `v` toggles viewed. `:ManiculeToggle` shows/hides the panel during a
-review. Running `:ManiculeReview pr` with no number opens a picker over
-the repository's open PRs.
+and `o` always opens the pair. `<Tab>` cycles the panel through files,
+tree, and comments views (from a scoped comments view it first widens to
+all session comments), and `v` toggles viewed. `:ManiculeToggle`
+shows/hides the panel during a review. Running `:ManiculeReview pr` with
+no number opens a picker over the repository's open PRs.
+
+The tree view shows the same files grouped by directory, Pierre-style:
+two-space nesting with single-child chains collapsed into one row
+(`lua/manicule`), and each `▾`/`▸` directory row rolling up its
+subtree's diffstat, comment count, and viewed state (`●` while any file
+inside is unviewed, `✓` once all are). `<CR>` or `za` on a directory row
+collapses or expands it — the open pair auto-expands its chain to stay
+visible — `v` marks the whole subtree viewed, and file rows behave like
+the files view (`<CR>`/`o` open the pair). The panel's winbar appends
+`· tree` while the tree view is active.
 
 When you review a PR with its head checked out, existing GitHub review
 comments are imported as manicule records and render inline. They can be

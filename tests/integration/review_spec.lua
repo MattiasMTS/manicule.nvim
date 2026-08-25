@@ -609,6 +609,13 @@ describe("manicule review session", function()
     vim.api.nvim_feedkeys(keys, "x", false)
   end
 
+  ---<Tab> from the files view to the comments view — two presses since
+  ---the cycle is files → tree → comments.
+  local function to_comments_view(row)
+    press_in_panel(row, "<Tab>")
+    press_in_panel(row, "<Tab>")
+  end
+
   it("<CR> on a commented file scopes the comments view to that file", function()
     local R = require("manicule.review")
     local files = make_pairs(2)
@@ -688,6 +695,53 @@ describe("manicule review session", function()
     assert.is_truthy(texts:find("second file comment", 1, true))
   end)
 
+  ---A flat pair plus one nested under `sub/`, so the tree view differs
+  ---visibly from the files view (a `▾ sub` directory row appears).
+  local function make_nested_pair_set()
+    local files = make_pairs(1)
+    local left = ctx.artifact_root .. "/left/sub/nested.lua"
+    local right = ctx.root .. "/sub/nested.lua"
+    vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+    vim.fn.mkdir(vim.fn.fnamemodify(right, ":h"), "p")
+    vim.fn.writefile({ "return 9 -- old" }, left)
+    vim.fn.writefile({ "return 9 -- new" }, right)
+    files[2] = { left = left, right = right, status = "M", path = "sub/nested.lua" }
+    return files
+  end
+
+  it("<Tab> cycles files → tree → comments → files", function()
+    local R = require("manicule.review")
+    local files = make_nested_pair_set()
+    assert.is_true(R.start({ files = files, label = "cycle" }))
+    add_comment(files[1].right, "cycle comment")
+    vim.wait(200)
+
+    press_in_panel(1, "<Tab>") -- tree: a directory row appears
+    assert.is_truthy(table.concat(panel_lines(), "\n"):find("\u{25BE} sub", 1, true), "first <Tab> is not tree view")
+    press_in_panel(1, "<Tab>") -- comments
+    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "second <Tab> is not comments view")
+    press_in_panel(1, "<Tab>") -- back to files
+    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 1 comments", 1, true), "third <Tab> is not files view")
+  end)
+
+  it("tree view <CR> on a file row rebuilds that pair's diff", function()
+    local R = require("manicule.review")
+    local files = make_nested_pair_set()
+    assert.is_true(R.start({ files = files, label = "tree-open" }))
+
+    press_in_panel(1, "<Tab>")
+    -- Rows: 1 = f1.lua (root file), 2 = ▾ sub, 3 = nested.lua.
+    press_in_panel(3, "<CR>")
+
+    assert.are.equal(2, R.state().index)
+    local cur_name = vim.api.nvim_buf_get_name(0)
+    assert.is_truthy(cur_name:find("/sub/nested.lua", 1, true), "expected the nested pair, got " .. cur_name)
+    assert.is_truthy(panel_win(), "panel window closed by the tree open")
+    -- Still tree view, current marks on the nested file's row.
+    assert.is_truthy(panel_lines()[2]:find("\u{25BE} sub", 1, true))
+    assert.are.equal(3, panel_current_row())
+  end)
+
   ---Like add_comment, but places the comment on a specific line.
   local function add_comment_at(path, line, body)
     vim.cmd.edit(vim.fn.fnameescape(path))
@@ -711,7 +765,7 @@ describe("manicule review session", function()
     -- restore the pair 1 layout before exercising the jump.
     R.open(1)
 
-    press_in_panel(1, "<Tab>") -- comments view (ALL)
+    to_comments_view(1) -- comments view (ALL)
     press_in_panel(1, "<CR>")
 
     assert.are.equal(2, R.state().index)
@@ -757,7 +811,7 @@ describe("manicule review session", function()
     add_comment_at(left, 1, "note on deleted file")
     R.open(1)
 
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
     press_in_panel(1, "<CR>")
 
     assert.are.equal(2, R.state().index)
@@ -774,7 +828,7 @@ describe("manicule review session", function()
     add_comment_at(files[1].right, 1, "orphan-to-be")
     R.open(1)
 
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
 
     -- Break the session's uri -> pair mapping so the comment matches no
     -- pair (defensive path); review.state() returns the live table.
@@ -844,7 +898,7 @@ describe("manicule review session", function()
     ui.prompt = function(_opts, cb)
       cb("sounds good")
     end
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
     press_in_panel(1, "r")
     ui.prompt = original_prompt
 
@@ -874,7 +928,7 @@ describe("manicule review session", function()
         warned = msg
       end
     end
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
     press_in_panel(1, "r")
     vim.notify = original_notify
 
@@ -916,7 +970,7 @@ describe("manicule review session", function()
     )
     assert.is_true(R.start({ files = files, label = "resolve" }))
 
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
     assert.is_nil(panel_lines()[1]:find("\u{2713}", 1, true))
 
     press_in_panel(1, "gr")
@@ -961,7 +1015,7 @@ describe("manicule review session", function()
         warned = msg
       end
     end
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
     press_in_panel(1, "gr")
     vim.notify = original_notify
 
@@ -981,7 +1035,7 @@ describe("manicule review session", function()
         warned = msg
       end
     end
-    press_in_panel(1, "<Tab>")
+    to_comments_view(1)
     press_in_panel(1, "gr")
     vim.notify = original_notify
 
