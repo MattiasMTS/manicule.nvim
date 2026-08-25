@@ -171,6 +171,19 @@ describe("manicule display config", function()
     assert.are.equal("eol", require("manicule.ui.render").display_mode())
   end)
 
+  it("rejects an invalid ui.expand value", function()
+    local ok, err = pcall(require("manicule.config").setup, {
+      ui = { expand = "sideways" },
+    })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("ui.expand", 1, true))
+    assert.is_truthy(tostring(err):find('"float" or "rail"', 1, true))
+  end)
+
+  it("defaults ui.expand to float", function()
+    assert.are.equal("float", require("manicule.config").get().ui.expand)
+  end)
+
   it("rejects an unknown runtime mode without changing the current one", function()
     local render = require("manicule.ui.render")
     local mode, err = render.set_display_mode("bogus")

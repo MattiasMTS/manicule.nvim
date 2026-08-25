@@ -50,6 +50,15 @@
 --                 per-buffer pending flag already coalesces the burst.
 --                 Sticky is a float-mode concern: eol renders markers
 --                 for every record regardless (extmarks are cheap).
+--                 WHERE the expansion renders is `config.ui.expand`:
+--                 "float" (default) opens the anchored popups above;
+--                 "rail" routes the same cards into `ui/rail.lua`'s
+--                 side window instead — a real split, so code can never
+--                 be covered and the occlusion-aware placement is moot
+--                 on that path. Read at dispatch time (config-at-setup;
+--                 no runtime command in v1 — a future toggle only needs
+--                 to write the config value). The other display modes
+--                 never touch the rail; leaving "eol" closes it.
 --   * "inline" -> each record renders as a bordered `virt_lines` box
 --                 below its anchor line — code is pushed down, never
 --                 covered. The box reuses the float popup's card content
@@ -138,6 +147,30 @@ local function current_display_mode()
     return configured
   end
   return "eol"
+end
+
+---Resolve where the "eol" mode's cursor expansion renders: "float"
+---(default — the anchored popups) or "rail" (the side window owned by
+---`ui/rail.lua`). Read live at each dispatch so a future runtime
+---toggle only needs to write the config value; v1 is config-at-setup
+---(no `:ManiculeExpand` command).
+---@return "float"|"rail"
+local function current_expand_mode()
+  local cfg = config.get() or {}
+  if (cfg.ui or {}).expand == "rail" then
+    return "rail"
+  end
+  return "float"
+end
+
+---Close the rail without force-loading its module: every non-rail
+---path (other display modes, visibility hide, test resets) must stay
+---zero-cost when the rail was never used.
+local function close_rail_if_loaded()
+  local rail = package.loaded["manicule.ui.rail"]
+  if rail then
+    rail.close()
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -1433,6 +1466,68 @@ local function schedule_popup_sweeps()
 end
 
 -- ---------------------------------------------------------------------------
+-- Rail expansion dispatch ("eol" display mode with ui.expand = "rail")
+-- ---------------------------------------------------------------------------
+
+---Route the "eol" cursor expansion into the rail window instead of
+---float popups. Records covering the cursor line render as a stacked
+---card column, vertically aligned to the anchor line; an uncommented
+---cursor line clears the cards but keeps the rail open (calm — no
+---layout flicker); a buffer whose records disappeared (or that lost
+---its window) closes the rail it owns. Float popups are never opened
+---on this path — the occlusion-aware placement is structurally
+---irrelevant here.
+---@param bufnr integer
+---@param records table[]
+---@param counter_records table[]?
+---@param active_range { winid: integer, top: integer, bot: integer }?
+local function dispatch_rail_expansion(bufnr, records, counter_records, active_range)
+  local rail = require("manicule.ui.rail")
+  records = records or {}
+  if not active_range or #records == 0 then
+    rail.close_for(bufnr)
+    return
+  end
+
+  -- Same visibility test the float expansion uses: records whose range
+  -- covers the cursor line in the window that owns this buffer's
+  -- expansion.
+  local cursor_line = vim.api.nvim_win_get_cursor(active_range.winid)[1]
+  local covering = {}
+  for _, record in ipairs(records) do
+    local start_line = record_start_line(record)
+    local end_line = record_end_line(record) or start_line
+    if cursor_line >= start_line and cursor_line <= end_line then
+      table.insert(covering, record)
+    end
+  end
+  if #covering == 0 then
+    rail.clear_for(bufnr)
+    return
+  end
+  table.sort(covering, record_layout_less)
+
+  -- Title counters match the float expansion's: scope-wide display
+  -- positions, precomputed once for the covering set.
+  local display = precompute_display_positions(covering, counter_records or records)
+  local entries = {}
+  for _, record in ipairs(covering) do
+    local pos = display[tostring(record.id or "")]
+    table.insert(entries, {
+      record = record,
+      index = pos and pos.index or 1,
+      total = pos and pos.total or 1,
+    })
+  end
+  rail.render({
+    bufnr = bufnr,
+    winid = active_range.winid,
+    anchor_line = record_start_line(covering[1]),
+    entries = entries,
+  })
+end
+
+-- ---------------------------------------------------------------------------
 -- Position sync
 -- ---------------------------------------------------------------------------
 
@@ -1858,6 +1953,27 @@ function M.winhighlight()
   return comment_winhighlight()
 end
 
+--- Internal: the rail's boxed card rows for ONE record — the same
+--- bordered `[text, hl]` chunk rows the inline virt_lines box renders
+--- (card content via the shared `build_popup_content` with wrap = true,
+--- boxed with the inline border chars and the kind→highlight mapping by
+--- `append_inline_box`), fitted to a `rail_width`-cell window exactly
+--- like the inline box fits its window. `ui/rail.lua` materializes
+--- these chunks into buffer lines + ranged highlight extmarks, so the
+--- card layout and its highlight mapping stay defined ONCE, here.
+---@param record table
+---@param rail_width integer Total window width available for the box
+---@param display_index integer
+---@param display_total integer
+---@param bufnr integer? Source buffer the record renders in (quote fallback)
+---@return table[] rows Each row is one rendered line as a `[text, hl][]` chunk array
+function M._rail_card_rows(record, rail_width, display_index, display_total, bufnr)
+  local max_width = math.max(8, rail_width - INLINE_FRAME_CELLS)
+  local rows = {}
+  append_inline_box(build_popup_content(record, max_width, display_index, display_total, true, bufnr), rows)
+  return rows
+end
+
 --- Reconcile rendered state for a buffer. Shows/updates/hides popups
 --- based on `records`. Handles whose ids no longer appear in `records`
 --- are torn down. Idempotent — safe to call from any autocmd.
@@ -1981,6 +2097,21 @@ function M.update_viewport_popups(bufnr, records, counter_records)
       active_range = range
       break
     end
+  end
+
+  -- "eol" with ui.expand = "rail": the cursor expansion renders into
+  -- the rail window instead of float popups. Everything below (the
+  -- float layout + render loop) stays byte-identical when the default
+  -- expand = "float" is configured — this branch is simply never taken.
+  if mode == "eol" and current_expand_mode() == "rail" then
+    -- No float ever expands on this path; drop any popup left over from
+    -- a float-expansion pass (e.g. the expand mode changed) and sweep.
+    for _, handle in pairs(tab) do
+      hide_popup(handle)
+    end
+    schedule_popup_sweeps()
+    dispatch_rail_expansion(bufnr, records, counter_records, active_range)
+    return
   end
 
   local layouts = {}
@@ -2283,6 +2414,8 @@ function M.hide()
     return
   end
   hidden = true
+  -- Hiding suppresses EVERY manicule visual — the rail included.
+  close_rail_if_loaded()
   for bufnr, tab in pairs(handles) do
     if vim.api.nvim_buf_is_valid(bufnr) then
       for _, handle in pairs(tab) do
@@ -2374,6 +2507,11 @@ function M.set_display_mode(mode)
     return nil, err
   end
   display_mode = mode
+  -- Leaving "eol" closes the rail (its expansion surface no longer
+  -- exists in the new mode). No-op unless the rail module was loaded.
+  if mode ~= "eol" then
+    close_rail_if_loaded()
+  end
   -- Repaint no-ops while visuals are toggled off (`M.hide`); the mode
   -- still sticks and the next `M.show` paints with it.
   repaint_all_loaded()
@@ -2385,6 +2523,7 @@ end
 function M._reset_for_tests()
   hidden = false
   display_mode = nil
+  close_rail_if_loaded()
   M.clear_all()
 end
 

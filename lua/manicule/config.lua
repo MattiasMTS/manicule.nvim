@@ -13,6 +13,7 @@ local M = {}
 ---@field opacity number Floating-window transparency (0.0 = opaque, 1.0 = fully transparent)
 ---@field sticky boolean Always render comment popups vs only when the line is in the viewport
 ---@field display "float"|"eol"|"inline"|"hidden" Startup comment display mode. "float" anchored popups, "eol" end-of-line virtual text expanding to the popup on the cursor line, "inline" bordered virtual-line boxes below commented lines (code pushed down, never covered), "hidden" anchors only. Runtime changes via `:ManiculeDisplay`.
+---@field expand "float"|"rail" Where the "eol" display mode's cursor expansion renders. "float" (default) opens the anchored popups over the buffer; "rail" renders the same cards into a real side window on the far right, so code can never be covered. Read at expansion time; config-at-setup (no runtime command in v1).
 ---@field icons boolean|"auto" Filetype icons + Nerd Font badges in review UI. "auto" (default) enables them iff an icon provider (mini.icons or nvim-web-devicons) is loadable; `true` forces Nerd Font glyphs even without a provider; `false` disables them.
 ---@field sink_picker? manicule.SinkPicker Custom picker for choosing a send sink
 
@@ -101,6 +102,13 @@ M.defaults = {
     -- cover code on long lines; this is only the startup mode — cycle
     -- live with `:ManiculeDisplay`.
     display = "eol",
+    -- Where the "eol" mode's cursor expansion renders: "float" keeps
+    -- today's anchored popups (they hover over the buffer, with
+    -- occlusion-aware placement); "rail" renders the same cards into a
+    -- real side window on the far right — a split, so covering code is
+    -- structurally impossible. Config-at-setup; read where the
+    -- expansion dispatches.
+    expand = "float",
     -- Filetype icons and Nerd Font badges in the review UI. "auto"
     -- enables them iff mini.icons or nvim-web-devicons is loadable;
     -- `true` forces glyphs on (your font has them even without a
@@ -179,6 +187,7 @@ function M.setup(opts)
       ["ui.opacity"] = { opts.ui.opacity, "number", true },
       ["ui.sticky"] = { opts.ui.sticky, "boolean", true },
       ["ui.display"] = { opts.ui.display, "string", true },
+      ["ui.expand"] = { opts.ui.expand, "string", true },
       ["ui.icons"] = { opts.ui.icons, { "boolean", "string" }, true },
       ["ui.sink_picker"] = { opts.ui.sink_picker, "function", true },
     })
@@ -189,6 +198,10 @@ function M.setup(opts)
     local display = opts.ui.display
     if display ~= nil and display ~= "float" and display ~= "eol" and display ~= "inline" and display ~= "hidden" then
       error(('manicule: ui.display must be "float", "eol", "inline", or "hidden", got %q'):format(tostring(display)))
+    end
+    local expand = opts.ui.expand
+    if expand ~= nil and expand ~= "float" and expand ~= "rail" then
+      error(('manicule: ui.expand must be "float" or "rail", got %q'):format(tostring(expand)))
     end
     local icons = opts.ui.icons
     if icons ~= nil and icons ~= true and icons ~= false and icons ~= "auto" then

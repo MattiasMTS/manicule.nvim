@@ -140,6 +140,20 @@ id + counter, body fitted to a width cap, date/actions footer). Floats
 ellipsis-truncate each body line; inline word-wraps instead, since there is
 no expanded popup left to reveal the rest.
 
+`config.ui.expand` picks where eol's cursor expansion renders (read at
+dispatch time, config-at-setup): `"float"` (default) takes the popup path
+above; `"rail"` makes the viewport pass hand the cursor-line records to
+`ui/rail.lua` instead — a real `vertical botright` window on the far
+right, so covering code is structurally impossible and the occlusion
+placement never runs. The rail owns its window, scratch buffer
+(`manicule://rail`, `bufhidden=wipe`), and lifecycle augroup; render.lua
+owns the cards — `render._rail_card_rows` returns the inline box's
+`[text, hl]` chunk rows, and the rail only materializes them into buffer
+lines + highlight extmarks, aligned so the first card's top row sits at
+the anchor line's screen row. An uncommented cursor line clears the cards
+but keeps the window; the rail closes when the display mode leaves eol,
+the buffer's records disappear, or the code window closes.
+
 Popups are intentionally transient. `BufLeave` and `WinLeave` hide them to
 avoid leaking floats across windows. The comment editor is a special case:
 opening it moves focus into a manicule float, so the leave handler skips that

@@ -169,6 +169,27 @@ occlusion-aware: the right-margin spot is used only when it would rest on
 empty cells, otherwise the popup drops below (or above) the anchor line
 instead of covering code.
 
+`ui.expand` chooses where `eol`'s cursor expansion renders. The default
+`"float"` keeps the popups above; `"rail"` renders the same cards into a
+comments rail — a real `vertical botright` window on the far right
+(width 30–46 columns), so cards can never cover code and the occlusion
+logic becomes irrelevant. The rail opens when the cursor enters a
+commented line, aligns the card stack with the anchor line's screen row,
+stays open (empty) while the cursor is on uncommented lines, and closes
+when the display mode leaves `eol`, the buffer's comments disappear, or
+its code window closes. `ui.expand` is read when the expansion runs, but
+there is no runtime command in v1 — set it in `setup()`.
+
+```
+local sum = 0            ● c4f2a1c · handle… │ ┌ c4f2a1c 1/1 ──────┐
+for _, i in ipairs(x) do                     │ │ ▍ "local sum = 0" │
+end                                          │ │ mts · 2h ago      │
+                                             │ │                   │
+                                             │ │ handle the empty  │
+                                             │ │ items case        │
+                                             │ └───────────────────┘
+```
+
 `gca`/`gcd` (and the `<Plug>` edit/delete maps) work from the commented
 line in every mode.
 
@@ -310,6 +331,7 @@ require("manicule").setup({
     opacity = 0.0, -- float transparency: 0.0 opaque, 1.0 fully transparent
     sticky = false,
     display = "eol", -- startup display mode: "float", "eol", "inline", "hidden"
+    expand = "float", -- eol expansion surface: "float" popups or the side "rail"
     icons = "auto", -- Nerd Font badges + filetype icons: "auto", true, false
   },
 })
