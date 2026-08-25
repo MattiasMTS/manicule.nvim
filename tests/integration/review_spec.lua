@@ -609,11 +609,10 @@ describe("manicule review session", function()
     vim.api.nvim_feedkeys(keys, "x", false)
   end
 
-  ---<Tab> from the files view to the comments view — two presses since
-  ---the cycle is files → tree → comments.
+  ---`H` from the files view wraps straight to the Comments tab
+  ---(the tab order is Files → Tree → Comments).
   local function to_comments_view(row)
-    press_in_panel(row, "<Tab>")
-    press_in_panel(row, "<Tab>")
+    press_in_panel(row, "H")
   end
 
   it("<CR> on a commented file scopes the comments view to that file", function()
@@ -677,7 +676,7 @@ describe("manicule review session", function()
     assert.is_truthy(panel_lines()[1]:find("\u{00B7} 0 comments", 1, true))
   end)
 
-  it("<Tab> from a scoped comments view widens to ALL comments", function()
+  it("tab switching clears a scoped comments view's file filter", function()
     local R = require("manicule.review")
     local files = make_pairs(2)
     assert.is_true(R.start({ files = files, label = "drill" }))
@@ -687,7 +686,10 @@ describe("manicule review session", function()
     press_in_panel(1, "<CR>")
     assert.are.equal(1, #panel_lines())
 
-    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "L") -- Comments wraps forward to Files
+    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 1 comments", 1, true), "L did not land on the files view")
+
+    press_in_panel(1, "H") -- Files wraps back to Comments: ALL comments now
     local lines = panel_lines()
     assert.are.equal(2, #lines)
     local texts = table.concat(lines, "\n")
@@ -709,19 +711,19 @@ describe("manicule review session", function()
     return files
   end
 
-  it("<Tab> cycles files → tree → comments → files", function()
+  it("L cycles files → tree → comments → files", function()
     local R = require("manicule.review")
     local files = make_nested_pair_set()
     assert.is_true(R.start({ files = files, label = "cycle" }))
     add_comment(files[1].right, "cycle comment")
     vim.wait(200)
 
-    press_in_panel(1, "<Tab>") -- tree: a directory row appears
-    assert.is_truthy(table.concat(panel_lines(), "\n"):find("\u{25BE} sub", 1, true), "first <Tab> is not tree view")
-    press_in_panel(1, "<Tab>") -- comments
-    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "second <Tab> is not comments view")
-    press_in_panel(1, "<Tab>") -- back to files
-    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 1 comments", 1, true), "third <Tab> is not files view")
+    press_in_panel(1, "L") -- tree: a directory row appears
+    assert.is_truthy(table.concat(panel_lines(), "\n"):find("\u{25BE} sub", 1, true), "first L is not tree view")
+    press_in_panel(1, "L") -- comments
+    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "second L is not comments view")
+    press_in_panel(1, "L") -- wraps back to files
+    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 1 comments", 1, true), "third L is not files view")
   end)
 
   it("tree view <CR> on a file row rebuilds that pair's diff", function()
@@ -729,7 +731,7 @@ describe("manicule review session", function()
     local files = make_nested_pair_set()
     assert.is_true(R.start({ files = files, label = "tree-open" }))
 
-    press_in_panel(1, "<Tab>")
+    press_in_panel(1, "L")
     -- Rows: 1 = f1.lua (root file), 2 = ▾ sub, 3 = nested.lua.
     press_in_panel(3, "<CR>")
 

@@ -7,24 +7,31 @@
 -- full-width "bottom" split (default), a full-height "left"/"right"
 -- column, or a centered "float" (which takes focus; `q` closes it).
 --
--- Three views share the window, cycled by <Tab> (files → tree →
--- comments → files). Files view (default) renders one line per pair —
--- `<icon> [M] path  +12 −4  · N comments` — with a per-file diffstat
--- and live comment counts; the OPEN pair's line is marked with a `▸ `
--- overlay, a full-line `ManiculePanelCurrent` background, and a bold
--- filename; VIEWED pairs (`v`, or auto-marked by next/prev) get a `✓ `
--- lead and dim, and the window's winbar counts progress (`3/12
--- viewed`). Tree view groups the same pairs by directory (Pierre
--- style): `▾/▸` directory rows carry rolled-up diffstat/comment counts
--- and a viewed indicator (`✓` all viewed, `●` otherwise), nest by two
--- spaces per level with single-child chains collapsed into one row,
--- and toggle collapse with <CR>/za (`v` marks the subtree viewed);
--- file rows keep the files-view shape with basename labels. In files
--- view, <CR> drills into a commented pair's comments (or opens the
--- pair when it has none); `o` always opens the pair; in tree view <CR>
--- on a file row simply opens it. In a scoped comments view, <Esc>
--- returns to files and <Tab> widens to ALL comments; <Esc> returns to
--- files from every non-files view.
+-- Three views share the window as Pierre-style TABS — `Files 12 │
+-- Tree │ Comments 5` in the winbar, active tab emphasized, `N/M
+-- viewed` progress right-aligned — switched with `L` (next) / `H`
+-- (previous), wrapping. Files view (default) renders one line per
+-- pair — `<icon> [M] path  +12 −4  · N comments` — with a per-file
+-- diffstat and live comment counts; the OPEN pair's line is marked
+-- with a `▸ ` overlay, a full-line `ManiculePanelCurrent` background,
+-- and a bold filename; VIEWED pairs (`v`, or auto-marked by next/prev)
+-- get a `✓ ` lead and dim. Tree view groups the same pairs by
+-- directory (Pierre style): `▾/▸` directory rows carry rolled-up
+-- diffstat/comment counts and a viewed indicator (`✓` all viewed, `●`
+-- otherwise), nest by two spaces per level with single-child chains
+-- collapsed into one row, and toggle collapse with <CR>/za (`v` marks
+-- the subtree viewed); file rows keep the files-view shape with
+-- basename labels. In files view, <CR> drills into a commented pair's
+-- comments (or opens the pair when it has none); `o` always opens the
+-- pair; in tree view <CR> on a file row simply opens it. <Esc>
+-- returns to files from every non-files view (clearing any drill-down
+-- scope); switching tabs also clears the scope.
+--
+-- Outside a review session, `:ManiculeList` opens the same panel in
+-- PROJECT mode (M.list): a single `Comments N · project` tab listing
+-- every project comment — same rows, same dd/ce/u/<C-r> maps, <CR>
+-- jumps to the file in the previous window, `q` closes in any
+-- placement. H/L are not mapped (one tab; the native motions stay).
 --
 -- All rendering goes through one idempotent `render()` from
 -- review.state() + the store: buffer lines plus extmarks in the
@@ -54,6 +61,21 @@ local current_view = "files"
 ---from the files view); nil means ALL session comments.
 ---@type string|nil
 local file_filter = nil
+
+---Tab order for H/L switching (review mode).
+local TAB_ORDER = { "files", "tree", "comments" }
+
+---True while the panel shows PROJECT comments (`:ManiculeList` outside
+---a review session) instead of a session's views. Project mode has a
+---single Comments tab and no session state to render from.
+local project_mode = false
+
+---Project root captured when the project-mode panel opened — resolved
+---from the INVOKING buffer, because later refreshes may run with the
+---panel scratch buffer current, where root resolution has nothing to
+---walk from. Passed as `_root` on every project-mode list().
+---@type string|nil
+local project_root = nil
 
 ---Collapsed directory rows in the tree view, keyed by the directory
 ---node's full path. Session-scoped: survives refreshes and toggle
@@ -92,7 +114,7 @@ local last_view = nil
 ---full render per event. The first event of a synchronous burst
 ---schedules the refresh (same event-loop tick — no timer delay, no
 ---added latency); the rest find the flag set and no-op. Mirrors
----init.lua's `qf_refresh_pending`.
+---init.lua's `viewport_refresh_pending`.
 local refresh_pending = false
 
 -- The session's project root, URI array/set, and uri -> pair-index map
@@ -142,6 +164,19 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculePanelResolved", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelViewed", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelDir", { link = "Directory", default = true })
+  -- Winbar tab bar: inactive tabs dim like the other muted panel text;
+  -- the active tab borrows Title — the stock bold/accent combo — so it
+  -- reads emphasized on any palette. Both are default links.
+  vim.api.nvim_set_hl(0, "ManiculePanelTab", { link = "Comment", default = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelTabActive", { link = "Title", default = true })
+end
+
+---Winbars run through the statusline engine: literal `%` in dynamic
+---text must double or it becomes a statusline item.
+---@param text string
+---@return string
+local function winbar_escape(text)
+  return (text:gsub("%%", "%%%%"))
 end
 
 ---@class manicule.review.panel.Row
@@ -199,6 +234,9 @@ local function pair_row_ctx()
   return {
     state = state,
     counts = counts,
+    -- Session comment total for the winbar's Comments tab — derived
+    -- from the SAME list() call as the per-file counts.
+    comment_total = #records,
     icons = icons,
     with_icons = icons.enabled(),
     -- Per-pair {added, removed} counts, computed once per session on the
@@ -315,17 +353,17 @@ local function pair_row(idx, label, indent, ctx)
 end
 
 ---Files view rows: one per session pair, full path, no indent.
----@return manicule.review.panel.Row[]
+---@return manicule.review.panel.Row[] rows, integer comment_total
 local function build_file_rows()
   local ctx = pair_row_ctx()
   if not ctx then
-    return {}
+    return {}, 0
   end
   local rows = {}
   for idx, pair in ipairs(ctx.state.files) do
     rows[#rows + 1] = pair_row(idx, pair.path, "", ctx)
   end
-  return rows
+  return rows, ctx.comment_total
 end
 
 ---@class manicule.review.panel.DirNode
@@ -442,15 +480,15 @@ local function append_tree_rows(node, depth, rows, ctx)
   end
 end
 
----@return manicule.review.panel.Row[]
+---@return manicule.review.panel.Row[] rows, integer comment_total
 local function build_tree_rows()
   local ctx = pair_row_ctx()
   if not ctx then
-    return {}
+    return {}, 0
   end
   local rows = {}
   append_tree_rows(build_tree(ctx.state.files), 0, rows, ctx)
-  return rows
+  return rows, ctx.comment_total
 end
 
 ---Comments view rows, one per record in canonical `uri → line → id`
@@ -460,13 +498,22 @@ end
 ---— and both render dimmed.
 ---@param records? table[] pre-fetched records for the CURRENT filter
 ---(uri-scoped when `file_filter` is set); fetched here when nil.
----@return manicule.review.panel.Row[]
+---@return manicule.review.panel.Row[] rows, integer comment_total
 local function build_comment_rows(records)
   local state = require("manicule.review").state()
   if not records then
-    local uris = file_filter and { [file_filter] = true } or (state and state.uri_set or {})
-    records =
-      require("manicule").list({ _quiet = true, _no_sync = true, uris = uris, _root = state and state.root or nil })
+    if project_mode then
+      -- Project mode lists EVERY project comment. It keeps the
+      -- editor-wide position sync (no `_no_sync`): this is a
+      -- user-invoked view over live buffers, so row line numbers must
+      -- follow moved extmarks — the review views skip the sync only
+      -- because their renders always trail an already-synced mutation.
+      records = require("manicule").list({ _quiet = true, _root = project_root })
+    else
+      local uris = file_filter and { [file_filter] = true } or (state and state.uri_set or {})
+      records =
+        require("manicule").list({ _quiet = true, _no_sync = true, uris = uris, _root = state and state.root or nil })
+    end
   end
   local range = require("manicule.range")
   local str = require("manicule.str")
@@ -481,15 +528,20 @@ local function build_comment_rows(records)
     local gh_resolved = gh ~= nil and gh.resolved == true
 
     -- Display path: the session pair's relative path when the record
-    -- maps to one (uri -> pair index straight off the session cache),
-    -- else the file's tail.
+    -- maps to one (uri -> pair index straight off the session cache);
+    -- in project mode the path relative to the project root; else the
+    -- file's tail.
     local label
     local pair_index = state and state.uri_index and state.uri_index[record.uri] or nil
     if pair_index and state.files[pair_index] then
       label = state.files[pair_index].path
     else
       local path = require("manicule.uri").to_path(record.uri)
-      label = path and vim.fn.fnamemodify(path, ":t") or record.uri
+      if path and project_root and path:sub(1, #project_root + 1) == project_root .. "/" then
+        label = path:sub(#project_root + 2)
+      else
+        label = path and vim.fn.fnamemodify(path, ":t") or record.uri
+      end
     end
 
     local sl = range.start_line(record)
@@ -516,7 +568,7 @@ local function build_comment_rows(records)
       },
     }
   end
-  return rows
+  return rows, #records
 end
 
 ---1-indexed panel row rendering the given pair, or nil when the row is
@@ -565,28 +617,45 @@ local function apply_current_marks()
   })
 end
 
----Viewed progress (`3/12 viewed`) in the panel window's winbar — the
----panel has no other title surface, and a winbar is native and cheap.
----Plain text (no `%` items), so no escaping is needed.
-local function update_winbar()
+---The panel winbar: a Pierre-style tab bar — `Files 12 │ Tree │
+---Comments 5`, active tab in `ManiculePanelTabActive`, counts where
+---they mean something — with the `3/12 viewed` progress right-aligned
+---via `%=`. Project mode shows its single tab as `Comments N ·
+---project`. The winbar is the panel's only title surface, and it is
+---native and cheap.
+---@param comment_count? integer comments listed by the current render
+local function update_winbar(comment_count)
   if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
+    return
+  end
+  if project_mode then
+    vim.wo[panel_winid].winbar = ("%%#ManiculePanelTabActive#%s%%#ManiculePanelTab# \u{00B7} project"):format(
+      winbar_escape(("Comments %d"):format(comment_count or 0))
+    )
     return
   end
   local state = require("manicule.review").state()
   if not state then
     return
   end
+  local labels = {
+    files = ("Files %d"):format(#state.files),
+    tree = "Tree",
+    comments = ("Comments %d"):format(comment_count or 0),
+  }
+  local parts = {}
+  for _, view in ipairs(TAB_ORDER) do
+    local hl = view == current_view and "ManiculePanelTabActive" or "ManiculePanelTab"
+    parts[#parts + 1] = ("%%#%s#%s"):format(hl, winbar_escape(labels[view]))
+  end
   local viewed = 0
   for _ in pairs(state.viewed or {}) do
     viewed = viewed + 1
   end
   local progress = ("%d/%d viewed"):format(viewed, #state.files)
-  if current_view == "tree" then
-    -- The tree view names itself: its rows can look identical to the
-    -- files view for a flat session.
-    progress = progress .. " \u{00B7} tree"
-  end
-  vim.wo[panel_winid].winbar = progress
+  -- `%*` after `%=` resets to the plain WinBar highlight for the
+  -- right-aligned progress.
+  vim.wo[panel_winid].winbar = table.concat(parts, "%#ManiculePanelTab# \u{2502} ") .. "%=%*" .. winbar_escape(progress)
 end
 
 ---Rebuild the panel buffer from state: lines, content extmarks, and
@@ -598,15 +667,17 @@ local function render(comment_records)
   if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
     return
   end
-  update_winbar()
-  local rows
+  local rows, comment_count
   if current_view == "files" then
-    rows = build_file_rows()
+    rows, comment_count = build_file_rows()
   elseif current_view == "tree" then
-    rows = build_tree_rows()
+    rows, comment_count = build_tree_rows()
   else
-    rows = build_comment_rows(comment_records)
+    rows, comment_count = build_comment_rows(comment_records)
   end
+  -- After the row build: the tab bar's Comments count derives from the
+  -- same list() call that produced the rows.
+  update_winbar(comment_count)
 
   local lines = {}
   line_data = {}
@@ -721,6 +792,52 @@ local function jump_to_comment()
   pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
 end
 
+---Jump to the comment under the cursor in the PROJECT-mode panel:
+---open its file in the previous window (the one `:ManiculeList` was
+---invoked from) and put the cursor on the comment's line. Falls back
+---to the first non-panel window in the tab, then to a fresh split.
+---The panel stays open; focus moves to the jump target.
+local function jump_to_project_comment()
+  local comment = comment_at_cursor()
+  if not comment then
+    return
+  end
+  local uri_mod = require("manicule.uri")
+  local path = uri_mod.to_path(comment.uri)
+  local target_bufnr = not path and uri_mod.bufnr_for_uri(comment.uri) or nil
+  if not path and not target_bufnr then
+    vim.notify("manicule: comment's buffer is no longer available", vim.log.levels.WARN)
+    return
+  end
+  local winid = vim.fn.win_getid(vim.fn.winnr("#"))
+  if winid == 0 or winid == panel_winid or not vim.api.nvim_win_is_valid(winid) then
+    winid = nil
+    for _, candidate in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if candidate ~= panel_winid and vim.api.nvim_win_get_config(candidate).relative == "" then
+        winid = candidate
+        break
+      end
+    end
+  end
+  if not winid then
+    local ok, new_win =
+      pcall(vim.api.nvim_open_win, vim.api.nvim_create_buf(false, true), true, { split = "above", win = -1 })
+    winid = ok and new_win or nil
+  end
+  if not winid then
+    return
+  end
+  vim.api.nvim_set_current_win(winid)
+  if path then
+    vim.cmd.edit(vim.fn.fnameescape(path))
+  else
+    vim.api.nvim_win_set_buf(winid, target_bufnr)
+  end
+  local bufnr = vim.api.nvim_win_get_buf(winid)
+  local line = math.min(math.max(comment.line, 1), vim.api.nvim_buf_line_count(bufnr))
+  pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
+end
+
 ---Feed `lhs` back through as an unmapped key — the fallthrough for
 ---maps that only act in one view.
 ---@param lhs string
@@ -791,11 +908,15 @@ local function setup_panel_keymaps(bufnr)
   -- <CR> in files view drills into the pair's comments when it has
   -- any, otherwise opens the pair. In tree view it toggles a directory
   -- row's collapse and plainly opens a file row's pair (the tree keeps
-  -- no drill-down — <Tab> reaches the comments view directly). In
-  -- comments view it jumps to the comment through review.open (never a
-  -- raw window jump, which could stomp a diff window's buffer).
+  -- no drill-down — the Comments tab is one `L` away). In comments
+  -- view it jumps to the comment through review.open (never a raw
+  -- window jump, which could stomp a diff window's buffer); in project
+  -- mode there is no session to route through, so the jump opens the
+  -- file in the previous window.
   map("<CR>", function()
-    if current_view == "files" then
+    if project_mode then
+      jump_to_project_comment()
+    elseif current_view == "files" then
       local idx = pair_index_at_cursor()
       if not idx then
         return
@@ -884,9 +1005,10 @@ local function setup_panel_keymaps(bufnr)
   end, "Manicule review: toggle GitHub thread resolution")
 
   -- <Esc> in any non-files view returns to files (clearing any file
-  -- filter); in files view it falls through to the default behavior.
+  -- filter); in files view — and in project mode, which has no files
+  -- view — it falls through to the default behavior.
   map("<Esc>", function()
-    if current_view ~= "files" then
+    if not project_mode and current_view ~= "files" then
       current_view = "files"
       file_filter = nil
       refresh()
@@ -931,21 +1053,30 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: toggle viewed for the file or directory under cursor")
 
-  -- <Tab> cycles the views: files → tree → comments → files. From a
-  -- drilled-down (scoped) comments view it first widens to ALL comments.
-  map("<Tab>", function()
-    if current_view == "files" then
-      current_view = "tree"
-    elseif current_view == "tree" then
-      current_view = "comments"
-      file_filter = nil
-    elseif file_filter then
-      file_filter = nil
-    else
-      current_view = "files"
+  -- L/H switch the panel tabs (Files → Tree → Comments), wrapping in
+  -- both directions. Switching always clears a drill-down scope, so
+  -- the Comments tab lists ALL session comments. Review mode only —
+  -- project mode has a single tab and keeps the native H/L motions.
+  local function switch_tab(step)
+    local index = 1
+    for i, view in ipairs(TAB_ORDER) do
+      if view == current_view then
+        index = i
+        break
+      end
     end
+    current_view = TAB_ORDER[(index - 1 + step) % #TAB_ORDER + 1]
+    file_filter = nil
     refresh()
-  end, "Manicule review: cycle files/tree/comments view")
+  end
+  if not project_mode then
+    map("L", function()
+      switch_tab(1)
+    end, "Manicule review: next panel tab")
+    map("H", function()
+      switch_tab(-1)
+    end, "Manicule review: previous panel tab")
+  end
 
   -- Comment mutations, previously inherited from the quickfix keymap
   -- module: same keys, same opt-out flag, but the locator now comes
@@ -1046,8 +1177,12 @@ end
 ---Create the panel buffer + window for the CURRENT view state and arm
 ---the live-refresh/lifecycle augroup. Splits open with `enter = false`
 ---(never steal focus); the float is modal-ish and takes focus, with a
----float-only `q` map that closes it (toggle-hide — the session lives).
-local function open_window()
+---`q` map that closes it (toggle-hide — a session lives on). Project
+---mode maps `q` in EVERY placement — the panel is the whole surface
+---there, so closing it must not need `:q`.
+---@param comment_records? table[] pre-fetched records: sizes the
+---bottom split by row count and feeds the initial render (project mode).
+local function open_window(comment_records)
   setup_highlights()
 
   -- A stale buffer holding the panel's name (e.g. left from an aborted
@@ -1067,7 +1202,8 @@ local function open_window()
 
   local state = require("manicule.review").state()
   local cfg = panel_config()
-  local win_opts, enter = placement_win_opts(cfg.position, cfg.size, state and #state.files or 1)
+  local row_count = comment_records and #comment_records or (state and #state.files) or 1
+  local win_opts, enter = placement_win_opts(cfg.position, cfg.size, row_count)
 
   local ok, winid = pcall(vim.api.nvim_open_win, bufnr, enter, win_opts)
   if not ok or not winid or not vim.api.nvim_win_is_valid(winid) then
@@ -1092,29 +1228,38 @@ local function open_window()
   panel_winid = winid
   panel_bufnr = bufnr
   setup_panel_keymaps(bufnr)
-  -- Float only: `q` closes the panel like a toggle (the session lives;
-  -- reopen with :ManiculeToggle). <Esc> keeps its view-back meaning in
-  -- every position, so the comments-view drill-down works unchanged.
-  if cfg.position == "float" then
+  -- `q` closes the panel like a toggle: floats in review mode (reopen
+  -- with :ManiculeToggle), and EVERY placement in project mode (reopen
+  -- with :ManiculeList). <Esc> keeps its view-back meaning in every
+  -- position, so the comments-view drill-down works unchanged.
+  if cfg.position == "float" or project_mode then
     vim.keymap.set("n", "q", hide, {
       buffer = bufnr,
       nowait = true,
       silent = true,
-      desc = "Manicule review: close the floating panel",
+      desc = "Manicule: close the comments panel",
     })
   end
-  render()
+  render(comment_records)
 
   augroup = vim.api.nvim_create_augroup("ManiculeReviewPanel", { clear = true })
   vim.api.nvim_create_autocmd("User", {
     group = augroup,
-    pattern = { "ManiculeAdded", "ManiculeDeleted", "ManiculeEdited", "ManiculeResolved", "ManiculeRestored" },
+    pattern = {
+      "ManiculeAdded",
+      "ManiculeDeleted",
+      "ManiculeEdited",
+      "ManiculeResolved",
+      "ManiculeRestored",
+      "ManiculeSynced",
+    },
     callback = function()
-      -- Refresh both views: files for live counts, comments so dd/ce/u
-      -- in a (scoped) comments view update the list in place. The
-      -- pending flag coalesces a synchronous event burst (a consuming
-      -- send fires one ManiculeDeleted per record) into ONE scheduled
-      -- refresh.
+      -- Refresh every view: files for live counts, comments so dd/ce/u
+      -- in a (scoped or project) comments view update the list in
+      -- place; ManiculeSynced covers records changed by another Neovim
+      -- session. The pending flag coalesces a synchronous event burst
+      -- (a consuming send fires one ManiculeDeleted per record) into
+      -- ONE scheduled refresh.
       if refresh_pending then
         return
       end
@@ -1187,7 +1332,9 @@ function M.open()
   if not require("manicule.review").state() then
     return
   end
-  -- Always start in files view
+  -- Always start in files view; a session panel is never project mode.
+  project_mode = false
+  project_root = nil
   current_view = "files"
   file_filter = nil
   if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
@@ -1196,6 +1343,54 @@ function M.open()
   end
   hide() -- clear any half-dead window/buffer state before recreating
   open_window()
+end
+
+---`:ManiculeList`. Inside a review session: focus the panel on the
+---Comments tab, opening it first when hidden. Outside a session: open
+---the panel in PROJECT mode — a single Comments tab listing every
+---project comment, refreshed on the same store events and closed with
+---`q` in any placement.
+function M.list()
+  if require("manicule.review").state() then
+    project_mode = false
+    project_root = nil
+    current_view = "comments"
+    file_filter = nil
+    if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
+      refresh()
+    else
+      hide()
+      open_window()
+    end
+  else
+    -- Resolve the records AND the root from the INVOKING buffer before
+    -- any window changes: the fetched records size the panel and feed
+    -- its first render, and the captured root keeps later refreshes
+    -- rooted even when they run with the panel scratch buffer current.
+    local records = require("manicule").list({ _quiet = true })
+    project_root = nil
+    for _, record in ipairs(records) do
+      if type(record.project_root) == "string" and record.project_root ~= "" then
+        project_root = record.project_root
+        break
+      end
+    end
+    project_root = project_root or require("manicule.store").root()
+    project_mode = true
+    current_view = "comments"
+    file_filter = nil
+    if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
+      refresh(records)
+    else
+      hide()
+      open_window(records)
+    end
+  end
+  -- Both modes land focus in the panel: it is the surface the user
+  -- asked for, and dd/ce/q act on the row under its cursor.
+  if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
+    vim.api.nvim_set_current_win(panel_winid)
+  end
 end
 
 ---Show/hide the panel window without ending the session. Hiding drops
@@ -1215,12 +1410,14 @@ function M.toggle()
   return true
 end
 
----Close the panel and reset ALL module state (view and tree collapse
----state included) — the session-stop teardown. Idempotent.
+---Close the panel and reset ALL module state (view, project mode, and
+---tree collapse state included) — the session-stop teardown. Idempotent.
 function M.close()
   hide()
   current_view = "files"
   file_filter = nil
+  project_mode = false
+  project_root = nil
   collapsed = {}
 end
 

@@ -1,11 +1,11 @@
 -- manicule.nvim: record range accessors + canonical list ordering.
 --
--- Shared by the quickfix formatter (`ui/quickfix.lua`) and the public
--- `list()` sorter (`init.lua`), which previously carried byte-identical
--- copies of these helpers. Records store their range 0-indexed under
--- `record.range.start` / `record.range.end_`; these accessors return the
--- 1-indexed values quickfix/list surfaces want, falling back to `1`
--- (start) / `nil` (end) when the range is absent.
+-- Shared by the review panel (`review/panel.lua`), the picker, and the
+-- public `list()` sorter (`init.lua`), which previously carried
+-- byte-identical copies of these helpers. Records store their range
+-- 0-indexed under `record.range.start` / `record.range.end_`; these
+-- accessors return the 1-indexed values listing surfaces want, falling
+-- back to `1` (start) / `nil` (end) when the range is absent.
 --
 -- NOTE: `ui/render.lua` keeps its OWN `record_start_line` /
 -- `record_end_line` (stronger `type(...)=="number"` guards) and its own
@@ -49,7 +49,7 @@ function M.end_line(record)
 end
 
 ---Canonical list comparator: order by uri → start line → id so every
----surface that lists records (quickfix, picker, completion) sees the
+---surface that lists records (panel, picker, completion) sees the
 ---same order.
 ---@param a table
 ---@param b table

@@ -3,8 +3,9 @@
 Persistent review comments for Neovim.
 
 manicule.nvim lets you attach notes to lines or ranges in any buffer, keep
-them anchored with extmarks as text moves, review them in quickfix, and send
-them to a sink such as the clipboard or a running coding-agent surface.
+them anchored with extmarks as text moves, browse them in the comments
+panel, and send them to a sink such as the clipboard or a running
+coding-agent surface.
 
 It is meant for local code review and follow-up work: leave comments while
 reading code, collect them across files, then resolve them or hand them off as
@@ -21,7 +22,8 @@ a review batch.
   `:ManiculeDisplay`.
 - Diff-review sessions (`:ManiculeReview`) over uncommitted changes, a git
   ref, a GitHub PR, or two directories.
-- Quickfix list for scanning, jumping, editing, and deleting comments.
+- A comments panel for scanning, jumping, editing, and deleting comments —
+  the quickfix list stays yours.
 - Project-scoped and session-scoped persistence.
 - Pluggable sinks for sending comments elsewhere; clipboard, cmux, and
   GitHub sinks are built in.
@@ -76,7 +78,7 @@ records to loaded buffers.
 
 ```vim
 :ManiculeAdd            " add a comment on the current line or visual range
-:ManiculeList           " open project comments in quickfix
+:ManiculeList           " open all project comments in the comments panel
 :ManiculeEdit           " pick a comment to edit, or pass a list position
 :ManiculeDelete         " pick a comment to delete, or pass a list position
 :ManiculeResolve        " pick a comment to mark resolved
@@ -136,18 +138,25 @@ real side window on the far right instead of popups, so cards can never
 cover code (config-at-setup; no runtime command in v1). `gca`/`gcd` work
 from the commented line in every mode.
 
-## Quickfix
+## Comments panel
 
-`:ManiculeList` opens a quickfix list titled `manicule (...)`.
+`:ManiculeList` opens the comments panel: an owned `manicule://panel`
+buffer placed by `review.panel.position` (bottom split by default),
+showing a single `Comments N · project` tab with one row per comment —
+`[ ] path:line  first body line`, paths relative to the project root,
+resolved rows dimmed. The quickfix list is never touched.
 
-- `<CR>` jumps to the anchored location.
+- `<CR>` opens the comment's file at its line in the previous window.
 - `dd` deletes the comment under the cursor.
 - `ce` edits the comment under the cursor.
 - `u` undoes the last comment deletion (multi-level; repeat to undo more).
 - `<C-r>` redoes the last undone deletion (multi-level; a new deletion clears the redo branch).
+- `q` closes the panel; `:ManiculeList` reopens it.
 
-The list refreshes in place when comments are added, edited, deleted,
-restored, or resolved.
+The rows refresh in place when comments are added, edited, deleted,
+restored, resolved, or synced from another Neovim session. During a
+review session, `:ManiculeList` instead focuses the review panel on its
+Comments tab.
 
 ## Review mode
 
@@ -184,10 +193,13 @@ A panel opens automatically: a plain `manicule://panel` buffer (filetype
 review. `review.panel.position` places it: `"bottom"` split (default),
 `"left"`/`"right"` full-height column, or a centered `"float"` that
 takes focus (`q` closes it; `review.panel.size` overrides rows/columns
-for the splits). Each line shows one file with its status, diffstat, and
-a live comment count (colored filetype icons when an icon provider is
-installed — see `ui.icons`), and the pair on screen is marked with `▸`,
-a highlighted line, and a bold filename.
+for the splits). Its winbar is a tab bar — `Files 12 │ Tree │
+Comments 5` with the active tab emphasized and the viewed progress
+(`3/12 viewed`) right-aligned — and `L`/`H` switch to the next/previous
+tab, wrapping. In the files view each line shows one file with its
+status, diffstat, and a live comment count (colored filetype icons when
+an icon provider is installed — see `ui.icons`), and the pair on screen
+is marked with `▸`, a highlighted line, and a bold filename.
 
 Files you navigate away from with `:ManiculeReviewNext`/`Prev` (or
 `<Tab>`/`<S-Tab>` in a review buffer) are marked viewed — `✓` and dimmed
@@ -195,15 +207,15 @@ in the panel, with progress (`3/12 viewed`) in the panel's winbar — and
 skipped by further next/prev while unviewed files remain. `v` in the
 panel toggles a file's viewed state by hand.
 
-Panel keymaps (buffer-local): `<CR>` on a commented file drills into a
-comments view scoped to that file (`<CR>` jumps to a comment, `dd`
-deletes, `ce` edits, `u`/`<C-r>` undo/redo a deletion, `<Esc>` goes
-back); `<CR>` on a file without comments switches the diff to that pair,
-and `o` always opens the pair. `<Tab>` cycles the panel through files,
-tree, and comments views (from a scoped comments view it first widens to
-all session comments), and `v` toggles viewed. `:ManiculeToggle`
-shows/hides the panel during a review. Running `:ManiculeReview pr` with
-no number opens a picker over the repository's open PRs.
+Panel keymaps (buffer-local): `L`/`H` switch the Files/Tree/Comments
+tabs. `<CR>` on a commented file drills into a comments view scoped to
+that file (`<CR>` jumps to a comment, `dd` deletes, `ce` edits,
+`u`/`<C-r>` undo/redo a deletion, `<Esc>` goes back; switching tabs
+also clears the scope); `<CR>` on a file without comments switches the
+diff to that pair, and `o` always opens the pair. `v` toggles viewed.
+`:ManiculeToggle` shows/hides the panel during a review. Running
+`:ManiculeReview pr` with no number opens a picker over the
+repository's open PRs.
 
 The tree view shows the same files grouped by directory, Pierre-style:
 two-space nesting with single-child chains collapsed into one row
@@ -212,8 +224,7 @@ subtree's diffstat, comment count, and viewed state (`●` while any file
 inside is unviewed, `✓` once all are). `<CR>` or `za` on a directory row
 collapses or expands it — the open pair auto-expands its chain to stay
 visible — `v` marks the whole subtree viewed, and file rows behave like
-the files view (`<CR>`/`o` open the pair). The panel's winbar appends
-`· tree` while the tree view is active.
+the files view (`<CR>`/`o` open the pair).
 
 When you review a PR with its head checked out, existing GitHub review
 comments are imported as manicule records and render inline. They can be

@@ -185,98 +185,58 @@ describe("manicule headless workflow", function()
     assert.are.same({ 3, 0 }, vim.api.nvim_win_get_cursor(0))
   end)
 
-  it("deletes a project record through the real manicule quickfix window", function()
+  it("deletes a project record through the project comments panel", function()
     vim.cmd("runtime plugin/manicule.lua")
     local events, stop_capture = H.capture_events({ "ManiculeDeleted" })
 
     require("manicule").add({
-      body = "delete from qf",
+      body = "delete from panel",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
     local records = require("manicule").list({ _quiet = true })
     assert.are.equal(1, #records)
 
+    local qf_title_before = vim.fn.getqflist({ title = 1 }).title
     vim.cmd("ManiculeList")
 
-    local quickfix = require("manicule.ui.quickfix")
-    local qf_winid = quickfix.is_manicule_qf_open()
-    assert.is_truthy(qf_winid)
-    vim.api.nvim_set_current_win(qf_winid)
+    -- :ManiculeList opens the panel in project mode and never touches
+    -- the quickfix list.
+    local panel = require("manicule.review.panel")
+    local panel_winid = assert(panel.winid(), "project-mode panel did not open")
+    assert.are.equal(panel_winid, vim.api.nvim_get_current_win())
+    assert.are.equal("manicule-panel", vim.bo[vim.api.nvim_win_get_buf(panel_winid)].filetype)
+    assert.are.equal(qf_title_before, vim.fn.getqflist({ title = 1 }).title)
+    assert.are.equal(0, #vim.fn.getqflist())
 
-    assert.are.equal("quickfix", vim.bo.buftype)
-    local locator = quickfix.record_locator_at_cursor()
-    assert.is_truthy(locator)
-    assert.are.equal(records[1].id, locator.id)
-    assert.are.equal("project", locator.scope)
-    assert.are.equal(ctx.root, locator.project_root)
-
+    vim.api.nvim_win_set_cursor(panel_winid, { 1, 0 })
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("dd", true, false, true), "mx", false)
 
     assert.is_true(vim.wait(1000, function()
-      return #require("manicule.store").all(ctx.root) == 0 and #vim.fn.getqflist() == 0
+      local lines = vim.api.nvim_buf_get_lines(panel.bufnr(), 0, -1, false)
+      return #require("manicule.store").all(ctx.root) == 0 and not lines[1]:find("delete from panel", 1, true)
     end, 10))
     assert.are.equal("ManiculeDeleted", events[1].pattern)
     assert.are.equal(records[1].id, events[1].data.id)
 
+    panel.close()
     stop_capture()
   end)
 
-  it("keeps quickfix keymaps off location-list buffers while a manicule list is set", function()
-    -- Count buffer-local normal-mode maps installed by
-    -- quickfix_keymaps.attach — all desc'd "Manicule: …".
-    local function manicule_map_count(bufnr)
-      local count = 0
-      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
-        if type(map.desc) == "string" and map.desc:find("Manicule:", 1, true) then
-          count = count + 1
-        end
-      end
-      return count
-    end
-
-    -- A manicule-titled GLOBAL quickfix list, as an active review
-    -- session leaves behind.
-    local path = ctx.root .. "/src/example.lua"
-    vim.fn.setqflist({}, " ", {
-      title = "manicule-review (1/2)",
-      items = { { filename = path, lnum = 1, text = "review entry" } },
-    })
-
-    -- A location list is a different list entirely: its qf buffer must
-    -- not inherit manicule's dd/ce/u/<C-r> maps.
-    vim.fn.setloclist(0, { { filename = path, lnum = 1, text = "loc entry" } })
-    vim.cmd("lopen")
-    local loclist_win = vim.api.nvim_get_current_win()
-    local loclist_buf = vim.api.nvim_win_get_buf(loclist_win)
-    assert.are.equal(1, vim.fn.getwininfo(loclist_win)[1].loclist)
-    assert.are.equal(0, manicule_map_count(loclist_buf), "manicule quickfix maps leaked onto a location-list buffer")
-    vim.cmd("lclose")
-
-    -- The real quickfix window showing the manicule-titled list still
-    -- gets the maps.
-    vim.cmd("copen")
-    local qf_win = vim.api.nvim_get_current_win()
-    local qf_buf = vim.api.nvim_win_get_buf(qf_win)
-    assert.are.equal(0, vim.fn.getwininfo(qf_win)[1].loclist)
-    assert.is_true(manicule_map_count(qf_buf) > 0, "manicule maps missing from the manicule quickfix buffer")
-    vim.cmd("cclose")
-  end)
-
-  it("edits a project record through quickfix and repaints the source popup", function()
+  it("edits a project record through the panel and repaints the source popup", function()
     vim.cmd("runtime plugin/manicule.lua")
 
     require("manicule").add({
-      body = "edit from qf before",
+      body = "edit from panel before",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    assert.is_true(wait_for_popup_count("edit from qf before", 1))
+    assert.is_true(wait_for_popup_count("edit from panel before", 1))
 
     vim.cmd("ManiculeList")
-    local quickfix = require("manicule.ui.quickfix")
-    local qf_winid = quickfix.is_manicule_qf_open()
-    assert.is_truthy(qf_winid)
-    vim.api.nvim_set_current_win(qf_winid)
+    local panel = require("manicule.review.panel")
+    local panel_winid = assert(panel.winid(), "project-mode panel did not open")
+    vim.api.nvim_set_current_win(panel_winid)
+    vim.api.nvim_win_set_cursor(panel_winid, { 1, 0 })
 
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ce", true, false, true), "mx", false)
     assert.is_true(vim.wait(1000, function()
@@ -285,25 +245,27 @@ describe("manicule headless workflow", function()
 
     local editor_bufnr = vim.api.nvim_get_current_buf()
     vim.bo[editor_bufnr].modifiable = true
-    vim.api.nvim_buf_set_lines(editor_bufnr, 0, -1, false, { "edit from qf after" })
+    vim.api.nvim_buf_set_lines(editor_bufnr, 0, -1, false, { "edit from panel after" })
     vim.bo[editor_bufnr].modifiable = false
     vim.cmd.stopinsert()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
 
     assert.is_true(vim.wait(1000, function()
       local records = require("manicule.store").all(ctx.root)
-      return records[1] and records[1].body == "edit from qf after"
+      return records[1] and records[1].body == "edit from panel after"
     end, 10))
     assert.is_true(vim.wait(1000, function()
       return not require("manicule.ui.editor").is_active()
     end, 10))
 
-    assert.is_true(wait_for_popup_count("edit from qf before", 0))
-    assert.is_true(wait_for_popup_count("edit from qf after", 1))
+    assert.is_true(wait_for_popup_count("edit from panel before", 0))
+    assert.is_true(wait_for_popup_count("edit from panel after", 1))
     assert.is_true(vim.wait(1000, function()
-      local qf = vim.fn.getqflist()
-      return #qf == 1 and qf[1].text:find("edit from qf after", 1, true) ~= nil
+      local lines = vim.api.nvim_buf_get_lines(panel.bufnr(), 0, -1, false)
+      return #lines == 1 and lines[1]:find("edit from panel after", 1, true) ~= nil
     end, 10))
+
+    panel.close()
   end)
 
   it("uses insert enter for newlines and normal enter for submitting the comment editor", function()
@@ -700,47 +662,6 @@ describe("manicule headless workflow", function()
     assert.are.equal(1, reconcile_calls)
 
     stop_capture()
-  end)
-
-  it("coalesces a synchronous burst of mutation events into one quickfix refresh", function()
-    vim.cmd("runtime plugin/manicule.lua")
-    require("manicule").add({
-      body = "coalesce me",
-      range = { start = { 0, 0 }, end_ = { 0, 0 } },
-    })
-    vim.cmd("ManiculeList")
-    local quickfix = require("manicule.ui.quickfix")
-    assert.is_truthy(quickfix.is_manicule_qf_open())
-
-    -- Drain callbacks already scheduled by the add (and by earlier
-    -- tests in this Neovim instance) so the counter below only sees
-    -- refreshes caused by the burst fired here.
-    vim.wait(50, function()
-      return false
-    end, 10)
-
-    local original_refresh = quickfix.refresh
-    local refresh_calls = 0
-    quickfix.refresh = function(...)
-      refresh_calls = refresh_calls + 1
-      return original_refresh(...)
-    end
-
-    -- Three synchronous events, zero event-loop ticks in between — the
-    -- exact burst shape a bulk mutation produces.
-    for _ = 1, 3 do
-      vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
-    end
-    assert.is_true(vim.wait(1000, function()
-      return refresh_calls > 0
-    end, 10))
-    -- Drain any additional scheduled callbacks before counting.
-    vim.wait(50, function()
-      return false
-    end, 10)
-    quickfix.refresh = original_refresh
-
-    assert.are.equal(1, refresh_calls)
   end)
 
   it("clears the pre-rename URI snapshot when the buffer unloads before BufFilePost lands", function()

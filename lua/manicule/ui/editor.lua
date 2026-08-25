@@ -28,7 +28,7 @@ local active_editor = nil
 local opening_editor = false
 
 -- Newline split with an empty-line guard, shared with the renderer and
--- quickfix formatter via `manicule.str`.
+-- review panel via `manicule.str`.
 local split_lines = str.split_lines
 
 ---@param key string

@@ -15,7 +15,7 @@ local function emit(pattern, data)
   vim.api.nvim_exec_autocmds("User", { pattern = pattern, data = data })
 end
 
----Find a record by its panel/quickfix locator across both stores.
+---Find a record by its panel locator across both stores.
 ---Returns the live record plus a saver that persists mutations through
 ---the owning store.
 ---@param locator {id: string, scope?: string, project_root?: string}|nil

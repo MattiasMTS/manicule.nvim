@@ -1,7 +1,7 @@
 -- manicule.nvim: small string helpers shared across surfaces.
 --
 -- Centralises two formatting primitives that were duplicated byte-for-byte
--- in the renderer, the quickfix formatter, and the floating editor:
+-- in the renderer, the review panel, and the floating editor:
 --   * `split_lines` — newline split with an empty-string guard so callers
 --     always get at least one line to render.
 --   * `truncate` — byte-length-based ellipsis truncation.

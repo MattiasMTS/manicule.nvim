@@ -202,22 +202,12 @@ describe("manicule positional picker", function()
     assert.is_truthy(notified.msg:find("no comments"))
   end)
 
-  it("list() ordering matches quickfix build_items ordering", function()
+  it("list() orders records by uri → line → id", function()
     add("b-first", 5, "b.lua")
     add("a-second", 10, "a.lua")
     add("a-first", 3, "a.lua")
-    local list_ids = {}
-    for _, r in ipairs(require("manicule").list({ _quiet = true })) do
-      table.insert(list_ids, r.id)
-    end
-    local qf_items = require("manicule.ui.quickfix").build_items(require("manicule").list({ _quiet = true }))
-    local qf_ids = {}
-    for _, it in ipairs(qf_items) do
-      table.insert(qf_ids, it.user_data.id)
-    end
-    assert.are.same(list_ids, qf_ids)
-    -- Sanity check: a.lua records should come before b.lua (URI order
-    -- reflects the filesystem path order).
+    -- a.lua records come before b.lua (URI order reflects the
+    -- filesystem path order), and within a file lines sort ascending.
     local ordered = require("manicule").list({ _quiet = true })
     local function ends_with(uri, suffix)
       return uri:sub(-#suffix) == suffix
@@ -225,5 +215,7 @@ describe("manicule positional picker", function()
     assert.is_true(ends_with(ordered[1].uri, "/a.lua"))
     assert.is_true(ends_with(ordered[2].uri, "/a.lua"))
     assert.is_true(ends_with(ordered[3].uri, "/b.lua"))
+    assert.are.equal("a-first", ordered[1].body)
+    assert.are.equal("a-second", ordered[2].body)
   end)
 end)

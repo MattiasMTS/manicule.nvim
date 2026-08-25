@@ -330,7 +330,7 @@ local function comment_winhighlight()
 end
 
 -- `split_lines` (newline split with empty-line guard) and `truncate_text`
--- (byte-length ellipsis) are shared with the quickfix formatter and the
+-- (byte-length ellipsis) are shared with the review panel and the
 -- floating editor via `manicule.str`.
 local split_lines = str.split_lines
 local truncate_text = str.truncate
@@ -643,7 +643,7 @@ end
 ---are locally authored, so they read as local until GitHub owns them).
 ---Deliberately origin-only, never "resolved": the badge must
 ---not change meaning when a record's state flips, and resolution is
----already surfaced by every listing surface (quickfix's `[x]`, the
+---already surfaced by every listing surface (the panel's `[x]`, the
 ---picker's `✓` prefix, the review panel's `✓` on GitHub-resolved
 ---threads) — the card does not re-mark it.
 ---@param record table

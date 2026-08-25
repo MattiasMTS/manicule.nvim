@@ -154,7 +154,7 @@ end
 local function location_for(record)
   local path = display_path(record)
   -- Reuse the shared 1-indexed range accessors so the picker's line
-  -- numbers stay in lockstep with the quickfix formatter. `start_line`
+  -- numbers stay in lockstep with the review panel. `start_line`
   -- falls back to 1 when the range is missing; `end_line` is nil unless
   -- there's a numeric end row.
   local sl = range.start_line(record)

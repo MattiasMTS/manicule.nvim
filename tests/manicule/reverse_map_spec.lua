@@ -276,8 +276,7 @@ describe("manicule M.list adapter-routed project root", function()
     -- The bug: `M.list()` previously called raw `store.root()` on the
     -- staged buffer, walked up to a dead end, and returned 0 records.
     -- With the fix it routes through `adapter.identify` and sees the
-    -- project record. Pass `_quiet` so the call doesn't open a
-    -- quickfix list during the test run.
+    -- project record.
     local results = manicule.list({ _quiet = true })
     assert.are.equal(1, #results)
     assert.are.equal("routed via adapter", results[1].body)

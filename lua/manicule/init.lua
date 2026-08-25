@@ -55,13 +55,6 @@ end
 ---@type table<integer, boolean>
 local viewport_refresh_pending = {}
 
--- Same idea for the `User Manicule*` → quickfix-refresh autocmd: a bulk
--- mutation (e.g. `M.send` clearing a batch) fires one event per record,
--- and a plain `vim.schedule` would queue one qf refresh per event. The
--- first event of a synchronous burst schedules the refresh; the rest
--- find the flag set and no-op.
-local qf_refresh_pending = false
-
 ---@class manicule.Config
 ---@field store? table
 ---@field sinks? table
@@ -372,10 +365,8 @@ local function refresh_external_store_changes(roots)
     return
   end
   refresh_all_loaded()
-  local quickfix = require("manicule.ui.quickfix")
-  if quickfix.is_manicule_qf_open() then
-    quickfix.refresh()
-  end
+  -- The review panel subscribes to ManiculeSynced, so an open panel
+  -- (review or project mode) re-renders from the freshly synced store.
   emit("ManiculeSynced", { roots = roots })
 end
 
@@ -842,69 +833,6 @@ function M.setup(opts)
     end,
   })
 
-  -- Buffer-local keymaps for manicule quickfix lists. `FileType qf`
-  -- fires once per qf buffer; we check the list title to avoid
-  -- touching grep/diagnostic/other-plugin lists.
-  vim.api.nvim_create_autocmd("FileType", {
-    group = group,
-    pattern = "qf",
-    callback = function(ev)
-      -- Location-list buffers share the `qf` filetype, but the GLOBAL
-      -- quickfix title below says nothing about them — while a review
-      -- session holds a `manicule…`-titled global list, any `:lopen`ed
-      -- location list would inherit manicule's dd/ce/u/<C-r> maps.
-      -- Manicule only ever owns the global quickfix list, so skip
-      -- loclist windows entirely.
-      local win = vim.fn.bufwinid(ev.buf)
-      local wininfo = win ~= -1 and vim.fn.getwininfo(win)[1] or nil
-      if not wininfo or wininfo.loclist == 1 then
-        return
-      end
-      local ok, info = pcall(vim.fn.getqflist, { title = 1 })
-      if not ok or type(info) ~= "table" then
-        return
-      end
-      if type(info.title) == "string" and info.title:match("^manicule") then
-        require("manicule.ui.quickfix_keymaps").attach(ev.buf)
-      end
-    end,
-  })
-
-  -- Live refresh: any mutation event regenerates the open manicule qf
-  -- list in place. `setqflist` mode `"r"` keeps the window open and
-  -- preserves the cursor line. A single pattern-matched autocmd
-  -- suffices; the refresh path no-ops when no manicule qf is visible.
-  vim.api.nvim_create_autocmd("User", {
-    group = group,
-    pattern = {
-      "ManiculeAdded",
-      "ManiculeEdited",
-      "ManiculeDeleted",
-      "ManiculeResolved",
-      "ManiculeOrphaned",
-      "ManiculeRenamed",
-      "ManiculeSynced",
-      "ManiculeRestored",
-    },
-    callback = function()
-      -- Defer so we don't mutate the qflist from inside the autocmd
-      -- dispatch. The pending flag makes the burst-coalescing real
-      -- (mirroring `viewport_refresh_pending`): only the FIRST event of
-      -- a synchronous burst schedules the refresh; the rest no-op.
-      if qf_refresh_pending then
-        return
-      end
-      qf_refresh_pending = true
-      vim.schedule(function()
-        qf_refresh_pending = false
-        local quickfix = require("manicule.ui.quickfix")
-        if quickfix.is_manicule_qf_open() then
-          quickfix.refresh()
-        end
-      end)
-    end,
-  })
-
   -- Lazy-load sweep: when the plugin is gated behind `cmd = {...}` /
   -- `keys = {...}` in a lazy spec, `BufReadPost` fires before
   -- `M.setup()` runs, so the autocmd above never sees the buffers the
@@ -1260,10 +1188,11 @@ local function find(id, locator)
     end
   end
 
-  -- Quickfix and picker paths may carry a root, but fall back to every
+  -- Panel and picker paths may carry a root, but fall back to every
   -- loaded project cache so ids remain actionable after the current window
-  -- moved to a qf/help/scratch buffer. This does not load arbitrary store
-  -- files from disk; it only searches roots already touched this session.
+  -- moved to a panel/help/scratch buffer. This does not load arbitrary
+  -- store files from disk; it only searches roots already touched this
+  -- session.
   for cached_root in pairs(store._cache()) do
     local record, save, remove = find_project(cached_root)
     if record then
@@ -1422,25 +1351,28 @@ function M.resolve(id, opts)
 end
 
 ---Sort records by uri → start line → id so every surface that lists
----records (quickfix, picker, completion) sees the same order. Returning
----a sorted list from `list()` itself — rather than relying on callers
----to re-sort — is load-bearing for the picker: positional numbers from
----tab-completion must resolve to the same records the user sees in
----`:ManiculeList`.
+---records (the comments panel, picker, completion) sees the same
+---order. Returning a sorted list from `list()` itself — rather than
+---relying on callers to re-sort — is load-bearing for the picker:
+---positional numbers from tab-completion must resolve to the same
+---records the user sees in `:ManiculeList`.
 ---@param records table[]
 ---@return table[]
 local function sort_records(records)
-  -- Sorts in place (callers own a fresh list). Ordering matches the
-  -- quickfix formatter via the shared `manicule.range.compare` so the
-  -- picker, completion, and quickfix all agree.
+  -- Sorts in place (callers own a fresh list). The shared
+  -- `manicule.range.compare` keeps the panel, picker, and completion
+  -- in agreement.
   table.sort(records, require("manicule.range").compare)
   return records
 end
 
----List comments, optionally filtered. Results are always sorted by
----`uri → start line → id` so the ordering seen in `:ManiculeList`,
----the picker, and the positional-number completer is identical.
----@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean, _root?: string, _no_sync?: boolean}|nil
+---List comments, optionally filtered. A pure query — no UI side
+---effects (`:ManiculeList` renders through the review panel's project
+---mode instead). Results are always sorted by `uri → start line → id`
+---so the ordering seen in `:ManiculeList`, the picker, and the
+---positional-number completer is identical. `_quiet` is accepted for
+---backward compatibility and ignored.
+---@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean, _root?: string, _no_sync?: boolean, _quiet?: boolean}|nil
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
@@ -1453,8 +1385,8 @@ function M.list(filter)
   -- Read-only surfaces (the review panel) render right after mutations,
   -- whose paths already carry current positions — re-walking every
   -- loaded buffer (a store sync probe + root resolution per buffer) on
-  -- each render is pure overhead there. Writing paths (send, picker,
-  -- quickfix) keep the sync.
+  -- each render is pure overhead there. Writing paths (send, picker)
+  -- keep the sync.
   if not filter._no_sync then
     sync_all_loaded_positions()
   end
@@ -1464,7 +1396,7 @@ function M.list(filter)
   local uri_mod = require("manicule.uri")
   local bufnr = vim.api.nvim_get_current_buf()
   local mark_ids = render.mark_ids_for_buffer(bufnr)
-  -- Walk both stores. The picker/quickfix is per-run-short-lived; the
+  -- Walk both stores. The picker/panel listing is per-run-short-lived; the
   -- filter winnows and consumers can scope further. Keeps the scope
   -- transparent — no caller branches on `record.scope`.
   local all = {}
@@ -1526,13 +1458,6 @@ function M.list(filter)
     :totable()
 
   sort_records(results)
-
-  -- If called as a command (no filter, no caller return-use), push to quickfix.
-  if not filter._quiet and (filter.to_qflist or vim.tbl_count(filter) == 0) then
-    -- Pass the filter through so the quickfix module can cache it for
-    -- `refresh()` and regenerate the same list on `User Manicule*`.
-    require("manicule.ui.quickfix").show(results, { open = true, filter = filter })
-  end
   return results
 end
 

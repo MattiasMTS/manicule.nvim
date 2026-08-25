@@ -3,7 +3,8 @@
 manicule.nvim stores persistent review comments for Neovim buffers. A
 comment is anchored by URI and range, rendered with extmarks in one of four
 display modes (floating popups, eol virtual text, inline boxes, or hidden
-anchors), listed through quickfix, and optionally sent to an external sink.
+anchors), listed in the comments panel, and optionally sent to an external
+sink.
 
 The plugin is local-first. There is no hosted service or network broker.
 Project comments use a local SQLite database in WAL mode; session comments
@@ -18,7 +19,7 @@ macOS and Linux are supported; Windows is untested and unsupported.
 
 ## Design Principles
 
-- URI identity is the source of truth. Buffers, quickfix entries, and sinks
+- URI identity is the source of truth. Buffers, panel rows, and sinks
   all resolve back to records keyed by `uri`.
 - Rendering is disposable. Extmarks and popups are rebuilt from persisted
   records whenever needed.
@@ -42,8 +43,8 @@ lua/manicule/anchor.lua         shared extmark namespace
 lua/manicule/ui.lua             prompt and sink picker facade
 lua/manicule/ui/editor.lua      floating comment editor
 lua/manicule/ui/render.lua      extmarks, display modes, popups, viewport rendering
-lua/manicule/ui/quickfix.lua    quickfix formatting and refresh
 lua/manicule/review.lua         review session core (start/open/next/prev/finish/stop)
+lua/manicule/review/panel.lua   the comments/review panel (tabs, rows, project mode)
 lua/manicule/review/git.lua     git plumbing (rev-parse, merge-base, changed files, staging)
 lua/manicule/review/inline.lua  unified-mode diff paint (virtual lines, folds, hunk nav)
 lua/manicule/review/sources.lua resolver registry (dirs, git ref, pr via gh CLI)
@@ -334,18 +335,29 @@ worktree right). One active session at a time, in its own tab page.
   list, which stays free for the user during reviews. One idempotent
   `render()` rebuilds buffer lines + extmarks from `review.state()` and the
   store; per-row locators live in a module-local `line_data` table (files
-  view: pair index; comments view: record id/uri/line). Files view (default)
-  shows `<icon> [status] path  · N comments` with live counts refreshing on
+  view: pair index; comments view: record id/uri/line). The winbar is a
+  Pierre-style tab bar (`Files 12 │ Tree │ Comments 5`, active tab in
+  `ManiculePanelTabActive`, `N/M viewed` progress right-aligned via `%=`);
+  `L`/`H` switch tabs with wraparound. Files view (default) shows
+  `<icon> [status] path  · N comments` with live counts refreshing on
   `User Manicule*` events, icon highlights applied as extmarks, and the OPEN
   pair marked with a `▸` overlay, a full-line `ManiculePanelCurrent`
   background (Normal bg blended 8% toward fg; CursorLine link on transparent
   themes), and a bold filename — re-marked without a re-render on pair
   switch (`sync_index`). `<CR>` drills into a scoped comments view or calls
-  `review.open(idx)`; `<Tab>` toggles to the comments view (session-scoped
-  records, resolved ones dimmed, `dd`/`ce`/`u`/`<C-r>`/`r`/`gr` buffer-local).
-  Lifecycle mirrors `ui/rail.lua`: dedicated augroup, WinClosed teardown,
+  `review.open(idx)`; the Comments tab lists the session records (resolved
+  ones dimmed, `dd`/`ce`/`u`/`<C-r>`/`r`/`gr` buffer-local). Lifecycle
+  mirrors `ui/rail.lua`: dedicated augroup, WinClosed teardown,
   window+buffer+autocmds dropped on hide, full state reset in `close()`
   (called by `stop()`).
+- Project mode (`panel.list()`, wired to `:ManiculeList`): outside a
+  session, the same panel opens with a single `Comments N · project` tab
+  listing every project comment (paths project-root-relative, root
+  captured from the invoking buffer). Same comment-row maps; `<CR>` opens
+  the file in the previous window; `q` closes in any placement; refreshes
+  coalesce over the same `User Manicule*` events. Inside a session,
+  `:ManiculeList` focuses the review panel on its Comments tab. There is
+  no quickfix machinery anywhere — `manicule.list()` is a pure query.
 - `finish()`: collects session comments via URI filter, dispatches to
   configured sink; auto-flushes on `VimLeavePre` when sink is configured and
   comments exist.
@@ -419,8 +431,9 @@ state directories and throwaway project roots with `.git` markers.
 
 - `tests/manicule/`: module-level behavior, store persistence, adapter identity,
   picker routing, sink selection.
-- `tests/integration/`: real workflows with buffers, floating windows, quickfix,
-  render lifecycle, fake prompts, fake sinks, and lifecycle events.
+- `tests/integration/`: real workflows with buffers, floating windows, the
+  comments panel, render lifecycle, fake prompts, fake sinks, and lifecycle
+  events.
 
 The test policy is integration-first when behavior crosses Neovim surfaces.
 Mocks are avoided except for costly or external systems.

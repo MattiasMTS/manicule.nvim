@@ -87,8 +87,11 @@ vim.api.nvim_create_user_command("ManiculeAdd", function(opts)
   require("manicule").add({ range = opts.range > 0 and { opts.line1, opts.line2 } or nil })
 end, { range = true })
 
+-- Outside a review session: the panel in project mode (all project
+-- comments, Comments-only tab). Inside one: focus the review panel's
+-- Comments tab.
 vim.api.nvim_create_user_command("ManiculeList", function()
-  require("manicule").list()
+  require("manicule.review.panel").list()
 end, {})
 
 ---Verdict words accepted as the optional second argument of
@@ -199,7 +202,7 @@ vim.keymap.set({ "n", "x" }, "<Plug>(manicule-add)", function()
 end, { silent = true })
 
 vim.keymap.set("n", "<Plug>(manicule-list)", function()
-  require("manicule").list()
+  require("manicule.review.panel").list()
 end, { silent = true })
 
 local function jump_next()
