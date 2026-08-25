@@ -193,13 +193,13 @@ A panel opens automatically: a plain `manicule://panel` buffer (filetype
 review. `review.panel.position` places it: `"bottom"` split (default),
 `"left"`/`"right"` full-height column, or a centered `"float"` that
 takes focus (`q` closes it; `review.panel.size` overrides rows/columns
-for the splits). Its winbar is a tab bar — `Files 12 │ Tree │
-Comments 5` with the active tab emphasized and the viewed progress
-(`3/12 viewed`) right-aligned — and `L`/`H` switch to the next/previous
-tab, wrapping. In the files view each line shows one file with its
-status, diffstat, and a live comment count (colored filetype icons when
-an icon provider is installed — see `ui.icons`), and the pair on screen
-is marked with `▸`, a highlighted line, and a bold filename.
+for the splits). Its winbar is a tab bar — `Files 12 │ Comments 5`
+with the active tab emphasized and the viewed progress (`3/12 viewed`)
+right-aligned — and `L`/`H` switch to the next/previous tab, wrapping.
+In the Files tab each line shows one file with its status, diffstat,
+and a live comment count (colored filetype icons when an icon provider
+is installed — see `ui.icons`), and the pair on screen is marked with
+`▸`, a highlighted line, and a bold filename.
 
 Files you navigate away from with `:ManiculeReviewNext`/`Prev` (or
 `<Tab>`/`<S-Tab>` in a review buffer) are marked viewed — `✓` and dimmed
@@ -207,24 +207,27 @@ in the panel, with progress (`3/12 viewed`) in the panel's winbar — and
 skipped by further next/prev while unviewed files remain. `v` in the
 panel toggles a file's viewed state by hand.
 
-Panel keymaps (buffer-local): `L`/`H` switch the Files/Tree/Comments
-tabs. `<CR>` on a commented file drills into a comments view scoped to
-that file (`<CR>` jumps to a comment, `dd` deletes, `ce` edits,
-`u`/`<C-r>` undo/redo a deletion, `<Esc>` goes back; switching tabs
-also clears the scope); `<CR>` on a file without comments switches the
-diff to that pair, and `o` always opens the pair. `v` toggles viewed.
-`:ManiculeToggle` shows/hides the panel during a review. Running
-`:ManiculeReview pr` with no number opens a picker over the
-repository's open PRs.
+Panel keymaps (buffer-local): `L`/`H` switch the Files/Comments tabs.
+`<CR>` on a commented file drills into a comments view scoped to that
+file (`<CR>` jumps to a comment, `dd` deletes, `ce` edits, `u`/`<C-r>`
+undo/redo a deletion, `<Esc>` goes back; switching tabs also clears
+the scope); `<CR>` on a file without comments switches the diff to
+that pair, and `o` always opens the pair. `v` toggles viewed. `t`
+toggles the Files tab's layout (below). `:ManiculeToggle` shows/hides
+the panel during a review. Running `:ManiculeReview pr` with no number
+opens a picker over the repository's open PRs.
 
-The tree view shows the same files grouped by directory, Pierre-style:
-two-space nesting with single-child chains collapsed into one row
-(`lua/manicule`), and each `▾`/`▸` directory row rolling up its
-subtree's diffstat, comment count, and viewed state (`●` while any file
-inside is unviewed, `✓` once all are). `<CR>` or `za` on a directory row
-collapses or expands it — the open pair auto-expands its chain to stay
-visible — `v` marks the whole subtree viewed, and file rows behave like
-the files view (`<CR>`/`o` open the pair).
+The Files tab has two layouts — `"flat"` (the default; set
+`review.panel.layout` to change it) lists one full path per line, and
+`t` toggles into a `"tree"` layout for the rest of the session: the
+same files grouped by directory, Pierre-style, with two-space nesting,
+single-child chains collapsed into one row (`lua/manicule`), and each
+`▾`/`▸` directory row rolling up its subtree's diffstat, comment count,
+and viewed state (`●` while any file inside is unviewed, `✓` once all
+are). `<CR>` or `za` on a directory row collapses or expands it — the
+open pair auto-expands its chain to stay visible — and `v` marks the
+whole subtree viewed. File rows behave identically in both layouts
+(`<CR>` drills into comments or opens the pair, `o` always opens).
 
 When you review a PR with its head checked out, existing GitHub review
 comments are imported as manicule records and render inline. They can be
@@ -274,6 +277,7 @@ require("manicule").setup({
     context = 3, -- unified: lines kept visible around each hunk
     panel = {
       position = "bottom", -- "bottom", "left", "right", or "float"
+      layout = "flat", -- Files tab: "flat" paths or a "tree" grouped by directory (t toggles)
       -- size = 12, -- rows (bottom) or columns (left/right); default per position
     },
   },

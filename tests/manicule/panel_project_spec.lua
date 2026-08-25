@@ -107,12 +107,13 @@ describe("manicule project comments panel", function()
     assert.are.equal(0, #vim.fn.getqflist())
   end)
 
-  it("H and L are not mapped in project mode", function()
+  it("H, L, and t are not mapped in project mode", function()
     seed_comments()
     vim.cmd("ManiculeList")
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(assert(panel().bufnr()), "n")) do
       assert.are_not.equal("H", map.lhs, "H leaked into the project-mode panel")
       assert.are_not.equal("L", map.lhs, "L leaked into the project-mode panel")
+      assert.are_not.equal("t", map.lhs, "t leaked into the project-mode panel")
     end
   end)
 

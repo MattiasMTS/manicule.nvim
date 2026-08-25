@@ -610,7 +610,7 @@ describe("manicule review session", function()
   end
 
   ---`H` from the files view wraps straight to the Comments tab
-  ---(the tab order is Files → Tree → Comments).
+  ---(the tab order is Files → Comments).
   local function to_comments_view(row)
     press_in_panel(row, "H")
   end
@@ -711,27 +711,30 @@ describe("manicule review session", function()
     return files
   end
 
-  it("L cycles files → tree → comments → files", function()
+  it("L cycles files → comments → files; t keeps its tree layout across the cycle", function()
     local R = require("manicule.review")
     local files = make_nested_pair_set()
     assert.is_true(R.start({ files = files, label = "cycle" }))
     add_comment(files[1].right, "cycle comment")
     vim.wait(200)
 
-    press_in_panel(1, "L") -- tree: a directory row appears
-    assert.is_truthy(table.concat(panel_lines(), "\n"):find("\u{25BE} sub", 1, true), "first L is not tree view")
+    press_in_panel(1, "t") -- tree layout: a directory row appears
+    assert.is_truthy(table.concat(panel_lines(), "\n"):find("\u{25BE} sub", 1, true), "t is not the tree layout")
     press_in_panel(1, "L") -- comments
-    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "second L is not comments view")
-    press_in_panel(1, "L") -- wraps back to files
-    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 1 comments", 1, true), "third L is not files view")
+    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "first L is not comments view")
+    press_in_panel(1, "L") -- wraps back to files, tree layout intact
+    assert.is_truthy(
+      table.concat(panel_lines(), "\n"):find("\u{25BE} sub", 1, true),
+      "second L did not return to the files tab's tree layout"
+    )
   end)
 
-  it("tree view <CR> on a file row rebuilds that pair's diff", function()
+  it("tree layout <CR> on a file row rebuilds that pair's diff", function()
     local R = require("manicule.review")
     local files = make_nested_pair_set()
     assert.is_true(R.start({ files = files, label = "tree-open" }))
 
-    press_in_panel(1, "L")
+    press_in_panel(1, "t")
     -- Rows: 1 = f1.lua (root file), 2 = ▾ sub, 3 = nested.lua.
     press_in_panel(3, "<CR>")
 
@@ -739,7 +742,8 @@ describe("manicule review session", function()
     local cur_name = vim.api.nvim_buf_get_name(0)
     assert.is_truthy(cur_name:find("/sub/nested.lua", 1, true), "expected the nested pair, got " .. cur_name)
     assert.is_truthy(panel_win(), "panel window closed by the tree open")
-    -- Still tree view, current marks on the nested file's row.
+    -- Still the Files tab's tree layout, current marks on the nested
+    -- file's row.
     assert.is_truthy(panel_lines()[2]:find("\u{25BE} sub", 1, true))
     assert.are.equal(3, panel_current_row())
   end)

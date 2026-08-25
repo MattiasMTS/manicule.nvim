@@ -144,11 +144,11 @@ describe("manicule review panel substrate", function()
 
     local by_lhs = {}
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
-      if type(map.desc) == "string" and map.desc:find("Manicule review", 1, true) then
+      if type(map.desc) == "string" and map.desc:find("Manicule", 1, true) then
         by_lhs[map.lhs:lower()] = true
       end
     end
-    for _, lhs in ipairs({ "<cr>", "o", "v", "r", "gr", "za", "<esc>", "h", "l", "dd", "ce", "u", "<c-r>" }) do
+    for _, lhs in ipairs({ "<cr>", "o", "v", "t", "r", "gr", "za", "<esc>", "h", "l", "dd", "ce", "u", "<c-r>" }) do
       assert.is_true(by_lhs[lhs] == true, "missing panel keymap " .. lhs)
     end
   end)
@@ -759,7 +759,7 @@ describe("manicule review panel viewed tracking", function()
   end)
 end)
 
-describe("manicule review panel tree view", function()
+describe("manicule review panel tree layout", function()
   before_each(function()
     ctx = H.setup()
   end)
@@ -798,8 +798,9 @@ describe("manicule review panel tree view", function()
     end
   end
 
-  ---Start a session over the canonical multi-dir shape and `L` into
-  ---the tree view. Rendered rows (two-space nesting, chains collapsed):
+  ---Start a session over the canonical multi-dir shape and `t` the
+  ---Files tab into its tree layout. Rendered rows (two-space nesting,
+  ---chains collapsed):
   ---  1  ▾ lua/manicule …  ●
   ---  2      [M] a.lua …
   ---  3    ▾ review …  ●
@@ -809,7 +810,7 @@ describe("manicule review panel tree view", function()
   local function start_tree()
     local files = make_nested_pairs({ "lua/manicule/a.lua", "lua/manicule/review/b.lua", "tests/c.lua" })
     assert.is_true(require("manicule.review").start({ files = files, label = "tree" }))
-    press_in_panel(1, "L")
+    press_in_panel(1, "t")
     return files
   end
 
@@ -827,35 +828,67 @@ describe("manicule review panel tree view", function()
     }, panel_lines())
   end)
 
-  it("L cycles files → tree → comments → files", function()
-    local files = start_tree()
-    press_in_panel(1, "<Esc>") -- back to files for a clean cycle start
-    focus_file_window()
-    add_comment(files[2].right, "cycle comment")
-    vim.wait(200)
-    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "not in files view")
+  it("t toggles the Files tab between the flat and tree layouts", function()
+    local files = make_nested_pairs({ "lua/manicule/a.lua", "tests/c.lua" })
+    assert.is_true(require("manicule.review").start({ files = files, label = "layout" }))
+    -- Flat by default: full paths, no directory rows.
+    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "did not start flat")
 
-    press_in_panel(1, "L")
-    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "first L is not tree view")
-    press_in_panel(1, "L")
-    assert.is_truthy(panel_lines()[1]:find("cycle comment", 1, true), "second L is not comments view")
-    press_in_panel(1, "L")
-    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "third L is not files view (no wrap)")
+    press_in_panel(1, "t")
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "t did not switch to the tree layout")
+
+    press_in_panel(1, "t")
+    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "second t did not switch back to flat")
   end)
 
-  it("H cycles backwards and wraps from files to comments", function()
-    local files = start_tree()
-    press_in_panel(1, "<Esc>") -- files
-    focus_file_window()
-    add_comment(files[2].right, "reverse comment")
-    vim.wait(200)
+  it("t falls through in the comments view", function()
+    start_tree()
+    press_in_panel(1, "L") -- comments
+    local before = panel_lines()
 
-    press_in_panel(1, "H")
-    assert.is_truthy(panel_lines()[1]:find("reverse comment", 1, true), "H from files did not wrap to comments")
-    press_in_panel(1, "H")
-    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "H from comments is not tree view")
-    press_in_panel(1, "H")
-    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "H from tree is not files view")
+    press_in_panel(1, "t")
+
+    local winid = assert(panel().winid())
+    assert.is_truthy(vim.wo[winid].winbar:find("%#ManiculePanelTabActive#Comments", 1, true), vim.wo[winid].winbar)
+    assert.are.same(before, panel_lines(), "t changed the comments view")
+  end)
+
+  it("keeps the layout across refreshes and tab switches", function()
+    start_tree()
+
+    -- A live refresh keeps the tree layout.
+    vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "refresh dropped the tree layout")
+
+    -- A round trip through the Comments tab keeps it too.
+    press_in_panel(1, "L") -- comments
+    press_in_panel(1, "L") -- wraps back to files
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "tab switch dropped the tree layout")
+  end)
+
+  it("resets to the config-default layout on a new session", function()
+    start_tree()
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true))
+
+    require("manicule.review").stop()
+    local files = make_nested_pairs({ "lua/manicule/a.lua" })
+    assert.is_true(require("manicule.review").start({ files = files, label = "fresh-layout" }))
+    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "tree layout leaked into the new session")
+  end)
+
+  it("starts in the tree layout when review.panel.layout = 'tree'", function()
+    H.teardown(ctx)
+    ctx = H.setup({ review = { panel = { layout = "tree" } } })
+    local files = make_nested_pairs({ "lua/manicule/a.lua", "tests/c.lua" })
+    assert.is_true(require("manicule.review").start({ files = files, label = "cfg-tree" }))
+
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "config default did not start tree")
+    -- t still toggles back to flat.
+    press_in_panel(1, "t")
+    assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "t did not toggle back to flat")
   end)
 
   it("rolls up live comment counts onto every enclosing directory row", function()
@@ -916,7 +949,7 @@ describe("manicule review panel tree view", function()
     assert.is_true(p.toggle()) -- reopen
     local lines = panel_lines()
     assert.are.equal(3, #lines, "toggle lost the collapse state")
-    assert.is_truthy(lines[1]:find("\u{25B8} lua/manicule", 1, true), "toggle lost the tree view")
+    assert.is_truthy(lines[1]:find("\u{25B8} lua/manicule", 1, true), "toggle lost the tree layout")
   end)
 
   it("auto-expands the chain to reveal the open pair on sync_index", function()
@@ -973,40 +1006,35 @@ describe("manicule review panel tree view", function()
     assert.is_truthy(panel_lines()[4]:find("\u{2713} %[M%] b.lua"), "viewed lead missing on the tree row")
   end)
 
-  it("<CR> on a tree file row opens the pair even when it has comments", function()
+  it("<CR> on a tree file row drills into its comments like the flat layout", function()
     local files = start_tree()
-    press_in_panel(1, "<Esc>")
     focus_file_window()
-    add_comment(files[2].right, "no drill-down in tree view")
+    add_comment(files[2].right, "tree drill-down")
     vim.wait(200)
-    press_in_panel(1, "L") -- back to tree
 
     press_in_panel(4, "<CR>") -- b.lua, which has a comment
-    local R = require("manicule.review")
-    assert.are.equal(2, R.state().index)
-    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "left tree view")
+    local lines = panel_lines()
+    assert.are.equal(1, #lines, "did not drill into a scoped comments view")
+    assert.is_truthy(lines[1]:find("tree drill-down", 1, true))
 
-    press_in_panel(6, "o") -- c.lua
+    press_in_panel(1, "<Esc>") -- back to the Files tab, tree layout intact
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "<Esc> lost the tree layout")
+
+    -- Without comments <CR> opens the pair; `o` always opens it.
+    local R = require("manicule.review")
+    press_in_panel(6, "<CR>") -- c.lua, no comments
     assert.are.equal(3, R.state().index)
+    press_in_panel(4, "o") -- b.lua, commented: o skips the drill-down
+    assert.are.equal(2, R.state().index)
+    assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "left the tree layout")
   end)
 
-  it("marks the Tree tab active in the winbar in tree view only", function()
+  it("keeps the Files tab active in the winbar in tree layout", function()
     start_tree()
     local winid = assert(panel().winid())
-    assert.is_truthy(vim.wo[winid].winbar:find("%#ManiculePanelTabActive#Tree", 1, true), vim.wo[winid].winbar)
-    assert.is_truthy(vim.wo[winid].winbar:find("0/3 viewed", 1, true))
-
-    press_in_panel(1, "<Esc>")
     assert.is_truthy(vim.wo[winid].winbar:find("%#ManiculePanelTabActive#Files 3", 1, true), vim.wo[winid].winbar)
+    assert.is_nil(vim.wo[winid].winbar:find("Tree", 1, true), vim.wo[winid].winbar)
     assert.is_truthy(vim.wo[winid].winbar:find("0/3 viewed", 1, true))
-  end)
-
-  it("<Esc> returns to the files view", function()
-    start_tree()
-    press_in_panel(1, "<Esc>")
-    local lines = panel_lines()
-    assert.are.equal(3, #lines)
-    assert.is_truthy(lines[1]:find("lua/manicule/a.lua", 1, true))
   end)
 
   it("a fresh session starts with every directory expanded", function()
@@ -1036,16 +1064,16 @@ describe("manicule review panel tab bar", function()
     return vim.wo[assert(panel().winid(), "panel window not open")].winbar
   end
 
-  it("renders Files/Tree/Comments with counts and the active tab emphasized", function()
+  it("renders the two Files/Comments tabs with counts and the active tab emphasized", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(2), label = "tabs" }))
 
-    -- Files active with the pair count; Tree bare; Comments with the
-    -- live session comment count; progress right-aligned via %=.
+    -- Files active with the pair count; Comments with the live session
+    -- comment count; no Tree tab; progress right-aligned via %=.
     local bar = winbar()
     assert.is_truthy(bar:find("%#ManiculePanelTabActive#Files 2", 1, true), bar)
-    assert.is_truthy(bar:find("%#ManiculePanelTab#Tree", 1, true), bar)
     assert.is_truthy(bar:find("%#ManiculePanelTab#Comments 0", 1, true), bar)
+    assert.is_nil(bar:find("Tree", 1, true), bar)
     assert.is_truthy(bar:find("\u{2502}", 1, true), bar)
     assert.is_truthy(bar:find("%=", 1, true), bar)
     assert.is_truthy(bar:find("0/2 viewed", 1, true), bar)
@@ -1056,12 +1084,12 @@ describe("manicule review panel tab bar", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "tabs-active" }))
 
-    press_in_panel(1, "L") -- tree
-    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Tree", 1, true), winbar())
-    assert.is_truthy(winbar():find("%#ManiculePanelTab#Files 1", 1, true), winbar())
-
     press_in_panel(1, "L") -- comments
     assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Comments 0", 1, true), winbar())
+    assert.is_truthy(winbar():find("%#ManiculePanelTab#Files 1", 1, true), winbar())
+
+    press_in_panel(1, "L") -- wraps back to files
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files 1", 1, true), winbar())
   end)
 
   it("updates the Comments tab count live", function()
@@ -1086,13 +1114,17 @@ describe("manicule review panel tab bar", function()
     assert.are.equal("Title", vim.api.nvim_get_hl(0, { name = "ManiculePanelTabActive" }).link)
   end)
 
-  it("L and H wrap around the Files → Tree → Comments order", function()
+  it("L and H wrap around the Files → Comments order", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "tabs-wrap" }))
 
-    press_in_panel(1, "H") -- files wraps backwards to comments
+    press_in_panel(1, "L") -- files forward to comments
     assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Comments", 1, true), winbar())
     press_in_panel(1, "L") -- comments wraps forward to files
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
+    press_in_panel(1, "H") -- files wraps backwards to comments
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Comments", 1, true), winbar())
+    press_in_panel(1, "H") -- comments back to files
     assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
   end)
 
@@ -1196,7 +1228,7 @@ describe("manicule review panel placement", function()
     end
   end)
 
-  it("rejects an unknown position and a bad size", function()
+  it("rejects an unknown position, a bad size, and an unknown layout", function()
     ctx = H.setup()
     local config = require("manicule.config")
     local ok, err = pcall(config.setup, { review = { panel = { position = "top" } } })
@@ -1210,5 +1242,9 @@ describe("manicule review panel placement", function()
     local ok3, err3 = pcall(config.setup, { review = { panel = { size = 2.5 } } })
     assert.is_false(ok3)
     assert.is_truthy(tostring(err3):find("review.panel.size", 1, true))
+
+    local ok4, err4 = pcall(config.setup, { review = { panel = { layout = "nested" } } })
+    assert.is_false(ok4)
+    assert.is_truthy(tostring(err4):find('review.panel.layout must be "flat" or "tree", got "nested"', 1, true))
   end)
 end)

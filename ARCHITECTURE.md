@@ -336,15 +336,19 @@ worktree right). One active session at a time, in its own tab page.
   `render()` rebuilds buffer lines + extmarks from `review.state()` and the
   store; per-row locators live in a module-local `line_data` table (files
   view: pair index; comments view: record id/uri/line). The winbar is a
-  Pierre-style tab bar (`Files 12 │ Tree │ Comments 5`, active tab in
+  Pierre-style tab bar (`Files 12 │ Comments 5`, active tab in
   `ManiculePanelTabActive`, `N/M viewed` progress right-aligned via `%=`);
-  `L`/`H` switch tabs with wraparound. Files view (default) shows
+  `L`/`H` switch tabs with wraparound. The Files tab (default) shows
   `<icon> [status] path  · N comments` with live counts refreshing on
   `User Manicule*` events, icon highlights applied as extmarks, and the OPEN
   pair marked with a `▸` overlay, a full-line `ManiculePanelCurrent`
   background (Normal bg blended 8% toward fg; CursorLine link on transparent
   themes), and a bold filename — re-marked without a re-render on pair
-  switch (`sync_index`). `<CR>` drills into a scoped comments view or calls
+  switch (`sync_index`). The tab renders one of two layouts — flat rows or
+  a directory tree with collapsible rollup rows — seeded per session from
+  `review.panel.layout` and toggled with `t` (layout and collapse state are
+  session-scoped, reset in `close()`). File rows behave identically in both
+  layouts: `<CR>` drills into a scoped comments view or calls
   `review.open(idx)`; the Comments tab lists the session records (resolved
   ones dimmed, `dd`/`ce`/`u`/`<C-r>`/`r`/`gr` buffer-local). Lifecycle
   mirrors `ui/rail.lua`: dedicated augroup, WinClosed teardown,

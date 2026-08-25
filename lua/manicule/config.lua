@@ -29,6 +29,7 @@ local M = {}
 ---@class manicule.ReviewPanelConfig
 ---@field position "bottom"|"left"|"right"|"float" Where the review panel opens (default "bottom").
 ---@field size? integer Panel size override: rows for "bottom", columns for "left"/"right"; "float" ignores it.
+---@field layout "flat"|"tree" How the panel's Files tab lists the session pairs (default "flat"). `t` in the panel toggles it for the session.
 
 ---@class manicule.ReviewConfig
 ---@field mode "split"|"unified" Diff rendering for `:ManiculeReview`. "split" opens a side-by-side `:diffsplit` pair; "unified" paints the diff inline on the worktree buffer.
@@ -98,9 +99,13 @@ M.defaults = {
     -- open (`q` closes it). `size` overrides the per-position default:
     -- rows for "bottom" (default min(12, #files + 2)), columns for
     -- "left"/"right" (default 30% of the screen clamped to [30, 46]);
-    -- "float" ignores it (60% cols x 40% rows).
+    -- "float" ignores it (60% cols x 40% rows). `layout` picks how the
+    -- Files tab lists the session pairs: "flat" (default) is one full
+    -- path per line, "tree" groups them by directory with collapsible
+    -- rollup rows; `t` in the panel toggles it for the session.
     panel = {
       position = "bottom",
+      layout = "flat",
     },
   },
   -- Floating editor + popup UI options.
@@ -207,6 +212,11 @@ function M.setup(opts)
       local size = opts.review.panel.size
       if size ~= nil and (size ~= size or size < 1 or size ~= math.floor(size)) then
         error(("manicule: review.panel.size must be a positive integer, got %s"):format(tostring(size)))
+      end
+      vim.validate("review.panel.layout", opts.review.panel.layout, "string", true)
+      local layout = opts.review.panel.layout
+      if layout ~= nil and layout ~= "flat" and layout ~= "tree" then
+        error(('manicule: review.panel.layout must be "flat" or "tree", got %q'):format(tostring(layout)))
       end
     end
   end

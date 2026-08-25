@@ -7,25 +7,26 @@
 -- full-width "bottom" split (default), a full-height "left"/"right"
 -- column, or a centered "float" (which takes focus; `q` closes it).
 --
--- Three views share the window as Pierre-style TABS — `Files 12 │
--- Tree │ Comments 5` in the winbar, active tab emphasized, `N/M
--- viewed` progress right-aligned — switched with `L` (next) / `H`
--- (previous), wrapping. Files view (default) renders one line per
--- pair — `<icon> [M] path  +12 −4  · N comments` — with a per-file
--- diffstat and live comment counts; the OPEN pair's line is marked
--- with a `▸ ` overlay, a full-line `ManiculePanelCurrent` background,
--- and a bold filename; VIEWED pairs (`v`, or auto-marked by next/prev)
--- get a `✓ ` lead and dim. Tree view groups the same pairs by
--- directory (Pierre style): `▾/▸` directory rows carry rolled-up
--- diffstat/comment counts and a viewed indicator (`✓` all viewed, `●`
--- otherwise), nest by two spaces per level with single-child chains
--- collapsed into one row, and toggle collapse with <CR>/za (`v` marks
--- the subtree viewed); file rows keep the files-view shape with
--- basename labels. In files view, <CR> drills into a commented pair's
--- comments (or opens the pair when it has none); `o` always opens the
--- pair; in tree view <CR> on a file row simply opens it. <Esc>
--- returns to files from every non-files view (clearing any drill-down
--- scope); switching tabs also clears the scope.
+-- Two views share the window as Pierre-style TABS — `Files 12 │
+-- Comments 5` in the winbar, active tab emphasized, `N/M viewed`
+-- progress right-aligned — switched with `L` (next) / `H` (previous),
+-- wrapping. The Files tab renders one row per pair — `<icon> [M] path
+-- +12 −4  · N comments` — with a per-file diffstat and live comment
+-- counts; the OPEN pair's line is marked with a `▸ ` overlay, a
+-- full-line `ManiculePanelCurrent` background, and a bold filename;
+-- VIEWED pairs (`v`, or auto-marked by next/prev) get a `✓ ` lead and
+-- dim. The tab has two LAYOUTS — `t` toggles them for the session,
+-- `review.panel.layout` picks the default: "flat" lists full paths,
+-- one row per pair; "tree" groups the same pairs by directory (Pierre
+-- style): `▾/▸` directory rows carry rolled-up diffstat/comment counts
+-- and a viewed indicator (`✓` all viewed, `●` otherwise), nest by two
+-- spaces per level with single-child chains collapsed into one row,
+-- and toggle collapse with <CR>/za (`v` marks the subtree viewed);
+-- file rows keep the flat shape with basename labels. File rows behave
+-- IDENTICALLY in both layouts: <CR> drills into a commented pair's
+-- comments (or opens the pair when it has none) and `o` always opens
+-- the pair. <Esc> returns to files from the comments view (clearing
+-- any drill-down scope); switching tabs also clears the scope.
 --
 -- Outside a review session, `:ManiculeList` opens the same panel in
 -- PROJECT mode (M.list): a single `Comments N · project` tab listing
@@ -54,7 +55,7 @@ local PANEL_FILETYPE = "manicule-panel"
 local ns = vim.api.nvim_create_namespace("manicule.review.panel")
 local ns_current = vim.api.nvim_create_namespace("manicule.review.panel.current")
 
----@type "files"|"tree"|"comments"
+---@type "files"|"comments"
 local current_view = "files"
 
 ---URI scoping the comments view to a single file (set by drill-down
@@ -63,7 +64,26 @@ local current_view = "files"
 local file_filter = nil
 
 ---Tab order for H/L switching (review mode).
-local TAB_ORDER = { "files", "tree", "comments" }
+local TAB_ORDER = { "files", "comments" }
+
+---Files-tab layout: flat pair rows or the directory tree. Session-
+---scoped like `collapsed`: seeded from `review.panel.layout` on first
+---use, flipped by `t`, survives refreshes/tab switches/toggle
+---hide-reopen, reset by close() (session stop).
+---@type "flat"|"tree"|nil
+local layout = nil
+
+---The Files tab's layout for this session, seeding it from the config
+---default on first use.
+---@return "flat"|"tree"
+local function current_layout()
+  if not layout then
+    local review_cfg = require("manicule.config").get().review or {}
+    local cfg = type(review_cfg.panel) == "table" and review_cfg.panel or {}
+    layout = cfg.layout == "tree" and "tree" or "flat"
+  end
+  return layout
+end
 
 ---True while the panel shows PROJECT comments (`:ManiculeList` outside
 ---a review session) instead of a session's views. Project mode has a
@@ -100,13 +120,14 @@ local augroup = nil
 ---@type table[]
 local line_data = {}
 
----Lines + view of the previous render. A refresh that rebuilds
+---Lines + view key of the previous render. A refresh that rebuilds
 ---identical rows (event bursts, mutations on files outside the view)
 ---skips the buffer rewrite and extmark rebuild. Reset by `hide()` —
 ---the buffer is recreated on reopen, so nothing rendered survives.
 ---@type string[]|nil
 local last_lines = nil
----@type "files"|"tree"|"comments"|nil
+---View key: "comments", or "files:" plus the layout that rendered.
+---@type string|nil
 local last_view = nil
 
 ---Coalesces `User Manicule*` bursts into ONE refresh: a consuming send
@@ -290,14 +311,14 @@ local function append_count(parts, spans, col, count)
 end
 
 ---One pair row: `<indent><lead><icon> [S] label  +A −R  · N comments`.
----The files view renders the full pair path with no indent; the tree
----view indents by nesting depth and labels with the basename. The
+---The flat layout renders the full pair path with no indent; the tree
+---layout indents by nesting depth and labels with the basename. The
 ---two-cell lead reserves the current-pair marker column (`▸ ` overlays
 ---it on the open pair) so columns never shift; viewed pairs render a
 ---`✓ ` lead (same two cells) and dim.
 ---@param idx integer pair index
 ---@param label string rendered path text
----@param indent string leading spaces ("" in files view)
+---@param indent string leading spaces ("" in the flat layout)
 ---@param ctx table from pair_row_ctx
 ---@return manicule.review.panel.Row
 local function pair_row(idx, label, indent, ctx)
@@ -462,7 +483,7 @@ local function dir_row(node, depth, is_collapsed, ctx)
   }
 end
 
----Tree view rows: the node's own files first (basename labels), then
+---Tree layout rows: the node's own files first (basename labels), then
 ---its child directories, depth-first, skipping the subtrees of
 ---collapsed directories (their rows still show the full rollup).
 local function append_tree_rows(node, depth, rows, ctx)
@@ -572,9 +593,9 @@ local function build_comment_rows(records)
 end
 
 ---1-indexed panel row rendering the given pair, or nil when the row is
----not on screen (tree view: hidden inside a collapsed directory). In
----files view the row number equals the pair index; the scan keeps one
----code path for both pair-row views.
+---not on screen (tree layout: hidden inside a collapsed directory). In
+---the flat layout the row number equals the pair index; the scan keeps
+---one code path for both layouts.
 ---@param pair_index integer
 ---@return integer|nil
 local function pair_row_number(pair_index)
@@ -586,7 +607,7 @@ local function pair_row_number(pair_index)
   return nil
 end
 
----Mark the OPEN pair's row (files and tree views): a `▸ ` overlay on
+---Mark the OPEN pair's row (Files tab, either layout): a `▸ ` overlay on
 ---the row's lead column, a full-line `ManiculePanelCurrent` background,
 ---and a bold filename. Lives in its own namespace so a pair switch
 ---re-marks without a re-render (and without re-querying the store).
@@ -617,12 +638,11 @@ local function apply_current_marks()
   })
 end
 
----The panel winbar: a Pierre-style tab bar — `Files 12 │ Tree │
----Comments 5`, active tab in `ManiculePanelTabActive`, counts where
----they mean something — with the `3/12 viewed` progress right-aligned
----via `%=`. Project mode shows its single tab as `Comments N ·
----project`. The winbar is the panel's only title surface, and it is
----native and cheap.
+---The panel winbar: a Pierre-style tab bar — `Files 12 │ Comments 5`,
+---active tab in `ManiculePanelTabActive` — with the `3/12 viewed`
+---progress right-aligned via `%=`. Project mode shows its single tab
+---as `Comments N · project`. The winbar is the panel's only title
+---surface, and it is native and cheap.
 ---@param comment_count? integer comments listed by the current render
 local function update_winbar(comment_count)
   if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
@@ -640,7 +660,6 @@ local function update_winbar(comment_count)
   end
   local labels = {
     files = ("Files %d"):format(#state.files),
-    tree = "Tree",
     comments = ("Comments %d"):format(comment_count or 0),
   }
   local parts = {}
@@ -668,10 +687,14 @@ local function render(comment_records)
     return
   end
   local rows, comment_count
+  local view_key = current_view
   if current_view == "files" then
-    rows, comment_count = build_file_rows()
-  elseif current_view == "tree" then
-    rows, comment_count = build_tree_rows()
+    view_key = "files:" .. current_layout()
+    if current_layout() == "tree" then
+      rows, comment_count = build_tree_rows()
+    else
+      rows, comment_count = build_file_rows()
+    end
   else
     rows, comment_count = build_comment_rows(comment_records)
   end
@@ -689,11 +712,11 @@ local function render(comment_records)
   -- Same view, identical lines: the content extmark spans derive from
   -- the row text, so only the current-pair marks can differ — re-apply
   -- those and skip the buffer rewrite + extmark rebuild.
-  if last_view == current_view and vim.deep_equal(last_lines, lines) then
+  if last_view == view_key and vim.deep_equal(last_lines, lines) then
     apply_current_marks()
     return
   end
-  last_view = current_view
+  last_view = view_key
   last_lines = lines
 
   vim.bo[panel_bufnr].modifiable = true
@@ -905,19 +928,27 @@ local function setup_panel_keymaps(bufnr)
     vim.keymap.set("n", lhs, fn, vim.tbl_extend("keep", { desc = desc }, map_opts))
   end
 
-  -- <CR> in files view drills into the pair's comments when it has
-  -- any, otherwise opens the pair. In tree view it toggles a directory
-  -- row's collapse and plainly opens a file row's pair (the tree keeps
-  -- no drill-down — the Comments tab is one `L` away). In comments
-  -- view it jumps to the comment through review.open (never a raw
-  -- window jump, which could stomp a diff window's buffer); in project
-  -- mode there is no session to route through, so the jump opens the
-  -- file in the previous window.
+  -- <CR> on a Files-tab file row drills into the pair's comments when
+  -- it has any, otherwise opens the pair — IDENTICAL in the flat and
+  -- tree layouts (the flat behavior is canonical); a tree directory
+  -- row toggles its collapse instead. In comments view it jumps to the
+  -- comment through review.open (never a raw window jump, which could
+  -- stomp a diff window's buffer); in project mode there is no session
+  -- to route through, so the jump opens the file in the previous
+  -- window.
   map("<CR>", function()
     if project_mode then
       jump_to_project_comment()
     elseif current_view == "files" then
-      local idx = pair_index_at_cursor()
+      local data = data_at_cursor()
+      if type(data) ~= "table" then
+        return
+      end
+      if data.kind == "dir" then
+        toggle_dir(data.dir)
+        return
+      end
+      local idx = data.pair_index
       if not idx then
         return
       end
@@ -938,22 +969,12 @@ local function setup_panel_keymaps(bufnr)
         end
       end
       require("manicule.review").open(idx)
-    elseif current_view == "tree" then
-      local data = data_at_cursor()
-      if type(data) ~= "table" then
-        return
-      end
-      if data.kind == "dir" then
-        toggle_dir(data.dir)
-      elseif data.pair_index then
-        require("manicule.review").open(data.pair_index)
-      end
     else
       jump_to_comment()
     end
   end, "Manicule review: drill into comments, toggle directory, or open pair")
 
-  -- `o` on any pair row (files or tree view) always opens the pair —
+  -- `o` on any pair row (either Files layout) always opens the pair —
   -- the escape hatch when <CR> would drill into comments instead.
   map("o", function()
     if current_view == "comments" then
@@ -967,9 +988,10 @@ local function setup_panel_keymaps(bufnr)
   end, "Manicule review: open pair (skip drill-down)")
 
   -- `za` mirrors <CR> on tree directory rows — the native fold-toggle
-  -- key. Falls through to the default `za` everywhere else.
+  -- key. Falls through to the default `za` everywhere else (directory
+  -- rows only exist in the Files tab's tree layout).
   map("za", function()
-    local data = current_view == "tree" and data_at_cursor() or nil
+    local data = current_view == "files" and data_at_cursor() or nil
     if type(data) == "table" and data.kind == "dir" then
       toggle_dir(data.dir)
     else
@@ -1004,9 +1026,10 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: toggle GitHub thread resolution")
 
-  -- <Esc> in any non-files view returns to files (clearing any file
-  -- filter); in files view — and in project mode, which has no files
-  -- view — it falls through to the default behavior.
+  -- <Esc> in the comments view returns to the Files tab (clearing any
+  -- file filter, keeping its layout); in the Files tab — and in
+  -- project mode, which has no Files tab — it falls through to the
+  -- default behavior.
   map("<Esc>", function()
     if not project_mode and current_view ~= "files" then
       current_view = "files"
@@ -1053,9 +1076,9 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: toggle viewed for the file or directory under cursor")
 
-  -- L/H switch the panel tabs (Files → Tree → Comments), wrapping in
-  -- both directions. Switching always clears a drill-down scope, so
-  -- the Comments tab lists ALL session comments. Review mode only —
+  -- L/H switch the panel tabs (Files → Comments), wrapping in both
+  -- directions. Switching always clears a drill-down scope, so the
+  -- Comments tab lists ALL session comments. Review mode only —
   -- project mode has a single tab and keeps the native H/L motions.
   local function switch_tab(step)
     local index = 1
@@ -1076,6 +1099,18 @@ local function setup_panel_keymaps(bufnr)
     map("H", function()
       switch_tab(-1)
     end, "Manicule review: previous panel tab")
+    -- `t` flips the Files tab between its flat and tree layouts; the
+    -- new layout sticks for the session. Falls through to the default
+    -- `t` (till-motion) in the comments view; project mode has no
+    -- Files tab, so the key stays unmapped there.
+    map("t", function()
+      if current_view ~= "files" then
+        feed_default("t")
+        return
+      end
+      layout = current_layout() == "tree" and "flat" or "tree"
+      refresh()
+    end, "Manicule panel: toggle tree layout")
   end
 
   -- Comment mutations, previously inherited from the quickfix keymap
@@ -1291,9 +1326,9 @@ local function open_window(comment_records)
   })
 end
 
----Point the panel's files or tree view at the given pair: re-mark the
----current line and move the panel window's cursor to that row, WITHOUT
----re-querying the store or stealing focus. The tree view auto-expands
+---Point the panel's Files tab at the given pair: re-mark the current
+---line and move the panel window's cursor to that row, WITHOUT
+---re-querying the store or stealing focus. The tree layout auto-expands
 ---collapsed ancestors first — Pierre keeps the active file visible —
 ---and only that expansion re-renders. No-op when the panel is hidden,
 ---showing a comments view (including a drill-down), or there is no
@@ -1309,7 +1344,7 @@ function M.sync_index(pair_index)
   if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return
   end
-  if current_view == "tree" and expand_to(pair_index) then
+  if current_layout() == "tree" and expand_to(pair_index) then
     render()
   end
   apply_current_marks()
@@ -1410,14 +1445,16 @@ function M.toggle()
   return true
 end
 
----Close the panel and reset ALL module state (view, project mode, and
----tree collapse state included) — the session-stop teardown. Idempotent.
+---Close the panel and reset ALL module state (view, project mode,
+---files layout, and tree collapse state included) — the session-stop
+---teardown. Idempotent.
 function M.close()
   hide()
   current_view = "files"
   file_filter = nil
   project_mode = false
   project_root = nil
+  layout = nil
   collapsed = {}
 end
 
