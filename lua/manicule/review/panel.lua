@@ -6,7 +6,8 @@
 -- quickfix list stays free for the user during reviews.
 --
 -- Two views share the window. Files view (default) renders one line
--- per pair — `<icon> [M] path  · N comments` — with live counts; the
+-- per pair — `<icon> [M] path  +12 −4  · N comments` — with a per-file
+-- diffstat and live comment counts; the
 -- OPEN pair's line is marked with a `▸ ` overlay, a full-line
 -- `ManiculePanelCurrent` background, and a bold filename. <Tab>
 -- toggles to the comments view (session-scoped records). In files
@@ -119,6 +120,8 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculePanelStatusD", { link = "DiagnosticError", default = true })
   -- M (and any other status) stays default text on purpose — most of a
   -- review is modifications, and coloring all of them is noise.
+  vim.api.nvim_set_hl(0, "ManiculePanelAdded", { link = "Added", default = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelRemoved", { link = "Removed", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelCount", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelResolved", { link = "Comment", default = true })
 end
@@ -128,8 +131,8 @@ end
 ---@field spans {[1]: integer, [2]: integer, [3]: string}[] byte-range highlights
 ---@field data table locator stored into `line_data`
 
----Files view rows: one per session pair, `<lead><icon> [S] path  · N
----comments`. The two-space lead reserves the current-pair marker
+---Files view rows: one per session pair, `<lead><icon> [S] path  +A −R
+---· N comments`. The two-space lead reserves the current-pair marker
 ---column (`▸ ` overlays it on the open pair) so columns never shift.
 ---@return manicule.review.panel.Row[]
 local function build_file_rows()
@@ -151,6 +154,10 @@ local function build_file_rows()
 
   local icons = require("manicule.ui.icons")
   local with_icons = icons.enabled()
+  -- Per-pair {added, removed} counts, computed once per session on the
+  -- first render and cached on the session (see review.diffstat) —
+  -- deliberately NOT refreshed when the worktree side changes mid-review.
+  local diffstat = review.diffstat() or {}
 
   local rows = {}
   for idx, pair in ipairs(state.files) do
@@ -182,6 +189,30 @@ local function build_file_rows()
     local path_start = col
     parts[#parts + 1] = pair.path
     col = col + #pair.path
+    -- `+A −R` between path and comment count, zero components omitted
+    -- (A/D pairs naturally show one side). An all-zero stat renders
+    -- nothing, keeping unchanged/unreadable pairs at the old row shape.
+    local stat = diffstat[idx]
+    if stat and (stat.added > 0 or stat.removed > 0) then
+      parts[#parts + 1] = "  "
+      col = col + 2
+      if stat.added > 0 then
+        local added = ("+%d"):format(stat.added)
+        parts[#parts + 1] = added
+        spans[#spans + 1] = { col, col + #added, "ManiculePanelAdded" }
+        col = col + #added
+        if stat.removed > 0 then
+          parts[#parts + 1] = " "
+          col = col + 1
+        end
+      end
+      if stat.removed > 0 then
+        local removed = ("\u{2212}%d"):format(stat.removed)
+        parts[#parts + 1] = removed
+        spans[#spans + 1] = { col, col + #removed, "ManiculePanelRemoved" }
+        col = col + #removed
+      end
+    end
     local count = ("  \u{00B7} %d comments"):format(counts[state.uris[idx]] or 0)
     parts[#parts + 1] = count
     spans[#spans + 1] = { col, col + #count, "ManiculePanelCount" }

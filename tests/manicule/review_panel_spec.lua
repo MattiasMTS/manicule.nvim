@@ -166,13 +166,14 @@ describe("manicule review panel files view", function()
     ctx = nil
   end)
 
-  it("renders one `[S] path  · N comments` line per pair", function()
+  it("renders one `[S] path  +A \u{2212}R  · N comments` line per pair", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(2), label = "rows" }))
     local lines = panel_lines()
     assert.are.equal(2, #lines)
-    assert.are.equal("  [M] f1.lua  \u{00B7} 0 comments", lines[1])
-    assert.are.equal("  [M] f2.lua  \u{00B7} 0 comments", lines[2])
+    -- make_pairs writes a one-line change per pair: +1 −1.
+    assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", lines[1])
+    assert.are.equal("  [M] f2.lua  +1 \u{2212}1  \u{00B7} 0 comments", lines[2])
   end)
 
   it("links status letters to diagnostic groups, M stays default", function()
@@ -197,6 +198,101 @@ describe("manicule review panel files view", function()
     assert.is_truthy(mark, "count span missing")
     local line = panel_lines()[1]
     assert.are.equal("  \u{00B7} 0 comments", line:sub(mark[3] + 1, mark[4].end_col))
+  end)
+end)
+
+describe("manicule review panel diffstat", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  ---Pair over explicit line contents; nil lines leave that side unwritten.
+  local function pair_of(name, status, left_lines, right_lines)
+    local left = ctx.artifact_root .. "/left/" .. name
+    local right = ctx.root .. "/" .. name
+    vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+    if left_lines then
+      vim.fn.writefile(left_lines, left)
+    end
+    if right_lines then
+      vim.fn.writefile(right_lines, right)
+    end
+    return { left = left, right = right, status = status, path = name }
+  end
+
+  it("sums added and removed lines across hunks for M pairs", function()
+    local R = require("manicule.review")
+    -- One changed line + one appended line: +2 −1.
+    local files = { pair_of("m.lua", "M", { "a", "b", "c" }, { "a", "B", "c", "d" }) }
+    assert.is_true(R.start({ files = files, label = "stat-m" }))
+    assert.are.equal("  [M] m.lua  +2 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
+  end)
+
+  it("A pairs show the right side's line count, D pairs the left's", function()
+    local R = require("manicule.review")
+    local files = {
+      -- Added file: no left side exists at all.
+      pair_of("a.lua", "A", nil, { "one", "two", "three" }),
+      pair_of("d.lua", "D", { "one", "two" }, nil),
+    }
+    assert.is_true(R.start({ files = files, label = "stat-ad" }))
+    local lines = panel_lines()
+    assert.are.equal("  [A] a.lua  +3  \u{00B7} 0 comments", lines[1])
+    assert.are.equal("  [D] d.lua  \u{2212}2  \u{00B7} 0 comments", lines[2])
+  end)
+
+  it("omits the counts entirely when nothing changed or a side is unreadable", function()
+    local R = require("manicule.review")
+    local files = {
+      pair_of("same.lua", "M", { "return 1" }, { "return 1" }),
+      -- Left never written: job-staged files may vanish; render, no error.
+      pair_of("gone.lua", "M", nil, { "return 2" }),
+    }
+    assert.is_true(R.start({ files = files, label = "stat-none" }))
+    local lines = panel_lines()
+    assert.are.equal("  [M] same.lua  \u{00B7} 0 comments", lines[1])
+    assert.are.equal("  [M] gone.lua  \u{00B7} 0 comments", lines[2])
+  end)
+
+  it("highlights the counts via Added/Removed-linked span groups", function()
+    local R = require("manicule.review")
+    local files = { pair_of("m.lua", "M", { "a", "b", "c" }, { "a", "B", "c", "d" }) }
+    assert.is_true(R.start({ files = files, label = "stat-hl" }))
+
+    local line = panel_lines()[1]
+    local added = span_marks(0, "ManiculePanelAdded")
+    assert.are.equal(1, #added, "added span missing")
+    assert.are.equal("+2", line:sub(added[1][3] + 1, added[1][4].end_col))
+    local removed = span_marks(0, "ManiculePanelRemoved")
+    assert.are.equal(1, #removed, "removed span missing")
+    assert.are.equal("\u{2212}1", line:sub(removed[1][3] + 1, removed[1][4].end_col))
+
+    -- Linked to the builtin diff groups, not hardcoded colors.
+    assert.are.equal("Added", vim.api.nvim_get_hl(0, { name = "ManiculePanelAdded" }).link)
+    assert.are.equal("Removed", vim.api.nvim_get_hl(0, { name = "ManiculePanelRemoved" }).link)
+  end)
+
+  it("computes the stat once per session: later renders keep the first counts", function()
+    local R = require("manicule.review")
+    local files = { pair_of("m.lua", "M", { "a" }, { "b" }) }
+    assert.is_true(R.start({ files = files, label = "stat-cache" }))
+    assert.are.equal("  [M] m.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
+
+    -- The worktree side changes mid-session; the panel refresh must NOT
+    -- re-read the pair — the stat is as-of the first render by design.
+    vim.fn.writefile({ "b", "c", "d" }, files[1].right)
+    vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    vim.wait(200, function()
+      return false
+    end, 10)
+    assert.are.equal("  [M] m.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 end)
 
@@ -537,7 +633,7 @@ describe("manicule review panel file icons", function()
     assert.are.equal(2, #lines)
     for i, line in ipairs(lines) do
       assert.are.equal(
-        ("  @ [M] f%d.lua  \u{00B7} 0 comments"):format(i),
+        ("  @ [M] f%d.lua  +1 \u{2212}1  \u{00B7} 0 comments"):format(i),
         line,
         ("line %d changed shape: %q"):format(i, line)
       )
@@ -553,12 +649,12 @@ describe("manicule review panel file icons", function()
     stub_mini_icons("@")
     require("manicule.config").current.ui.icons = false
     assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-off" }))
-    assert.are.equal("  [M] f1.lua  \u{00B7} 0 comments", panel_lines()[1])
+    assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 
   it("omits the icon when no provider is loadable (auto)", function()
     assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-auto-none" }))
-    assert.are.equal("  [M] f1.lua  \u{00B7} 0 comments", panel_lines()[1])
+    assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 
   it("keeps the icon column aligned when the provider yields no icon", function()
@@ -572,6 +668,6 @@ describe("manicule review panel file icons", function()
     assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-erroring" }))
     -- Provider loadable (icons enabled) but erroring: a blank cell
     -- keeps the column so mixed successes/failures still line up.
-    assert.are.equal("    [M] f1.lua  \u{00B7} 0 comments", panel_lines()[1])
+    assert.are.equal("    [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 end)

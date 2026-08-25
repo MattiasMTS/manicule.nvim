@@ -126,6 +126,27 @@ describe("manicule review session", function()
     assert.are.equal(ctx.root, state.root)
   end)
 
+  it("diffstat() computes per-pair counts lazily once and caches on the session", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    files[2].status = "D"
+    assert.is_true(R.start({ files = files, label = "diffstat" }))
+
+    local stats = R.diffstat()
+    -- make_pairs writes a one-line change; the D pair counts its left side.
+    assert.are.same({ added = 1, removed = 1 }, stats[1])
+    assert.are.same({ added = 0, removed = 1 }, stats[2])
+
+    -- Cached on the session: the same table comes back, and worktree
+    -- edits mid-session do not change it (as-of-first-request by design).
+    vim.fn.writefile({ "return 1", "-- more", "-- lines" }, files[1].right)
+    assert.are.equal(stats, R.diffstat())
+    assert.are.same({ added = 1, removed = 1 }, R.diffstat()[1])
+
+    R.stop()
+    assert.is_nil(R.diffstat(), "diffstat must be nil without a session")
+  end)
+
   it("stop() deletes owned stage dirs and wipes buffers pointing into them", function()
     local R = require("manicule.review")
     -- Both sides staged, like a pr-head-not-checked-out session: the

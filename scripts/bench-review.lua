@@ -126,6 +126,16 @@ local ok, err = xpcall(function()
     session_uris[index] = uri
     session_uri_set[uri] = true
   end
+  -- Diffstat pass: what the FIRST panel render of a session pays — read
+  -- both sides of every M pair and vim.diff them (A/D shortcut to one
+  -- side's line count). Measured on the REAL review module before it is
+  -- stubbed; the result feeds the stub below, mirroring the session
+  -- cache, so the row-building numbers stay row-building only.
+  local compute_diffstat = require("manicule.review").compute_diffstat
+  local panel_diffstat_ms, session_diffstat = elapsed_ms(function()
+    return compute_diffstat(resolved.files)
+  end)
+  assert(#session_diffstat == 2000)
   package.loaded["manicule.review"] = {
     state = function()
       return {
@@ -137,6 +147,9 @@ local ok, err = xpcall(function()
       }
     end,
     pair_path = pair_path,
+    diffstat = function()
+      return session_diffstat
+    end,
   }
   package.loaded["manicule.review.panel"] = nil
   local panel = require("manicule.review.panel")
@@ -166,6 +179,7 @@ local ok, err = xpcall(function()
   print(("files: %d (M=667 A=666 D=667), comments: %d"):format(#changed, #comments))
   print(("resolve_ms: %.3f"):format(resolve_ms))
   print(("stage_baseline_ms: %.3f"):format(stage_ms))
+  print(("panel_diffstat_ms: %.3f"):format(panel_diffstat_ms))
   print(("panel_build_file_rows_ms: %.3f"):format(panel_ms))
   print(("panel_build_file_rows_icons_ms: %.3f"):format(panel_icons_ms))
 end, debug.traceback)

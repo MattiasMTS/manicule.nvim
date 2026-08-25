@@ -29,6 +29,7 @@ local uv = vim.uv
 ---@field uri_index table<string, integer> URI -> first pair index (panel jumps)
 ---@field stage_dirs string[]|nil staging dirs the session OWNS; deleted by stop()
 ---@field mapped_bufs table<integer, true>|nil
+---@field diffstat {added: integer, removed: integer}[]|nil per-pair line counts, filled lazily by M.diffstat()
 
 ---@type manicule.ReviewSession|nil
 local session = nil
@@ -213,6 +214,87 @@ end
 ---@return string
 function M.pair_path(pair)
   return pair.status == "D" and pair.left or pair.right
+end
+
+---File lines, or nil when the file is unreadable (job-staged files may
+---vanish under a session).
+---@param path string
+---@return string[]|nil
+local function read_lines(path)
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if ok and type(lines) == "table" then
+    return lines
+  end
+  return nil
+end
+
+---Join file lines into diffable text. An empty file reads back as `{}`;
+---collapsing it to "" keeps vim.diff from seeing a phantom blank line
+---(the review/inline.lua join convention).
+---@param lines string[]
+---@return string
+local function join_lines(lines)
+  if #lines == 0 then
+    return ""
+  end
+  return table.concat(lines, "\n") .. "\n"
+end
+
+---Added/removed line counts for one pair. `A` and `D` shortcut to the
+---surviving side's line count; everything else diffs the two sides.
+---An unreadable side counts as {0, 0} — the panel simply omits the stat.
+---@param pair {left: string, right: string, status: string}
+---@return {added: integer, removed: integer}
+local function pair_diffstat(pair)
+  if pair.status == "A" then
+    local lines = read_lines(pair.right)
+    return { added = lines and #lines or 0, removed = 0 }
+  end
+  if pair.status == "D" then
+    local lines = read_lines(pair.left)
+    return { added = 0, removed = lines and #lines or 0 }
+  end
+  local left = read_lines(pair.left)
+  local right = read_lines(pair.right)
+  if not left or not right then
+    return { added = 0, removed = 0 }
+  end
+  local added, removed = 0, 0
+  local hunks = vim.diff(join_lines(left), join_lines(right), { result_type = "indices" })
+  for _, hunk in ipairs(hunks) do
+    removed = removed + hunk[2]
+    added = added + hunk[4]
+  end
+  return { added = added, removed = removed }
+end
+
+---Per-pair {added, removed} counts over explicit pairs. Exposed for the
+---benchmark; sessions go through M.diffstat().
+---@param files {left: string, right: string, status: string}[]
+---@return {added: integer, removed: integer}[]
+function M.compute_diffstat(files)
+  local stats = {}
+  for idx, pair in ipairs(files) do
+    stats[idx] = pair_diffstat(pair)
+  end
+  return stats
+end
+
+---The session's per-pair diffstat, index-aligned with `state().files`.
+---Computed ONCE, lazily on the first call (the first panel render), and
+---cached on the session — pairs are immutable, so there is nothing to
+---invalidate. The worktree side CAN change under a live session; the
+---stat deliberately stays as-of-first-request rather than re-reading
+---every pair per render (the next :ManiculeReview recomputes).
+---@return {added: integer, removed: integer}[]|nil nil without a session
+function M.diffstat()
+  if not session then
+    return nil
+  end
+  if not session.diffstat then
+    session.diffstat = M.compute_diffstat(session.files)
+  end
+  return session.diffstat
 end
 
 ---Switch the diff rendering used by review sessions. With no argument,
