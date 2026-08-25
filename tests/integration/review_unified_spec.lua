@@ -24,10 +24,10 @@ local function inline_marks(bufnr)
   return vim.api.nvim_buf_get_extmarks(bufnr, require("manicule.review.inline").ns, 0, -1, { details = true })
 end
 
----The single non-quickfix window of the session tab.
+---The single non-panel window of the session tab.
 local function file_window()
   for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.bo[vim.api.nvim_win_get_buf(winid)].buftype ~= "quickfix" then
+    if vim.bo[vim.api.nvim_win_get_buf(winid)].filetype ~= "manicule-panel" then
       return winid
     end
   end

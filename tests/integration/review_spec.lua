@@ -38,8 +38,8 @@ describe("manicule review session", function()
     for _, win in ipairs(wins) do
       local buf = vim.api.nvim_win_get_buf(win)
       local name = vim.api.nvim_buf_get_name(buf)
-      -- Skip quickfix window
-      if vim.bo[buf].buftype ~= "quickfix" then
+      -- Skip the panel window
+      if vim.bo[buf].filetype ~= "manicule-panel" then
         assert.is_true(vim.wo[win].diff)
         if name:find("/left/", 1, true) then
           saw_left = true
@@ -402,37 +402,33 @@ describe("manicule review session", function()
     vim.cmd.cd(saved)
   end)
 
-  it("panel opens on start with file rows and focus returns to diff", function()
+  it("panel opens on start with file rows and focus stays in the diff", function()
     local R = require("manicule.review")
+    local qf_size_before = #vim.fn.getqflist()
     assert.is_true(R.start({ files = make_pairs(2), label = "panel-test" }))
 
-    -- Panel should be open
-    local found_panel = false
+    -- Panel should be open: an owned manicule-panel buffer, no quickfix.
     local panel_winid
     for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local bufnr = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[bufnr].buftype == "quickfix" then
-        local ok, info = pcall(vim.fn.getqflist, { winid = winid, title = 1 })
-        -- Plain find: `-` is a Lua pattern quantifier and would never
-        -- match the literal hyphen in the title.
-        if ok and info.title and info.title:find("manicule-review", 1, true) then
-          found_panel = true
-          panel_winid = winid
-          break
-        end
+      if vim.bo[bufnr].filetype == "manicule-panel" then
+        panel_winid = winid
+        break
       end
     end
-    assert.is_true(found_panel, "panel quickfix window not found")
+    assert.is_truthy(panel_winid, "panel window not found")
 
-    -- Focus should be in diff (non-qf window)
-    local current_buf = vim.api.nvim_get_current_buf()
-    assert.is_false(vim.bo[current_buf].buftype == "quickfix")
+    -- Focus should be in the diff, not the panel
+    assert.are_not.equal(panel_winid, vim.api.nvim_get_current_win())
 
     -- Panel should have 2 rows (one per pair)
-    local items = vim.fn.getqflist()
-    assert.are.equal(2, #items)
-    assert.is_truthy(items[1].text:find("f1.lua"))
-    assert.is_truthy(items[1].text:find("0 comments"))
+    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(panel_winid), 0, -1, false)
+    assert.are.equal(2, #lines)
+    assert.is_truthy(lines[1]:find("f1.lua"))
+    assert.is_truthy(lines[1]:find("0 comments"))
+
+    -- The global quickfix list stays free for the user.
+    assert.are.equal(qf_size_before, #vim.fn.getqflist())
   end)
 
   it("panel queries comments once when building file rows", function()
@@ -455,15 +451,16 @@ describe("manicule review session", function()
   it("panel comment count updates when a comment is added", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))
+    local panel = require("manicule.review.panel")
 
     -- Initial count should be 0
-    local items = vim.fn.getqflist()
-    assert.is_truthy(items[1].text:find("0 comments"))
+    local lines = vim.api.nvim_buf_get_lines(panel.bufnr(), 0, -1, false)
+    assert.is_truthy(lines[1]:find("0 comments"))
 
     -- Find the right (modifiable) window and focus it
     for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local bufnr = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[bufnr].buftype ~= "quickfix" and vim.bo[bufnr].modifiable then
+      if vim.bo[bufnr].filetype ~= "manicule-panel" and vim.bo[bufnr].modifiable then
         vim.api.nvim_set_current_win(winid)
         break
       end
@@ -483,23 +480,15 @@ describe("manicule review session", function()
     vim.wait(200)
 
     -- Count should now be 1
-    items = vim.fn.getqflist()
-    assert.is_truthy(items[1].text:find("1 comments"))
+    lines = vim.api.nvim_buf_get_lines(panel.bufnr(), 0, -1, false)
+    assert.is_truthy(lines[1]:find("1 comments"))
   end)
 
   it("<CR> in panel files view switches to that pair and keeps panel open", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(3), label = "panel-test" }))
 
-    -- Find panel window
-    local panel_winid
-    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-      local bufnr = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[bufnr].buftype == "quickfix" then
-        panel_winid = winid
-        break
-      end
-    end
+    local panel_winid = require("manicule.review.panel").winid()
     assert.is_truthy(panel_winid)
 
     -- Switch to panel and press <CR> on row 2 THROUGH buffer-local
@@ -524,7 +513,7 @@ describe("manicule review session", function()
     -- Find the right (modifiable) window and focus it
     for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local bufnr = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[bufnr].buftype ~= "quickfix" and vim.bo[bufnr].modifiable then
+      if vim.bo[bufnr].filetype ~= "manicule-panel" and vim.bo[bufnr].modifiable then
         vim.api.nvim_set_current_win(winid)
         break
       end
@@ -542,11 +531,9 @@ describe("manicule review session", function()
     vim.wait(200)
 
     -- Files view should show both files with comment counts
-    local items = vim.fn.getqflist()
-    -- Should have entries for each file
-    assert.is_true(#items >= 1, "Expected at least 1 item, got " .. #items)
-    -- Items should have comment count format
-    assert.is_truthy(items[1].text:find("comments"))
+    local lines = vim.api.nvim_buf_get_lines(require("manicule.review.panel").bufnr(), 0, -1, false)
+    assert.is_true(#lines >= 1, "Expected at least 1 row, got " .. #lines)
+    assert.is_truthy(lines[1]:find("comments"))
   end)
 
   local function add_comment(path, body)
@@ -564,10 +551,31 @@ describe("manicule review session", function()
   local function panel_win()
     for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local bufnr = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[bufnr].buftype == "quickfix" then
+      if vim.bo[bufnr].filetype == "manicule-panel" then
         return winid
       end
     end
+  end
+
+  ---Rendered panel buffer lines.
+  local function panel_lines()
+    local winid = panel_win()
+    assert.is_truthy(winid, "panel window not found")
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(winid), 0, -1, false)
+  end
+
+  ---1-indexed panel row carrying the current-pair line highlight, or nil.
+  local function panel_current_row()
+    local winid = panel_win()
+    assert.is_truthy(winid, "panel window not found")
+    local ns_current = vim.api.nvim_create_namespace("manicule.review.panel.current")
+    local bufnr = vim.api.nvim_win_get_buf(winid)
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, ns_current, 0, -1, { details = true })) do
+      if mark[4].line_hl_group == "ManiculePanelCurrent" then
+        return mark[2] + 1
+      end
+    end
+    return nil
   end
 
   ---Press `lhs` in the panel window on `row` THROUGH buffer-local maps.
@@ -589,9 +597,9 @@ describe("manicule review session", function()
 
     press_in_panel(1, "<CR>")
 
-    local items = vim.fn.getqflist()
-    assert.are.equal(1, #items)
-    assert.is_truthy(items[1].text:find("first file comment", 1, true))
+    local lines = panel_lines()
+    assert.are.equal(1, #lines)
+    assert.is_truthy(lines[1]:find("first file comment", 1, true))
   end)
 
   it("<Esc> in scoped comments view returns to files view", function()
@@ -601,13 +609,13 @@ describe("manicule review session", function()
     add_comment(files[1].right, "first file comment")
 
     press_in_panel(1, "<CR>")
-    assert.are.equal(1, #vim.fn.getqflist())
+    assert.are.equal(1, #panel_lines())
 
     press_in_panel(1, "<Esc>")
-    local items = vim.fn.getqflist()
-    assert.are.equal(2, #items)
-    assert.is_truthy(items[1].text:find("(1 comments)", 1, true))
-    assert.is_truthy(items[2].text:find("(0 comments)", 1, true))
+    local lines = panel_lines()
+    assert.are.equal(2, #lines)
+    assert.is_truthy(lines[1]:find("\u{00B7} 1 comments", 1, true))
+    assert.is_truthy(lines[2]:find("\u{00B7} 0 comments", 1, true))
   end)
 
   it("<CR> on a file without comments opens the pair", function()
@@ -620,7 +628,7 @@ describe("manicule review session", function()
 
     assert.are.equal(2, R.state().index)
     -- Still files view.
-    assert.is_truthy(vim.fn.getqflist()[1].text:find("comments)", 1, true))
+    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 1 comments", 1, true))
   end)
 
   it("o on a commented file opens the pair anyway", function()
@@ -632,7 +640,8 @@ describe("manicule review session", function()
     press_in_panel(2, "o")
 
     assert.are.equal(2, R.state().index)
-    assert.is_truthy(vim.fn.getqflist()[1].text:find("comments)", 1, true))
+    -- Still files view.
+    assert.is_truthy(panel_lines()[1]:find("\u{00B7} 0 comments", 1, true))
   end)
 
   it("<Tab> from a scoped comments view widens to ALL comments", function()
@@ -643,12 +652,12 @@ describe("manicule review session", function()
     add_comment(files[2].right, "second file comment")
 
     press_in_panel(1, "<CR>")
-    assert.are.equal(1, #vim.fn.getqflist())
+    assert.are.equal(1, #panel_lines())
 
     press_in_panel(1, "<Tab>")
-    local items = vim.fn.getqflist()
-    assert.are.equal(2, #items)
-    local texts = table.concat({ items[1].text, items[2].text }, "\n")
+    local lines = panel_lines()
+    assert.are.equal(2, #lines)
+    local texts = table.concat(lines, "\n")
     assert.is_truthy(texts:find("first file comment", 1, true))
     assert.is_truthy(texts:find("second file comment", 1, true))
   end)
@@ -741,11 +750,10 @@ describe("manicule review session", function()
 
     press_in_panel(1, "<Tab>")
 
-    -- Corrupt the item's uri so it matches no session pair (defensive path).
+    -- Break the session's uri -> pair mapping so the comment matches no
+    -- pair (defensive path); review.state() returns the live table.
     local pwin = panel_win()
-    local info = vim.fn.getqflist({ winid = pwin, id = 0, items = 1 })
-    info.items[1].user_data.uri = "file:///nonexistent/orphan.lua"
-    vim.fn.setqflist({}, "r", { id = info.id, items = info.items })
+    R.state().uri_index = {}
 
     local warned
     local original_notify = vim.notify
@@ -883,7 +891,7 @@ describe("manicule review session", function()
     assert.is_true(R.start({ files = files, label = "resolve" }))
 
     press_in_panel(1, "<Tab>")
-    assert.is_nil(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
+    assert.is_nil(panel_lines()[1]:find("\u{2713}", 1, true))
 
     press_in_panel(1, "gr")
 
@@ -899,7 +907,7 @@ describe("manicule review session", function()
     assert.is_truthy(argv:find("RT_kwDO1", 1, true))
     assert.is_nil(argv:find("unresolveReviewThread", 1, true))
     assert.is_true(store.get(ctx.root, record.id).meta.github.resolved)
-    assert.is_truthy(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
+    assert.is_truthy(panel_lines()[1]:find("\u{2713}", 1, true))
 
     press_in_panel(1, "gr")
     vim.wait(2000, function()
@@ -909,7 +917,7 @@ describe("manicule review session", function()
     argv = table.concat(gh.argv(), "\n")
     assert.is_truthy(argv:find("unresolveReviewThread", 1, true))
     assert.is_false(store.get(ctx.root, record.id).meta.github.resolved)
-    assert.is_nil(vim.fn.getqflist()[1].text:find("\u{2713}", 1, true))
+    assert.is_nil(panel_lines()[1]:find("\u{2713}", 1, true))
 
     vim.env.PATH = saved_path
   end)
@@ -958,21 +966,20 @@ describe("manicule review session", function()
     )
   end)
 
-  it("next/prev sync the panel's current-entry to the open pair", function()
+  it("next/prev sync the panel's current-line highlight to the open pair", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(3), label = "sync" }))
     local pwin = panel_win()
     assert.is_truthy(pwin, "panel window not found")
 
     R.next()
-    assert.are.equal(2, vim.fn.getqflist({ winid = pwin, idx = 0 }).idx)
+    assert.are.equal(2, panel_current_row())
     assert.are.equal(2, vim.api.nvim_win_get_cursor(pwin)[1])
     -- Focus must stay in the diff window, not the panel.
     assert.are_not.equal(pwin, vim.api.nvim_get_current_win())
-    assert.is_false(vim.bo[vim.api.nvim_get_current_buf()].buftype == "quickfix")
 
     R.prev()
-    assert.are.equal(1, vim.fn.getqflist({ winid = pwin, idx = 0 }).idx)
+    assert.are.equal(1, panel_current_row())
     assert.are.equal(1, vim.api.nvim_win_get_cursor(pwin)[1])
   end)
 
@@ -983,13 +990,13 @@ describe("manicule review session", function()
     R.next() -- pair 2 open
 
     -- Adding a comment fires User ManiculeAdded, which rebuilds the
-    -- panel list; the rebuild must restore idx to the open pair.
+    -- panel rows; the rebuild must keep the current-line highlight on
+    -- the open pair.
     add_comment(files[2].right, "note on pair 2")
     vim.wait(200)
 
-    local pwin = panel_win()
-    assert.is_truthy(pwin, "panel window not found")
-    assert.are.equal(2, vim.fn.getqflist({ winid = pwin, idx = 0 }).idx)
+    assert.is_truthy(panel_win(), "panel window not found")
+    assert.are.equal(2, panel_current_row())
   end)
 
   it("next() in drill-down comments view leaves the comments list alone", function()
@@ -1000,15 +1007,15 @@ describe("manicule review session", function()
     R.open(1)
 
     press_in_panel(1, "<CR>") -- drill into pair 1's scoped comments view
-    assert.are.equal(1, #vim.fn.getqflist())
+    assert.are.equal(1, #panel_lines())
 
     local ok, err = pcall(R.next)
     assert.is_true(ok, err)
 
     -- Comments list undisturbed by the pair switch.
-    local items = vim.fn.getqflist()
-    assert.are.equal(1, #items)
-    assert.is_truthy(items[1].text:find("drill comment", 1, true))
+    local lines = panel_lines()
+    assert.are.equal(1, #lines)
+    assert.is_truthy(lines[1]:find("drill comment", 1, true))
   end)
 
   it(":ManiculeToggle hides the panel during a session and keeps it running", function()
@@ -1033,7 +1040,7 @@ describe("manicule review session", function()
 
     -- Drill into a comments view scoped to file 1.
     press_in_panel(1, "<CR>")
-    assert.are.equal(1, #vim.fn.getqflist())
+    assert.are.equal(1, #panel_lines())
 
     vim.cmd("ManiculeToggle")
     assert.is_nil(panel_win())
@@ -1042,9 +1049,9 @@ describe("manicule review session", function()
     local winid = panel_win()
     assert.is_truthy(winid, "panel window not reopened")
     -- Still the scoped comments view: one row, file 1's comment only.
-    local items = vim.fn.getqflist()
-    assert.are.equal(1, #items)
-    assert.is_truthy(items[1].text:find("first file comment", 1, true))
+    local lines = panel_lines()
+    assert.are.equal(1, #lines)
+    assert.is_truthy(lines[1]:find("first file comment", 1, true))
   end)
 
   it(":ManiculeToggle without a session still toggles comment visuals", function()
@@ -1140,19 +1147,13 @@ describe("manicule review session", function()
     assert.is_true(R.start({ files = make_pairs(1), label = "panel-test" }))
 
     -- Panel should be open
-    local panel_winid
-    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-      local bufnr = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[bufnr].buftype == "quickfix" then
-        panel_winid = winid
-        break
-      end
-    end
+    local panel_winid = panel_win()
     assert.is_truthy(panel_winid)
 
     R.stop()
 
-    -- Panel should be closed
+    -- Panel should be closed, with its augroup gone
     assert.is_false(vim.api.nvim_win_is_valid(panel_winid))
+    assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = "ManiculeReviewPanel" }))
   end)
 end)

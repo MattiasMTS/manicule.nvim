@@ -255,18 +255,26 @@ other: `za` toggles, `zR` opens them all. Set `review.fold_unchanged =
 false` to skip folding entirely, or `review.context` to change how much
 code stays visible around each hunk.
 
-A bottom panel opens automatically showing the file list
-with live comment counts (files get filetype icons when an icon provider
-is installed — see `ui.icons`). Press `<Tab>` in the panel to toggle between
-files view and comments view. `<CR>` on a commented file drills into a
-comments view scoped to that file (`<CR>` jumps to a comment, `dd`
-deletes, `ce` edits, `<Esc>` goes back to the file list); `<CR>` on a
-file without comments switches the diff to that pair, and `o` always
-opens the pair regardless of comment count. From a scoped comments view
-`<Tab>` widens to all session comments. `:ManiculeToggle` shows/hides the
-panel during a review (the session and panel view are preserved). Running
-`:ManiculeReview pr` with no number opens a picker over the repository's
-open PRs.
+A bottom panel opens automatically: a plain `manicule://panel` buffer
+(filetype `manicule-panel`) in a fixed-height split, so `j`/`k`, search,
+and every other motion behave like any normal buffer — and the global
+quickfix list stays free for your own `:grep`/diagnostics during the
+review. Each line shows one file with its status and a live comment
+count (files get colored filetype icons when an icon provider is
+installed — see `ui.icons`), and the pair currently on screen is marked
+with a `▸`, a highlighted line (`ManiculePanelCurrent`), and a bold
+filename.
+
+Panel keymaps (buffer-local): `<Tab>` toggles between files view and
+comments view. `<CR>` on a commented file drills into a comments view
+scoped to that file (`<CR>` jumps to a comment, `dd` deletes, `ce`
+edits, `u`/`<C-r>` undo/redo a deletion, `<Esc>` goes back to the file
+list); `<CR>` on a file without comments switches the diff to that
+pair, and `o` always opens the pair regardless of comment count. From a
+scoped comments view `<Tab>` widens to all session comments.
+`:ManiculeToggle` shows/hides the panel during a review (the session
+and panel view are preserved). Running `:ManiculeReview pr` with no
+number opens a picker over the repository's open PRs.
 
 When you review a PR with its head checked out (`:ManiculeReview pr 123`
 on the PR branch), existing GitHub review comments are imported as

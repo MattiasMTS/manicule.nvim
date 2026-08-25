@@ -138,17 +138,17 @@ local ok, err = xpcall(function()
   }
   package.loaded["manicule.review.panel"] = nil
   local panel = require("manicule.review.panel")
-  -- build_files_items sits behind open_window since the panel toggle
-  -- refactor; chase it through the upvalue chain.
-  local open_window = find_upvalue(panel.open, "open_window")
-  local build_files_items = find_upvalue(open_window, "build_files_items")
-  local panel_ms, items = elapsed_ms(build_files_items)
+  -- build_file_rows sits behind render since the owned-buffer rewrite;
+  -- chase it through the upvalue chain.
+  local render = find_upvalue(panel.open, "render")
+  local build_file_rows = find_upvalue(render, "build_file_rows")
+  local panel_ms, items = elapsed_ms(build_file_rows)
   assert(#items == 2000)
 
   print(("files: %d (M=667 A=666 D=667), comments: %d"):format(#changed, #comments))
   print(("resolve_ms: %.3f"):format(resolve_ms))
   print(("stage_baseline_ms: %.3f"):format(stage_ms))
-  print(("panel_build_files_items_ms: %.3f"):format(panel_ms))
+  print(("panel_build_file_rows_ms: %.3f"):format(panel_ms))
 end, debug.traceback)
 
 cleanup()

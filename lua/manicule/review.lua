@@ -45,28 +45,42 @@ local function review_config()
   return require("manicule.config").get().review or {}
 end
 
+---Windows the pair-switch teardown must never touch: the review panel
+---(an owned `manicule-panel` scratch buffer) and any quickfix/loclist
+---window the USER has open — the panel no longer lives in the quickfix
+---list, so those are entirely the user's.
+---@param winid integer
+---@return boolean
+local function is_preserved_window(winid)
+  local bufnr = vim.api.nvim_win_get_buf(winid)
+  return vim.bo[bufnr].buftype == "quickfix" or vim.bo[bufnr].filetype == "manicule-panel"
+end
+
 local function close_session_windows()
-  -- Reduce the session tab windows to diff windows only (preserve qf panel).
-  -- Unified paint is buffer-scoped, so it must be dropped explicitly —
-  -- `diffoff!` knows nothing about it.
+  -- Reduce the session tab windows to diff windows only (preserve the
+  -- panel and any user quickfix). Unified paint is buffer-scoped, so it
+  -- must be dropped explicitly — `diffoff!` knows nothing about it.
   require("manicule.review.inline").clear_all()
   vim.cmd("silent! diffoff!")
-  -- Close all non-quickfix windows except the first one
+  -- Close all non-preserved windows except the first one
   local wins = vim.api.nvim_tabpage_list_wins(0)
-  local first_non_qf = nil
+  local first_file_win = nil
   for _, winid in ipairs(wins) do
-    local bufnr = vim.api.nvim_win_get_buf(winid)
-    if vim.bo[bufnr].buftype ~= "quickfix" then
-      if not first_non_qf then
-        first_non_qf = winid
+    if not is_preserved_window(winid) then
+      if not first_file_win then
+        first_file_win = winid
       else
         pcall(vim.api.nvim_win_close, winid, false)
       end
     end
   end
-  -- Focus the remaining non-qf window
-  if first_non_qf and vim.api.nvim_win_is_valid(first_non_qf) then
-    vim.api.nvim_set_current_win(first_non_qf)
+  -- Focus the remaining file window. When none is left (e.g. `:only`
+  -- from the panel), make a fresh one — a pair must never be edited
+  -- into the panel or a quickfix window.
+  if first_file_win and vim.api.nvim_win_is_valid(first_file_win) then
+    vim.api.nvim_set_current_win(first_file_win)
+  elseif is_preserved_window(vim.api.nvim_get_current_win()) then
+    pcall(vim.api.nvim_open_win, vim.api.nvim_create_buf(false, true), true, { split = "above", win = -1 })
   end
 end
 
@@ -285,8 +299,8 @@ function M.start(opts)
   }
   build_session_cache(session)
   M.open(1)
-  -- The panel owns the review quickfix list (files/comments views);
-  -- review.lua itself never writes the qf stack.
+  -- The panel is an owned scratch-buffer split (files/comments views);
+  -- review mode never touches the quickfix stack.
   require("manicule.review.panel").open()
   return true
 end

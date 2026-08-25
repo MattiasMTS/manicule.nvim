@@ -321,12 +321,24 @@ worktree right). One active session at a time, in its own tab page.
   - `unified`: one window on the worktree file, diff painted inline (below).
 - Deleted files: left-only display, notify that comments are file-level notes.
 - Navigation: `next()`/`prev()` wrap around.
-- Panel (`lua/manicule/review/panel.lua`): auto-opens bottom quickfix window
-  on session start. Files view (default) shows `[status] path  (N comments)`
-  with live counts refreshing on `User Manicule*` events; `<CR>` calls
-  `review.open(idx)` to switch pairs. `<Tab>` toggles to comments view
-  (session-scoped `M.list` with standard quickfix formatting/mappings). Panel
-  closed on `stop()`, autocmds cleaned up.
+- Panel (`lua/manicule/review/panel.lua`): auto-opens on session start as an
+  owned scratch buffer (`manicule://panel`, filetype `manicule-panel`,
+  nofile/nomodifiable) in a fixed-height bottom split — NOT the quickfix
+  list, which stays free for the user during reviews. One idempotent
+  `render()` rebuilds buffer lines + extmarks from `review.state()` and the
+  store; per-row locators live in a module-local `line_data` table (files
+  view: pair index; comments view: record id/uri/line). Files view (default)
+  shows `<icon> [status] path  · N comments` with live counts refreshing on
+  `User Manicule*` events, icon highlights applied as extmarks, and the OPEN
+  pair marked with a `▸` overlay, a full-line `ManiculePanelCurrent`
+  background (Normal bg blended 8% toward fg; CursorLine link on transparent
+  themes), and a bold filename — re-marked without a re-render on pair
+  switch (`sync_index`). `<CR>` drills into a scoped comments view or calls
+  `review.open(idx)`; `<Tab>` toggles to the comments view (session-scoped
+  records, resolved ones dimmed, `dd`/`ce`/`u`/`<C-r>`/`r`/`gr` buffer-local).
+  Lifecycle mirrors `ui/rail.lua`: dedicated augroup, WinClosed teardown,
+  window+buffer+autocmds dropped on hide, full state reset in `close()`
+  (called by `stop()`).
 - `finish()`: collects session comments via URI filter, dispatches to
   configured sink; auto-flushes on `VimLeavePre` when sink is configured and
   comments exist.

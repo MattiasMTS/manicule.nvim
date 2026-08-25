@@ -1,13 +1,38 @@
--- manicule.nvim: review panel with files and comments views.
+-- manicule.nvim: review panel — an owned scratch-buffer bottom split.
 --
--- Auto-opens a bottom quickfix window on session start, showing the
--- review's file pairs with live comment counts. <Tab> toggles between
--- files view (default) and comments view (session-scoped manicule list).
--- In files view, <CR> drills into a commented pair's comments (or opens
--- the pair when it has none); `o` always opens the pair. In a scoped
--- comments view, <Esc> returns to files and <Tab> widens to ALL comments.
+-- Auto-opens on session start as a plain `manicule://panel` buffer
+-- (filetype `manicule-panel`) in a full-width split below the diff, so
+-- j/k/search/marks all behave like any normal buffer and the GLOBAL
+-- quickfix list stays free for the user during reviews.
+--
+-- Two views share the window. Files view (default) renders one line
+-- per pair — `<icon> [M] path  · N comments` — with live counts; the
+-- OPEN pair's line is marked with a `▸ ` overlay, a full-line
+-- `ManiculePanelCurrent` background, and a bold filename. <Tab>
+-- toggles to the comments view (session-scoped records). In files
+-- view, <CR> drills into a commented pair's comments (or opens the
+-- pair when it has none); `o` always opens the pair. In a scoped
+-- comments view, <Esc> returns to files and <Tab> widens to ALL
+-- comments.
+--
+-- All rendering goes through one idempotent `render()` from
+-- review.state() + the store: buffer lines plus extmarks in the
+-- panel's namespaces, rebuilt wholesale on every refresh. Per-row
+-- locators live in a module-local `line_data` table (files view: the
+-- pair index; comments view: record id + uri + line), which replaces
+-- the quickfix `user_data` the previous implementation rode on.
 
 local M = {}
+
+local PANEL_BUFNAME = "manicule://panel"
+local PANEL_FILETYPE = "manicule-panel"
+
+-- Content extmarks (icon/status/count/resolved spans) and the
+-- current-pair marks live in separate namespaces so a pair switch can
+-- re-mark the current line without rebuilding — or re-listing — the
+-- whole view.
+local ns = vim.api.nvim_create_namespace("manicule.review.panel")
+local ns_current = vim.api.nvim_create_namespace("manicule.review.panel.current")
 
 ---@type "files"|"comments"
 local current_view = "files"
@@ -17,21 +42,78 @@ local current_view = "files"
 ---@type string|nil
 local file_filter = nil
 
----@type integer|nil winid of the panel qf window
+---@type integer|nil winid of the panel window
 local panel_winid = nil
 
----@type integer|nil autocmd group for the panel's live refresh
+---@type integer|nil bufnr of the panel scratch buffer
+local panel_bufnr = nil
+
+---@type integer|nil autocmd group for live refresh + lifecycle
 local augroup = nil
+
+---Per-row locators for the CURRENT render, 1-indexed by buffer line.
+---Files view rows carry `pair_index` (+ the byte span of the path for
+---the bold current-file mark); comments view rows carry the record
+---locator (`id`, `scope`, `project_root`) and jump target (`uri`,
+---`line`).
+---@type table[]
+local line_data = {}
 
 -- The session's project root, URI array/set, and uri -> pair-index map
 -- all come pre-computed on review.state() (session cache built once in
 -- review.start): list() resolves the store root from the CURRENT
--- buffer, and the panel's unnamed quickfix buffer falls back to cwd —
--- which can miss the reviewed project entirely — so every list() call
--- here passes the cached root as `_root` and filters on the cached
--- uri set.
+-- buffer, and the panel's scratch buffer falls back to cwd — which can
+-- miss the reviewed project entirely — so every list() call here
+-- passes the cached root as `_root` and filters on the cached uri set.
 
-local function build_files_items()
+---@param name string
+---@return table
+local function get_highlight(name)
+  local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  if ok and type(hl) == "table" then
+    return hl
+  end
+  return {}
+end
+
+---Define the panel's highlight groups. The current-line surface is a
+---ManiculeCardBg-style tint — Normal bg nudged 8% toward Normal fg via
+---`render.blend` — recomputed here on every panel open and on
+---ColorScheme (the panel augroup re-runs this; render.lua's own
+---ColorScheme wiring only covers the card palette). Transparent themes
+---(no Normal bg) have nothing to blend from and borrow CursorLine so
+---the current pair still stands out. Status/count/resolved groups are
+---`default` links, so user overrides win.
+local function setup_highlights()
+  local normal = get_highlight("Normal")
+  if type(normal.bg) == "number" then
+    local toward = type(normal.fg) == "number" and normal.fg or normal.bg
+    local bg = require("manicule.ui.render").blend(normal.bg, toward, 0.08)
+    vim.api.nvim_set_hl(0, "ManiculePanelCurrent", { bg = bg })
+  else
+    vim.api.nvim_set_hl(0, "ManiculePanelCurrent", { link = "CursorLine" })
+  end
+  -- Bold-only group: layered over the path span on the current line,
+  -- it combines with (never covers) the line background above.
+  vim.api.nvim_set_hl(0, "ManiculePanelCurrentFile", { bold = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelStatusA", { link = "DiagnosticOk", default = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelStatusD", { link = "DiagnosticError", default = true })
+  -- M (and any other status) stays default text on purpose — most of a
+  -- review is modifications, and coloring all of them is noise.
+  vim.api.nvim_set_hl(0, "ManiculePanelCount", { link = "Comment", default = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelResolved", { link = "Comment", default = true })
+end
+
+---@class manicule.review.panel.Row
+---@field text string rendered buffer line
+---@field spans {[1]: integer, [2]: integer, [3]: string}[] byte-range highlights
+---@field data table locator stored into `line_data`
+
+---Files view rows: one per session pair, `<lead><icon> [S] path  · N
+---comments`. The two-space lead reserves the current-pair marker
+---column (`▸ ` overlays it on the open pair) so columns never shift.
+---@return manicule.review.panel.Row[]
+local function build_file_rows()
   local review = require("manicule.review")
   local state = review.state()
   if not state then
@@ -47,82 +129,204 @@ local function build_files_items()
   local icons = require("manicule.ui.icons")
   local with_icons = icons.enabled()
 
-  local items = {}
+  local rows = {}
   for idx, pair in ipairs(state.files) do
-    local text = ("[%s] %s  (%d comments)"):format(pair.status, pair.path, counts[state.uris[idx]] or 0)
+    local parts = { "  " }
+    local spans = {}
+    local col = 2
     if with_icons then
-      -- Quickfix item text is plain — the provider's highlight group
-      -- can't ride along per item without rebuilding the panel's
-      -- rendering, so the glyph goes in uncolored. One glyph + one
-      -- space (a blank cell when the provider yields nothing) keeps
-      -- the column aligned.
-      text = (icons.file_icon(pair.path) or " ") .. " " .. text
+      -- One glyph + one space (a blank cell when the provider yields
+      -- nothing) keeps the column aligned; the provider's highlight
+      -- group rides along as an extmark — the old quickfix substrate
+      -- could carry the glyph but never its color.
+      local icon, icon_hl = icons.file_icon(pair.path)
+      local glyph = icon or " "
+      parts[#parts + 1] = glyph .. " "
+      if icon and icon_hl then
+        spans[#spans + 1] = { col, col + #glyph, icon_hl }
+      end
+      col = col + #glyph + 1
     end
-    table.insert(items, {
-      filename = review.pair_path(pair),
-      lnum = 1,
-      text = text,
-      -- Store index for <CR> mapping
-      user_data = { pair_index = idx },
-    })
+    local status = ("[%s]"):format(pair.status)
+    local status_hl = pair.status == "A" and "ManiculePanelStatusA"
+      or pair.status == "D" and "ManiculePanelStatusD"
+      or nil
+    parts[#parts + 1] = status .. " "
+    if status_hl then
+      spans[#spans + 1] = { col, col + #status, status_hl }
+    end
+    col = col + #status + 1
+    local path_start = col
+    parts[#parts + 1] = pair.path
+    col = col + #pair.path
+    local count = ("  \u{00B7} %d comments"):format(counts[state.uris[idx]] or 0)
+    parts[#parts + 1] = count
+    spans[#spans + 1] = { col, col + #count, "ManiculePanelCount" }
+    rows[#rows + 1] = {
+      text = table.concat(parts),
+      spans = spans,
+      data = { pair_index = idx, path_start = path_start, path_end = path_start + #pair.path },
+    }
   end
-  return items
+  return rows
 end
 
+---Comments view rows, one per record in canonical `uri → line → id`
+---order: `[✓ ][x] path:lnum  first body line`. Resolved records keep
+---the existing conventions — `[x]` for locally-resolved, a `✓` prefix
+---for GitHub-resolved threads (meta.github.resolved, toggled via `gr`)
+---— and both render dimmed.
 ---@param records? table[] pre-fetched records for the CURRENT filter
 ---(uri-scoped when `file_filter` is set); fetched here when nil.
-local function build_comments_items(records)
+---@return manicule.review.panel.Row[]
+local function build_comment_rows(records)
+  local state = require("manicule.review").state()
   if not records then
-    local state = require("manicule.review").state()
     local uris = file_filter and { [file_filter] = true } or (state and state.uri_set or {})
     records = require("manicule").list({ _quiet = true, uris = uris, _root = state and state.root or nil })
   end
-  local items = require("manicule.ui.quickfix").build_items(records)
-  -- Carry each record's uri + line in user_data (mirroring the files
-  -- view's user_data.pair_index) so the panel's <CR> can map a comment
-  -- back to its session pair instead of doing a default qf jump.
-  local by_id = {}
-  for _, record in ipairs(records) do
-    by_id[record.id] = record
-  end
   local range = require("manicule.range")
-  for _, item in ipairs(items) do
-    local record = type(item.user_data) == "table" and by_id[item.user_data.id] or nil
-    if record then
-      item.user_data.uri = record.uri
-      item.user_data.line = range.start_line(record)
-      -- Mark GitHub-resolved threads (meta.github.resolved, toggled via
-      -- `gr`) — distinct from the record's own `resolved` flag.
-      local meta = type(record.meta) == "table" and record.meta or nil
-      local gh = meta and type(meta.github) == "table" and meta.github or nil
-      if gh and gh.resolved == true then
-        item.text = "\u{2713} " .. item.text
-      end
+  local str = require("manicule.str")
+  local ordered = vim.deepcopy(records)
+  table.sort(ordered, range.compare)
+
+  local rows = {}
+  for _, record in ipairs(ordered) do
+    local meta = type(record.meta) == "table" and record.meta or nil
+    local gh = meta and type(meta.github) == "table" and meta.github or nil
+    local gh_resolved = gh ~= nil and gh.resolved == true
+
+    -- Display path: the session pair's relative path when the record
+    -- maps to one (uri -> pair index straight off the session cache),
+    -- else the file's tail.
+    local label
+    local pair_index = state and state.uri_index and state.uri_index[record.uri] or nil
+    if pair_index and state.files[pair_index] then
+      label = state.files[pair_index].path
+    else
+      local path = require("manicule.uri").to_path(record.uri)
+      label = path and vim.fn.fnamemodify(path, ":t") or record.uri
     end
+
+    local sl = range.start_line(record)
+    local el = range.end_line(record)
+    local loc = (el and el > sl) and ("%s:%d-%d"):format(label, sl, el) or ("%s:%d"):format(label, sl)
+    local marker = record.resolved and "[x]" or "[ ]"
+    local first = vim.split(record.body or "", "\n", { plain = true })[1] or ""
+    local prefix = gh_resolved and "\u{2713} " or ""
+    local text = ("%s%s %s  %s"):format(prefix, marker, loc, str.truncate(first, 160))
+    local spans = {}
+    if gh_resolved or record.resolved then
+      spans[#spans + 1] = { 0, #text, "ManiculePanelResolved" }
+    end
+    rows[#rows + 1] = {
+      text = text,
+      spans = spans,
+      data = {
+        id = record.id,
+        scope = record.scope,
+        project_root = record.project_root,
+        uri = record.uri,
+        line = sl,
+      },
+    }
   end
-  return items
+  return rows
 end
 
----Quickfix item under the cursor in the CURRENT (panel) window. Reads
----the list displayed in THIS window, not the global current stack
----entry, so qf history can't desync row -> item. The three projections
----below pull their locators out of the item's user_data.
----@return table|nil item
-local function item_at_cursor()
-  local winid = vim.api.nvim_get_current_win()
-  local row = vim.api.nvim_win_get_cursor(winid)[1]
-  local ok, info = pcall(vim.fn.getqflist, { winid = winid, items = 1 })
-  if not ok or type(info) ~= "table" or type(info.items) ~= "table" then
-    return nil
+---Mark the OPEN pair's row (files view only): a `▸ ` overlay on the
+---lead column, a full-line `ManiculePanelCurrent` background, and a
+---bold filename. Lives in its own namespace so a pair switch re-marks
+---without a re-render (and without re-querying the store).
+local function apply_current_marks()
+  if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
+    return
   end
-  return info.items[row]
+  vim.api.nvim_buf_clear_namespace(panel_bufnr, ns_current, 0, -1)
+  if current_view ~= "files" then
+    return
+  end
+  local state = require("manicule.review").state()
+  local index = state and state.index
+  local data = index and line_data[index]
+  if not data or data.pair_index ~= index then
+    return
+  end
+  local row = index - 1
+  pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns_current, row, 0, {
+    line_hl_group = "ManiculePanelCurrent",
+    virt_text = { { "\u{25B8} ", "ManiculePanelCurrent" } },
+    virt_text_pos = "overlay",
+  })
+  pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns_current, row, data.path_start, {
+    end_col = data.path_end,
+    hl_group = "ManiculePanelCurrentFile",
+  })
+end
+
+---Rebuild the panel buffer from state: lines, content extmarks, and
+---`line_data`, then the current-pair marks. Idempotent; never moves
+---the cursor or focus.
+---@param comment_records? table[] pre-fetched records for a comments
+---view render (see build_comment_rows); ignored in files view.
+local function render(comment_records)
+  if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
+    return
+  end
+  local rows
+  if current_view == "files" then
+    rows = build_file_rows()
+  else
+    rows = build_comment_rows(comment_records)
+  end
+
+  local lines = {}
+  line_data = {}
+  for i, row in ipairs(rows) do
+    lines[i] = row.text
+    line_data[i] = row.data
+  end
+
+  vim.bo[panel_bufnr].modifiable = true
+  vim.api.nvim_buf_set_lines(panel_bufnr, 0, -1, false, lines)
+  vim.bo[panel_bufnr].modifiable = false
+
+  vim.api.nvim_buf_clear_namespace(panel_bufnr, ns, 0, -1)
+  for i, row in ipairs(rows) do
+    for _, span in ipairs(row.spans) do
+      pcall(vim.api.nvim_buf_set_extmark, panel_bufnr, ns, i - 1, span[1], {
+        end_col = span[2],
+        hl_group = span[3],
+      })
+    end
+  end
+  apply_current_marks()
+end
+
+---Re-render the current view, preserving the panel cursor position
+---(clamped to the new line count) across the rebuild.
+---@param comment_records? table[] see build_comment_rows
+local function refresh(comment_records)
+  if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
+    return
+  end
+  local saved = vim.api.nvim_win_get_cursor(panel_winid)
+  render(comment_records)
+  local max_row = math.max(1, #line_data)
+  pcall(vim.api.nvim_win_set_cursor, panel_winid, { math.min(saved[1], max_row), saved[2] })
+end
+
+---Locator under the cursor. Keymaps are buffer-local to the panel, so
+---the cursor row indexes straight into the current render's line_data.
+---@return table|nil
+local function data_at_cursor()
+  return line_data[vim.api.nvim_win_get_cursor(0)[1]]
 end
 
 ---Pair index under the cursor (files view).
 ---@return integer|nil
 local function pair_index_at_cursor()
-  local item = item_at_cursor()
-  local data = item and item.user_data
+  local data = data_at_cursor()
   if type(data) == "table" and type(data.pair_index) == "number" then
     return data.pair_index
   end
@@ -132,10 +336,9 @@ end
 ---Comment locator (uri + line) under the cursor (comments view).
 ---@return {uri: string, line: integer}|nil
 local function comment_at_cursor()
-  local item = item_at_cursor()
-  local data = item and item.user_data
+  local data = data_at_cursor()
   if type(data) == "table" and type(data.uri) == "string" and data.uri ~= "" then
-    return { uri = data.uri, line = tonumber(data.line) or item.lnum or 1 }
+    return { uri = data.uri, line = tonumber(data.line) or 1 }
   end
   return nil
 end
@@ -144,8 +347,7 @@ end
 ---(comments view).
 ---@return {id: string, scope?: string, project_root?: string}|nil
 local function record_locator_at_cursor()
-  local item = item_at_cursor()
-  local data = item and item.user_data
+  local data = data_at_cursor()
   if type(data) == "table" and type(data.id) == "string" and data.id ~= "" then
     return { id = data.id, scope = data.scope, project_root = data.project_root }
   end
@@ -154,11 +356,9 @@ end
 
 ---Jump to the comment under the cursor in a comments view: resolve its
 ---uri to the owning session pair, rebuild that pair's diff via
----review.open (never the default qf jump, which picks its own target
----window and can stomp a diff window's buffer), then put the cursor on
----the comment's line in the commentable window (right side; the single
----left window for D pairs). The panel stays open; focus moves to the
----jump target.
+---review.open, then put the cursor on the comment's line in the
+---commentable window (right side; the single left window for D pairs).
+---The panel stays open; focus moves to the jump target.
 local function jump_to_comment()
   local comment = comment_at_cursor()
   if not comment then
@@ -169,8 +369,6 @@ local function jump_to_comment()
   if not state then
     return
   end
-  -- uri -> pair index straight off the session cache; the linear
-  -- pair_uri scan here used to cost an fs_realpath per pair per jump.
   local pair_index = state.uri_index[comment.uri]
   if not pair_index then
     vim.notify("manicule: comment does not match any file in this review", vim.log.levels.WARN)
@@ -185,96 +383,25 @@ local function jump_to_comment()
   pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
 end
 
-local function get_panel_title()
-  local review = require("manicule.review")
-  local state = review.state()
-  if not state then
-    return "manicule-review"
-  end
-  return ("manicule-review (%s)"):format(state.label)
-end
-
-local function is_panel_qf(winid)
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return false
-  end
-  local bufnr = vim.api.nvim_win_get_buf(winid)
-  if vim.bo[bufnr].buftype ~= "quickfix" then
-    return false
-  end
-  local wininfo = vim.fn.getwininfo(winid)[1]
-  if not wininfo or wininfo.loclist ~= 0 then
-    return false
-  end
-  local ok, info = pcall(vim.fn.getqflist, { winid = winid, title = 1 })
-  if ok and type(info) == "table" and type(info.title) == "string" then
-    return info.title:match("^manicule%-review") ~= nil
-  end
-  return false
-end
-
-local function find_panel_window()
-  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if is_panel_qf(winid) then
-      return winid
-    end
-  end
-  return nil
-end
-
----Resolve the id of the list DISPLAYED in the panel window, so reads
----and in-place replaces target the panel's list even when qf history
----or another plugin moved the global current stack entry elsewhere.
----@param winid integer
----@return integer id 0 when unresolvable (falls back to current list)
-local function panel_list_id(winid)
-  local ok, info = pcall(vim.fn.getqflist, { winid = winid, id = 0 })
-  if ok and type(info) == "table" and type(info.id) == "number" then
-    return info.id
-  end
-  return 0
-end
-
----@param comment_records? table[] pre-fetched records for a comments
----view refresh (see build_comments_items); ignored in files view.
-local function refresh_current_view(comment_records)
-  local winid = find_panel_window()
-  if not winid then
-    return
-  end
-  local saved_row = vim.api.nvim_win_get_cursor(winid)[1]
-  local items
-  if current_view == "files" then
-    items = build_files_items()
-  else
-    items = build_comments_items(comment_records)
-  end
-  local what = { id = panel_list_id(winid), title = get_panel_title(), items = items }
-  if current_view == "files" then
-    -- Rebuilding resets the list's current entry; restore it to the
-    -- open pair so the panel keeps indicating what is on screen.
-    local state = require("manicule.review").state()
-    if state and state.index and state.index <= #items then
-      what.idx = state.index
-    end
-  end
-  vim.fn.setqflist({}, "r", what)
-  -- Restore cursor, clamped
-  if vim.api.nvim_win_is_valid(winid) then
-    local max_row = math.max(1, #items)
-    local target = math.min(saved_row, max_row)
-    if #items > 0 then
-      pcall(vim.api.nvim_win_set_cursor, winid, { target, 0 })
-    end
-  end
+---Feed `lhs` back through as an unmapped key — the fallthrough for
+---maps that only act in one view.
+---@param lhs string
+local function feed_default(lhs)
+  local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
+  vim.api.nvim_feedkeys(keys, "n", false)
 end
 
 local function setup_panel_keymaps(bufnr)
   local map_opts = { buffer = bufnr, nowait = true, silent = true }
+  local function map(lhs, fn, desc)
+    vim.keymap.set("n", lhs, fn, vim.tbl_extend("keep", { desc = desc }, map_opts))
+  end
 
   -- <CR> in files view drills into the pair's comments when it has
-  -- any, otherwise opens the pair.
-  vim.keymap.set("n", "<CR>", function()
+  -- any, otherwise opens the pair. In comments view it jumps to the
+  -- comment through review.open (never a raw window jump, which could
+  -- stomp a diff window's buffer).
+  map("<CR>", function()
     if current_view == "files" then
       local idx = pair_index_at_cursor()
       if not idx then
@@ -291,77 +418,71 @@ local function setup_panel_keymaps(bufnr)
           -- The drill-down check above already fetched exactly the
           -- records this scoped view shows; render them instead of
           -- re-listing.
-          refresh_current_view(records)
+          refresh(records)
           return
         end
       end
       require("manicule.review").open(idx)
     else
-      -- Comments view: never the default qf jump — it picks its own
-      -- target window (possibly a diff window) and breaks the layout.
       jump_to_comment()
     end
-  end, vim.tbl_extend("keep", { desc = "Manicule review: drill into comments or open pair" }, map_opts))
+  end, "Manicule review: drill into comments or open pair")
 
   -- `o` in files view always opens the pair — the escape hatch when
   -- <CR> would drill into comments instead.
-  vim.keymap.set("n", "o", function()
+  map("o", function()
     if current_view ~= "files" then
-      local o = vim.api.nvim_replace_termcodes("o", true, false, true)
-      vim.api.nvim_feedkeys(o, "n", false)
+      feed_default("o")
       return
     end
     local idx = pair_index_at_cursor()
     if idx then
       require("manicule.review").open(idx)
     end
-  end, vim.tbl_extend("keep", { desc = "Manicule review: open pair (skip drill-down)" }, map_opts))
+  end, "Manicule review: open pair (skip drill-down)")
 
   -- `r` in comments view replies to an imported GitHub comment: opens
   -- the comment editor; the reply posts to the comment's thread on the
   -- next github send. Falls through to the default `r` elsewhere.
-  vim.keymap.set("n", "r", function()
+  map("r", function()
     if current_view ~= "comments" then
-      local r = vim.api.nvim_replace_termcodes("r", true, false, true)
-      vim.api.nvim_feedkeys(r, "n", false)
+      feed_default("r")
       return
     end
     local locator = record_locator_at_cursor()
     if locator then
       require("manicule.review.github").reply(locator)
     end
-  end, vim.tbl_extend("keep", { desc = "Manicule review: reply to imported GitHub comment" }, map_opts))
+  end, "Manicule review: reply to imported GitHub comment")
 
   -- `gr` in comments view toggles GitHub thread resolution for an
   -- imported comment. Falls through to the default `gr` elsewhere.
-  vim.keymap.set("n", "gr", function()
+  map("gr", function()
     if current_view ~= "comments" then
-      local gr = vim.api.nvim_replace_termcodes("gr", true, false, true)
-      vim.api.nvim_feedkeys(gr, "n", false)
+      feed_default("gr")
       return
     end
     local locator = record_locator_at_cursor()
     if locator then
       require("manicule.review.github").toggle_resolve(locator)
     end
-  end, vim.tbl_extend("keep", { desc = "Manicule review: toggle GitHub thread resolution" }, map_opts))
+  end, "Manicule review: toggle GitHub thread resolution")
 
   -- <Esc> in a comments view returns to files (clearing any file
   -- filter); in files view it falls through to the default behavior.
-  vim.keymap.set("n", "<Esc>", function()
+  map("<Esc>", function()
     if current_view == "comments" then
       current_view = "files"
       file_filter = nil
-      refresh_current_view()
+      refresh()
     else
-      local esc = vim.api.nvim_replace_termcodes("<Esc>", true, false, true)
-      vim.api.nvim_feedkeys(esc, "n", false)
+      feed_default("<Esc>")
     end
-  end, vim.tbl_extend("keep", { desc = "Manicule review: back to files view" }, map_opts))
+  end, "Manicule review: back to files view")
 
   -- <Tab> toggles files <-> ALL comments. From a drilled-down (scoped)
   -- comments view it first widens to all comments.
-  vim.keymap.set("n", "<Tab>", function()
+  map("<Tab>", function()
     if current_view == "files" then
       current_view = "comments"
       file_filter = nil
@@ -370,72 +491,150 @@ local function setup_panel_keymaps(bufnr)
     else
       current_view = "files"
     end
-    refresh_current_view()
-  end, vim.tbl_extend("keep", { desc = "Manicule review: toggle files/comments view" }, map_opts))
+    refresh()
+  end, "Manicule review: toggle files/comments view")
 
-  -- Preserve existing manicule quickfix keymaps in comments view
-  require("manicule.ui.quickfix_keymaps").attach(bufnr)
+  -- Comment mutations, previously inherited from the quickfix keymap
+  -- module: same keys, same opt-out flag, but the locator now comes
+  -- from line_data instead of qf user_data. No-ops on file rows.
+  if vim.g.manicule_no_default_keymaps == 1 then
+    return
+  end
+
+  map("dd", function()
+    local locator = record_locator_at_cursor()
+    if locator then
+      require("manicule").delete(locator.id, locator)
+    end
+  end, "Manicule review: delete comment under cursor")
+
+  map("ce", function()
+    local locator = record_locator_at_cursor()
+    if locator then
+      require("manicule").edit(locator.id, locator)
+    end
+  end, "Manicule review: edit comment under cursor")
+
+  map("u", function()
+    require("manicule").undo_delete()
+  end, "Manicule review: undo last comment deletion")
+
+  map("<C-r>", function()
+    require("manicule").redo_delete()
+  end, "Manicule review: redo last undone deletion")
 end
 
----Create the panel window for the CURRENT view state: push a fresh qf
----list, open it bottom, wire keymaps, refocus the diff, and (re)arm the
----live-refresh autocmds. Shared by open() and toggle() reopen.
+---Close the panel window and drop its augroup + buffer state, KEEPING
+---the view/filter state so a later reopen (toggle) restores the panel
+---exactly where it was. Idempotent — safe when the window is already
+---gone (e.g. called from its own WinClosed).
+local function hide()
+  local win = panel_winid
+  local buf = panel_bufnr
+  panel_winid = nil
+  panel_bufnr = nil
+  line_data = {}
+  if augroup then
+    pcall(vim.api.nvim_del_augroup_by_id, augroup)
+    augroup = nil
+  end
+  if win and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_close, win, true)
+  end
+  -- `bufhidden = wipe` wipes the buffer with its window; a buffer that
+  -- never reached a window (open failure) still needs explicit deletion.
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  end
+end
+
+---Create the panel buffer + window for the CURRENT view state and arm
+---the live-refresh/lifecycle augroup. `enter = false` — opening never
+---steals focus, so there is nothing to restore afterwards.
 local function open_window()
-  local items
-  if current_view == "files" then
-    items = build_files_items()
-  else
-    items = build_comments_items()
-  end
-  local title = get_panel_title()
+  setup_highlights()
 
-  vim.fn.setqflist({}, " ", { title = title, items = items })
-
-  -- Open panel bottom, height = min(#files + 1, 8)
-  local height = math.min(#items + 1, 8)
-  vim.cmd(("botright %d copen"):format(height))
-
-  -- copen focuses the window it opened: bind the panel to it. Never
-  -- scan for buftype == "quickfix" — location-list windows share that
-  -- buftype, so a loclist open in the tab could be captured instead.
-  local qf_winid = vim.api.nvim_get_current_win()
-  if not is_panel_qf(qf_winid) then
-    qf_winid = find_panel_window()
-  end
-  if qf_winid then
-    panel_winid = qf_winid
-    setup_panel_keymaps(vim.api.nvim_win_get_buf(qf_winid))
+  -- A stale buffer holding the panel's name (e.g. left from an aborted
+  -- open) would make `nvim_buf_set_name` fail with E95 — drop it.
+  local stale = vim.fn.bufnr(PANEL_BUFNAME)
+  if stale ~= -1 then
+    pcall(vim.api.nvim_buf_delete, stale, { force = true })
   end
 
-  -- Return focus to diff (right-side window)
-  -- Find the first non-qf window in the tab
-  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local win_bufnr = vim.api.nvim_win_get_buf(winid)
-    if vim.bo[win_bufnr].buftype ~= "quickfix" then
-      vim.api.nvim_set_current_win(winid)
-      break
-    end
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].modifiable = false
+  pcall(vim.api.nvim_buf_set_name, bufnr, PANEL_BUFNAME)
+  vim.bo[bufnr].filetype = PANEL_FILETYPE
+
+  local state = require("manicule.review").state()
+  local height = math.min(12, (state and #state.files or 1) + 2)
+
+  -- `split = "below"` + `win = -1` opens a full-width top-level split
+  -- at the bottom of the tab (the `:botright split` shape), under both
+  -- diff windows.
+  local ok, winid = pcall(vim.api.nvim_open_win, bufnr, false, {
+    split = "below",
+    win = -1,
+    height = height,
+  })
+  if not ok or not winid or not vim.api.nvim_win_is_valid(winid) then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+    return
   end
 
-  -- Setup live refresh on comment events (only when in files view)
+  vim.wo[winid].winfixheight = true
+  vim.wo[winid].cursorline = true
+  vim.wo[winid].number = false
+  vim.wo[winid].relativenumber = false
+  vim.wo[winid].signcolumn = "no"
+  vim.wo[winid].wrap = false
+  vim.wo[winid].list = false
+  vim.wo[winid].foldcolumn = "0"
+  vim.wo[winid].spell = false
+
+  panel_winid = winid
+  panel_bufnr = bufnr
+  setup_panel_keymaps(bufnr)
+  render()
+
   augroup = vim.api.nvim_create_augroup("ManiculeReviewPanel", { clear = true })
   vim.api.nvim_create_autocmd("User", {
     group = augroup,
-    pattern = { "ManiculeAdded", "ManiculeDeleted", "ManiculeEdited", "ManiculeResolved" },
+    pattern = { "ManiculeAdded", "ManiculeDeleted", "ManiculeEdited", "ManiculeResolved", "ManiculeRestored" },
     callback = function()
-      -- Refresh both views: files for live counts, comments so dd/ce
+      -- Refresh both views: files for live counts, comments so dd/ce/u
       -- in a (scoped) comments view update the list in place.
-      if find_panel_window() then
-        refresh_current_view()
-      end
+      refresh()
+    end,
+  })
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = augroup,
+    callback = setup_highlights,
+  })
+  -- The user can close the panel window directly (:q, <C-w>c): tear
+  -- down like a toggle-hide so no autocmd outlives the window. The
+  -- window is still in the layout inside a WinClosed callback, hence
+  -- the deferred validation.
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = augroup,
+    pattern = tostring(winid),
+    callback = function()
+      vim.schedule(function()
+        if panel_winid == winid and not vim.api.nvim_win_is_valid(winid) then
+          hide()
+        end
+      end)
     end,
   })
 end
 
----Point the panel's files view at the given pair: set the quickfix
----list's current-entry index and move the panel window's cursor to
----that row, WITHOUT stealing focus from the current window. No-op
----when the panel is hidden, showing a comments view (including a
+---Point the panel's files view at the given pair: re-mark the current
+---line and move the panel window's cursor to that row, WITHOUT
+---re-rendering, re-querying the store, or stealing focus. No-op when
+---the panel is hidden, showing a comments view (including a
 ---drill-down), or there is no session.
 ---@param pair_index integer
 function M.sync_index(pair_index)
@@ -445,64 +644,72 @@ function M.sync_index(pair_index)
   if not require("manicule.review").state() then
     return
   end
-  local winid = find_panel_window()
-  if not winid then
+  if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return
   end
-  pcall(vim.fn.setqflist, {}, "a", { id = panel_list_id(winid), idx = pair_index })
-  pcall(vim.api.nvim_win_set_cursor, winid, { pair_index, 0 })
+  apply_current_marks()
+  local max_row = math.max(1, #line_data)
+  pcall(vim.api.nvim_win_set_cursor, panel_winid, { math.min(pair_index, max_row), 0 })
 end
 
+---Open the panel (files view) for the active session. Re-renders in
+---place when the window already exists. No-op without a session.
 function M.open()
-  local review = require("manicule.review")
-  local state = review.state()
-  if not state then
+  if not require("manicule.review").state() then
     return
   end
-
   -- Always start in files view
   current_view = "files"
   file_filter = nil
+  if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
+    render()
+    return
+  end
+  hide() -- clear any half-dead window/buffer state before recreating
   open_window()
 end
 
----Show/hide the panel window without ending the session. Hiding closes
----ONLY the window; view and file-filter state survive so a second
----toggle reopens the panel exactly where it was. Autocmds are dropped
----on hide and re-armed on reopen (no leaks, no refreshes of a window
----that is gone). No-op without an active session.
+---Show/hide the panel window without ending the session. Hiding drops
+---the window, buffer, and autocmds; view and file-filter state survive
+---so a second toggle reopens the panel exactly where it was. No-op
+---without an active session.
 ---@return boolean toggled false when there is no session
 function M.toggle()
   if not require("manicule.review").state() then
     return false
   end
   if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
-    pcall(vim.api.nvim_win_close, panel_winid, true)
-    panel_winid = nil
-    if augroup then
-      pcall(vim.api.nvim_del_augroup_by_id, augroup)
-      augroup = nil
-    end
+    hide()
     return true
   end
   open_window()
   return true
 end
 
+---Close the panel and reset ALL module state (view included) — the
+---session-stop teardown. Idempotent.
 function M.close()
-  -- Close panel window if it exists
-  if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
-    pcall(vim.api.nvim_win_close, panel_winid, true)
-  end
-  -- Clean up autocmds
-  if augroup then
-    pcall(vim.api.nvim_del_augroup_by_id, augroup)
-  end
-  -- Reset module state
-  panel_winid = nil
-  augroup = nil
+  hide()
   current_view = "files"
   file_filter = nil
+end
+
+---True when the panel window is open.
+---@return boolean
+function M.is_open()
+  return panel_winid ~= nil and vim.api.nvim_win_is_valid(panel_winid)
+end
+
+---The panel window id, or nil when closed. For tests/introspection.
+---@return integer?
+function M.winid()
+  return panel_winid
+end
+
+---The panel buffer number, or nil when closed. For tests/introspection.
+---@return integer?
+function M.bufnr()
+  return panel_bufnr
 end
 
 return M

@@ -515,7 +515,7 @@ describe("manicule rail review coexistence", function()
     local diff_wins, panel_wins = 0, 0
     for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local buf = vim.api.nvim_win_get_buf(winid)
-      if vim.bo[buf].buftype == "quickfix" then
+      if vim.bo[buf].filetype == "manicule-panel" then
         panel_wins = panel_wins + 1
       elseif vim.wo[winid].diff then
         diff_wins = diff_wins + 1
