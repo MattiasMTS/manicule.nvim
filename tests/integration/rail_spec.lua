@@ -345,6 +345,178 @@ describe("manicule rail expansion", function()
     end, 10))
   end)
 
+  it("skips the buffer rebuild when nothing changed", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "steady note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    move_cursor(bufnr, 1)
+    local rail_win = wait_for_rail()
+    assert.is_truthy(rail_win)
+    assert.is_true(vim.wait(1000, function()
+      return table.concat(rail_lines(rail_win), "\n"):find("steady note", 1, true) ~= nil
+    end, 10))
+
+    -- Drain any renders still queued from the moves above.
+    vim.wait(50, function()
+      return false
+    end, 10)
+    local rail_buf = vim.api.nvim_win_get_buf(rail_win)
+    local tick = vim.api.nvim_buf_get_changedtick(rail_buf)
+
+    -- Same-line and column-only cursor movement re-fires the dispatch
+    -- with identical state: the rail must not rewrite its buffer.
+    move_cursor(bufnr, 1)
+    vim.api.nvim_win_set_cursor(0, { 1, 5 })
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = bufnr })
+    move_cursor(bufnr, 1)
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.are.equal(tick, vim.api.nvim_buf_get_changedtick(rail_buf))
+  end)
+
+  it("re-renders when a covering record's content changes", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    local code_win = vim.api.nvim_get_current_win()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "original body",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    move_cursor(bufnr, 1)
+    local rail_win = wait_for_rail()
+    assert.is_truthy(rail_win)
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    -- Drive the render seam directly (the same call render.lua's
+    -- dispatch makes) so the guard is exercised deterministically.
+    local rail = require("manicule.ui.rail")
+    local record = require("manicule").list({ _quiet = true })[1]
+    local opts = {
+      bufnr = bufnr,
+      winid = code_win,
+      anchor_line = 1,
+      entries = { { record = record, index = 1, total = 1 } },
+    }
+    rail.render(opts)
+    local rail_buf = vim.api.nvim_win_get_buf(rail_win)
+    local tick = vim.api.nvim_buf_get_changedtick(rail_buf)
+    rail.render(opts)
+    assert.are.equal(tick, vim.api.nvim_buf_get_changedtick(rail_buf))
+
+    -- A body edit must re-render even when `updated_at` did not move
+    -- (os.time() has 1-second granularity — an edit right after the
+    -- last render lands in the same second).
+    record.body = "edited body"
+    rail.render(opts)
+    assert.is_true(vim.api.nvim_buf_get_changedtick(rail_buf) > tick)
+    assert.is_truthy(table.concat(rail_lines(rail_win), "\n"):find("edited body", 1, true))
+  end)
+
+  it("re-renders when the rail width changes", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    local code_win = vim.api.nvim_get_current_win()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "resize note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    move_cursor(bufnr, 1)
+    local rail_win = wait_for_rail()
+    assert.is_truthy(rail_win)
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    local rail = require("manicule.ui.rail")
+    local record = require("manicule").list({ _quiet = true })[1]
+    local opts = {
+      bufnr = bufnr,
+      winid = code_win,
+      anchor_line = 1,
+      entries = { { record = record, index = 1, total = 1 } },
+    }
+    rail.render(opts)
+    local rail_buf = vim.api.nvim_win_get_buf(rail_win)
+    local tick = vim.api.nvim_buf_get_changedtick(rail_buf)
+
+    vim.api.nvim_win_set_width(rail_win, vim.api.nvim_win_get_width(rail_win) - 5)
+    rail.render(opts)
+    assert.is_true(vim.api.nvim_buf_get_changedtick(rail_buf) > tick)
+  end)
+
+  it("realigns instead of skipping when the code window scrolls", function()
+    local lines = {}
+    for index = 1, 60 do
+      lines[index] = ("local x%d = %d"):format(index, index)
+    end
+    H.edit_project_file(ctx, "src/tall.lua", lines)
+    local bufnr = vim.api.nvim_get_current_buf()
+    local code_win = vim.api.nvim_get_current_win()
+    move_cursor(bufnr, 30)
+    require("manicule").add({
+      body = "scroll note",
+      range = { start = { 29, 0 }, end_ = { 29, 0 } },
+    })
+    move_cursor(bufnr, 30)
+    local rail_win = wait_for_rail()
+    assert.is_truthy(rail_win)
+    assert.is_true(vim.wait(1000, function()
+      return table.concat(rail_lines(rail_win), "\n"):find("scroll note", 1, true) ~= nil
+    end, 10))
+    local before = leading_blanks(rail_lines(rail_win))
+    assert.is_true(before > 0)
+
+    -- Scroll the anchor to the top of the code window: same records,
+    -- same anchor line, but the alignment padding must shrink — the
+    -- guard may not skip this render.
+    vim.api.nvim_win_call(code_win, function()
+      vim.cmd("normal! zt")
+    end)
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = bufnr })
+    assert.is_true(vim.wait(1000, function()
+      return leading_blanks(rail_lines(rail_win)) < before
+    end, 10))
+  end)
+
+  it("repeated clears keep the rail buffer untouched", function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    move_cursor(bufnr, 3)
+    require("manicule").add({
+      body = "clear once",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    move_cursor(bufnr, 1)
+    local rail_win = wait_for_rail()
+    assert.is_truthy(rail_win)
+
+    move_cursor(bufnr, 5)
+    assert.is_true(vim.wait(1000, function()
+      local lines = rail_lines(rail_win)
+      return #lines == 1 and lines[1] == ""
+    end, 10))
+    vim.wait(50, function()
+      return false
+    end, 10)
+    local rail_buf = vim.api.nvim_win_get_buf(rail_win)
+    local tick = vim.api.nvim_buf_get_changedtick(rail_buf)
+
+    -- Every further move across uncommented lines dispatches another
+    -- clear: an already-empty rail must not be rewritten each time.
+    move_cursor(bufnr, 4)
+    move_cursor(bufnr, 5)
+    move_cursor(bufnr, 4)
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.are.equal(tick, vim.api.nvim_buf_get_changedtick(rail_buf))
+  end)
+
   it("closes the rail when the display mode leaves eol", function()
     local bufnr = vim.api.nvim_get_current_buf()
     move_cursor(bufnr, 3)

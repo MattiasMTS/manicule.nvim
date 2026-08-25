@@ -106,6 +106,8 @@ local ok, err = xpcall(function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     }
   end
+  -- The store is stubbed by design: resolve/stage/panel-row building are
+  -- the benchmark targets, not SQLite I/O.
   package.loaded["manicule"] = {
     list = function()
       return comments
@@ -145,10 +147,27 @@ local ok, err = xpcall(function()
   local panel_ms, items = elapsed_ms(build_file_rows)
   assert(#items == 2000)
 
+  -- Icons pass: headless `--clean` loads no icon provider, so the plain
+  -- panel number above silently skips the icon branch. Stub a provider
+  -- (the icons_spec pattern) and force icons on so that branch is
+  -- measured too, reported as its own line.
+  package.preload["mini.icons"] = function()
+    return {
+      get = function(_category, _name)
+        return "X", "MiniIconsAzure", false
+      end,
+    }
+  end
+  require("manicule.config").current.ui.icons = true
+  require("manicule.ui.icons")._reset()
+  local panel_icons_ms, icon_items = elapsed_ms(build_file_rows)
+  assert(#icon_items == 2000)
+
   print(("files: %d (M=667 A=666 D=667), comments: %d"):format(#changed, #comments))
   print(("resolve_ms: %.3f"):format(resolve_ms))
   print(("stage_baseline_ms: %.3f"):format(stage_ms))
   print(("panel_build_file_rows_ms: %.3f"):format(panel_ms))
+  print(("panel_build_file_rows_icons_ms: %.3f"):format(panel_icons_ms))
 end, debug.traceback)
 
 cleanup()

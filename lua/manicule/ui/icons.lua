@@ -14,6 +14,18 @@ local M = {}
 ---@type {kind: "mini"|"devicons", mod: table}|false|nil
 local provider = nil
 
+---Cached `enabled()` verdict. `ui.icons` only changes via
+---`config.setup`, so one computation serves until `_reset()`.
+---@type boolean?
+local enabled_cache = nil
+
+---Per-path memo for `file_icon` — the review panel asks for the same
+---paths on every render. Only successful lookups are stored so an
+---erroring provider (e.g. mini.icons before its setup()) is retried on
+---the next call. Cleared by `_reset()`.
+---@type table<string, {[1]: string, [2]: string|nil}>
+local icon_cache = {}
+
 ---Probe for an icon provider, mini.icons preferred.
 ---@return {kind: "mini"|"devicons", mod: table}|nil
 local function resolve_provider()
@@ -40,14 +52,18 @@ end
 ---  false   -> never
 ---@return boolean
 function M.enabled()
+  if enabled_cache ~= nil then
+    return enabled_cache
+  end
   local icons = require("manicule.config").get().ui.icons
   if icons == true then
-    return true
+    enabled_cache = true
+  elseif icons == false then
+    enabled_cache = false
+  else
+    enabled_cache = resolve_provider() ~= nil
   end
-  if icons == false then
-    return false
-  end
-  return resolve_provider() ~= nil
+  return enabled_cache
 end
 
 ---Filetype icon + suggested highlight group for a path, from whichever
@@ -60,6 +76,10 @@ end
 function M.file_icon(path)
   if not M.enabled() then
     return nil, nil
+  end
+  local cached = icon_cache[path]
+  if cached then
+    return cached[1], cached[2]
   end
   local p = resolve_provider()
   if not p then
@@ -78,7 +98,9 @@ function M.file_icon(path)
   if not ok or type(icon) ~= "string" or icon == "" then
     return nil, nil
   end
-  return icon, type(hl) == "string" and hl or nil
+  local hl_group = type(hl) == "string" and hl or nil
+  icon_cache[path] = { icon, hl_group }
+  return icon, hl_group
 end
 
 ---Badge glyphs per kind: a Nerd Font `glyph` used when icons are
@@ -103,9 +125,12 @@ function M.badge(kind)
   return M.enabled() and badge.glyph or badge.ascii
 end
 
----Test seam: forget the resolved provider so the next call re-probes.
+---Test seam: forget the resolved provider, the cached `enabled()`
+---verdict, and the per-path icon memo so the next calls recompute.
 function M._reset()
   provider = nil
+  enabled_cache = nil
+  icon_cache = {}
 end
 
 return M

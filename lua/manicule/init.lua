@@ -666,6 +666,9 @@ function M.setup(opts)
   opts = opts or {}
   local config = require("manicule.config")
   config.setup(opts)
+  -- The icons module caches its enabled/provider verdicts; a re-setup can
+  -- change ui.icons, so drop the caches with the config they came from.
+  require("manicule.ui.icons")._reset()
 
   -- Register bundled sinks/integrations unless the user opted out.
   require("manicule.sinks").setup(require("manicule.config").get().sinks)

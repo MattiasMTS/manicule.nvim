@@ -27,8 +27,10 @@
 --             with the window, so no autocmd outlives the rail.
 --
 -- Buffer lifecycle: scratch (`nofile`), `bufhidden = wipe`. The rail
--- buffer is pure derived render state, rebuilt from records on every
--- render, so wiping on close is free and guarantees no stale
+-- buffer is pure derived render state, rebuilt from records whenever
+-- their state changes (a same-state guard in `M.render` skips the
+-- rebuild for no-op cursor events), so wiping on close is free and
+-- guarantees no stale
 -- `manicule://rail` buffers accumulate across open/close cycles —
 -- matching `float.create_scratch_buf`'s choice for popup buffers.
 --
@@ -55,6 +57,8 @@ local ns = vim.api.nvim_create_namespace("manicule.rail")
 ---@field augroup integer? Lifecycle augroup (torn down on close)
 ---@field source_win integer? Code window the rail is attached to
 ---@field source_buf integer? Code buffer whose records the rail renders
+---@field cleared boolean True while the rail buffer is known empty
+---@field last_render { key: string, padding: integer, stack_height: integer }? Same-state guard for `M.render`
 
 ---@type manicule.ui.rail.State?
 local state = nil
@@ -110,6 +114,11 @@ function M.clear_for(bufnr)
   if not state or state.source_buf ~= bufnr then
     return
   end
+  -- Already empty: every cursor move across uncommented lines dispatches
+  -- another clear — rewriting an empty buffer each time is pure churn.
+  if state.cleared then
+    return
+  end
   if not vim.api.nvim_buf_is_valid(state.bufnr) then
     return
   end
@@ -117,6 +126,8 @@ function M.clear_for(bufnr)
   vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, {})
   vim.bo[state.bufnr].modifiable = false
   vim.api.nvim_buf_clear_namespace(state.bufnr, ns, 0, -1)
+  state.cleared = true
+  state.last_render = nil
 end
 
 ---Deferred attachment check shared by every lifecycle autocmd: close
@@ -227,11 +238,13 @@ local function ensure_open(source_win, source_buf)
     vim.wo[winid].foldcolumn = "0"
     vim.wo[winid].spell = false
 
-    state = { winid = winid, bufnr = bufnr }
+    -- A fresh scratch buffer is empty, so it starts "cleared".
+    state = { winid = winid, bufnr = bufnr, cleared = true }
   end
   if state.source_win ~= source_win or state.source_buf ~= source_buf then
     state.source_win = source_win
     state.source_buf = source_buf
+    state.last_render = nil
     arm_lifecycle_autocmds()
   end
   return true
@@ -283,8 +296,40 @@ function M.render(opts)
   if not ensure_open(opts.winid, opts.bufnr) then
     return
   end
-  local render = require("manicule.ui.render")
   local width = vim.api.nvim_win_get_width(state.winid)
+  local anchor_line = opts.anchor_line or 1
+
+  -- Same-state guard: without it every cursor event (column-only moves,
+  -- each insert-mode keystroke) rebuilds the cards, rewrites the whole
+  -- buffer, and re-adds every extmark. The key covers everything that
+  -- changes the rendered bytes — the covering records (id, updated_at,
+  -- resolved, body — body directly because `os.time()` seconds make
+  -- same-second edits invisible to updated_at), the title counters, the
+  -- anchor line, and the rail width. Padding is re-probed each event
+  -- (one cheap `screenpos`) so scrolls and layout shifts still
+  -- re-align. Deliberately NOT keyed: the relative timestamp ("just
+  -- now") and the quoted code line — both refresh on the next state
+  -- change, and rebuilding per keystroke to chase them is the exact
+  -- churn being removed.
+  local key_parts = { tostring(anchor_line), tostring(width) }
+  for _, entry in ipairs(opts.entries or {}) do
+    local record = entry.record or {}
+    key_parts[#key_parts + 1] = table.concat({
+      tostring(record.id or ""),
+      tostring(record.updated_at or ""),
+      record.resolved and "1" or "0",
+      tostring(entry.index or 1),
+      tostring(entry.total or 1),
+      record.body or "",
+    }, "\1")
+  end
+  local key = table.concat(key_parts, "\2")
+  local last = state.last_render
+  if last and last.key == key and alignment_padding(opts.winid, anchor_line, last.stack_height) == last.padding then
+    return
+  end
+
+  local render = require("manicule.ui.render")
 
   -- Flatten the stack into one list of chunk rows (each row is one
   -- rendered line as `[text, hl]` chunks, straight from the inline box
@@ -297,8 +342,9 @@ function M.render(opts)
     end
   end
 
+  local padding = alignment_padding(opts.winid, anchor_line, #rows)
   local lines = {}
-  for _ = 1, alignment_padding(opts.winid, opts.anchor_line or 1, #rows) do
+  for _ = 1, padding do
     table.insert(lines, "")
   end
   ---@type { row: integer, start_col: integer, end_col: integer, hl: string }[]
@@ -329,6 +375,8 @@ function M.render(opts)
       hl_group = span.hl,
     })
   end
+  state.cleared = false
+  state.last_render = { key = key, padding = padding, stack_height = #rows }
 end
 
 ---True when the rail window is open.

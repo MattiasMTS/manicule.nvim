@@ -166,6 +166,83 @@ describe("manicule ui icons", function()
     end)
   end)
 
+  describe("memoization", function()
+    ---Stub mini.icons with a call counter so tests can assert how often
+    ---the provider is actually consulted.
+    local function stub_counting_mini_icons()
+      local calls = { n = 0 }
+      package.preload["mini.icons"] = function()
+        return {
+          get = function(_category, _name)
+            calls.n = calls.n + 1
+            return "Z", "MiniIconsAzure", false
+          end,
+        }
+      end
+      return calls
+    end
+
+    it("memoizes file_icon per path", function()
+      set_icons_config("auto")
+      local calls = stub_counting_mini_icons()
+      local icon1, hl1 = icons().file_icon("foo.lua")
+      local icon2, hl2 = icons().file_icon("foo.lua")
+      assert.are.equal("Z", icon1)
+      assert.are.equal("MiniIconsAzure", hl1)
+      assert.are.equal(icon1, icon2)
+      assert.are.equal(hl1, hl2)
+      assert.are.equal(1, calls.n)
+      -- A different path is a different memo slot.
+      icons().file_icon("bar.lua")
+      assert.are.equal(2, calls.n)
+    end)
+
+    it("_reset clears the file_icon memo", function()
+      set_icons_config("auto")
+      local calls = stub_counting_mini_icons()
+      icons().file_icon("foo.lua")
+      icons().file_icon("foo.lua")
+      assert.are.equal(1, calls.n)
+      icons()._reset()
+      icons().file_icon("foo.lua")
+      assert.are.equal(2, calls.n)
+    end)
+
+    it("does not memoize provider errors", function()
+      set_icons_config("auto")
+      local calls = { n = 0 }
+      package.preload["mini.icons"] = function()
+        return {
+          get = function()
+            calls.n = calls.n + 1
+            if calls.n == 1 then
+              error("mini.icons not set up")
+            end
+            return "Y", "MiniIconsAzure", false
+          end,
+        }
+      end
+      -- First call errors -> nil, and the failure is NOT cached: the
+      -- provider may succeed later (mini.icons after its setup()).
+      assert.is_nil(icons().file_icon("foo.lua"))
+      assert.are.equal("Y", icons().file_icon("foo.lua"))
+      -- Now memoized.
+      icons().file_icon("foo.lua")
+      assert.are.equal(2, calls.n)
+    end)
+
+    it("caches the enabled() verdict until _reset", function()
+      set_icons_config(true)
+      assert.is_true(icons().enabled())
+      -- ui.icons only changes via config.setup; flipping it under a live
+      -- session needs a _reset (the test seam) to be observed.
+      set_icons_config(false)
+      assert.is_true(icons().enabled())
+      icons()._reset()
+      assert.is_false(icons().enabled())
+    end)
+  end)
+
   describe("_reset()", function()
     it("clears the cached provider so a newly loadable one is picked up", function()
       set_icons_config("auto")
