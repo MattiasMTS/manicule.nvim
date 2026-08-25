@@ -176,22 +176,34 @@ Comments anchor to true worktree line numbers in both modes, so
 lines and the read-only baseline side are not commentable. `]h` / `[h`
 jump between hunks (wrapping).
 
-A bottom panel opens automatically: a plain `manicule://panel` buffer
-(filetype `manicule-panel`) in a fixed-height split, so the global
-quickfix list stays free during the review. Each line shows one file with
-its status and a live comment count (colored filetype icons when an icon
-provider is installed — see `ui.icons`), and the pair on screen is marked
-with `▸`, a highlighted line, and a bold filename.
+Each review window carries a winbar breadcrumb — `path · M · +12 −4` on
+the worktree side, `path · baseline` on the read-only side.
+
+A panel opens automatically: a plain `manicule://panel` buffer (filetype
+`manicule-panel`), so the global quickfix list stays free during the
+review. `review.panel.position` places it: `"bottom"` split (default),
+`"left"`/`"right"` full-height column, or a centered `"float"` that
+takes focus (`q` closes it; `review.panel.size` overrides rows/columns
+for the splits). Each line shows one file with its status, diffstat, and
+a live comment count (colored filetype icons when an icon provider is
+installed — see `ui.icons`), and the pair on screen is marked with `▸`,
+a highlighted line, and a bold filename.
+
+Files you navigate away from with `:ManiculeReviewNext`/`Prev` (or
+`<Tab>`/`<S-Tab>` in a review buffer) are marked viewed — `✓` and dimmed
+in the panel, with progress (`3/12 viewed`) in the panel's winbar — and
+skipped by further next/prev while unviewed files remain. `v` in the
+panel toggles a file's viewed state by hand.
 
 Panel keymaps (buffer-local): `<CR>` on a commented file drills into a
 comments view scoped to that file (`<CR>` jumps to a comment, `dd`
 deletes, `ce` edits, `u`/`<C-r>` undo/redo a deletion, `<Esc>` goes
 back); `<CR>` on a file without comments switches the diff to that pair,
 and `o` always opens the pair. `<Tab>` toggles between files view and
-comments view (from a scoped view it widens to all session comments).
-`:ManiculeToggle` shows/hides the panel during a review. Running
-`:ManiculeReview pr` with no number opens a picker over the repository's
-open PRs.
+comments view (from a scoped view it widens to all session comments),
+and `v` toggles viewed. `:ManiculeToggle` shows/hides the panel during a
+review. Running `:ManiculeReview pr` with no number opens a picker over
+the repository's open PRs.
 
 When you review a PR with its head checked out, existing GitHub review
 comments are imported as manicule records and render inline. They can be
@@ -239,6 +251,10 @@ require("manicule").setup({
     mode = "split", -- "split" (side-by-side) or "unified" (inline)
     fold_unchanged = false, -- collapse unchanged code into folds while reviewing
     context = 3, -- unified: lines kept visible around each hunk
+    panel = {
+      position = "bottom", -- "bottom", "left", "right", or "float"
+      -- size = 12, -- rows (bottom) or columns (left/right); default per position
+    },
   },
   ui = {
     width = 72,

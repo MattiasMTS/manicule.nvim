@@ -148,7 +148,7 @@ describe("manicule review panel substrate", function()
         by_lhs[map.lhs:lower()] = true
       end
     end
-    for _, lhs in ipairs({ "<cr>", "o", "r", "gr", "<esc>", "<tab>", "dd", "ce", "u", "<c-r>" }) do
+    for _, lhs in ipairs({ "<cr>", "o", "v", "r", "gr", "<esc>", "<tab>", "dd", "ce", "u", "<c-r>" }) do
       assert.is_true(by_lhs[lhs] == true, "missing panel keymap " .. lhs)
     end
   end)
@@ -315,8 +315,10 @@ describe("manicule review panel current-pair highlight", function()
 
     R.next()
     assert.are.same({ 1 }, current_rows())
+    -- prev() marks pair 2 viewed and skips the (auto-viewed) pair 1,
+    -- wrapping to pair 3 — see the viewed-tracking specs.
     R.prev()
-    assert.are.same({ 0 }, current_rows())
+    assert.are.same({ 2 }, current_rows())
   end)
 
   it("overlays the ▸ marker and bolds the open pair's filename", function()
@@ -669,5 +671,196 @@ describe("manicule review panel file icons", function()
     -- Provider loadable (icons enabled) but erroring: a blank cell
     -- keeps the column so mixed successes/failures still line up.
     assert.are.equal("    [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
+  end)
+end)
+
+---Press `lhs` in the panel window on `row` THROUGH buffer-local maps.
+local function press_in_panel(row, lhs)
+  local winid = assert(panel().winid(), "panel window not open")
+  vim.api.nvim_set_current_win(winid)
+  vim.api.nvim_win_set_cursor(winid, { row, 0 })
+  local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
+  vim.api.nvim_feedkeys(keys, "x", false)
+end
+
+describe("manicule review panel viewed tracking", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  it("v toggles the row's viewed state: \u{2713} lead, dim, progress", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "viewed" }))
+    local winid = assert(panel().winid())
+    assert.are.equal("0/2 viewed", vim.wo[winid].winbar)
+
+    press_in_panel(2, "v")
+    assert.is_true(R.state().viewed[2])
+    assert.are.equal("\u{2713} [M] f2.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[2])
+    assert.are.equal("1/2 viewed", vim.wo[winid].winbar)
+    assert.is_true(#span_marks(1, "ManiculePanelViewed") > 0, "viewed row not dimmed")
+    -- Unviewed row untouched.
+    assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
+    assert.are.equal(0, #span_marks(0, "ManiculePanelViewed"))
+
+    -- Second press un-marks.
+    press_in_panel(2, "v")
+    assert.is_nil(R.state().viewed[2])
+    assert.are.equal("  [M] f2.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[2])
+    assert.are.equal("0/2 viewed", vim.wo[winid].winbar)
+    assert.are.equal(0, #span_marks(1, "ManiculePanelViewed"))
+  end)
+
+  it("dims the whole viewed row EXCEPT the diffstat spans", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "viewed-dim" }))
+    R.set_viewed(1, true)
+
+    -- The +/− spans stay colored (Pierre keeps them visible).
+    local added = span_marks(0, "ManiculePanelAdded")
+    local removed = span_marks(0, "ManiculePanelRemoved")
+    assert.are.equal(1, #added)
+    assert.are.equal(1, #removed)
+
+    -- Dim segments never overlap the diffstat spans and cover the rest
+    -- of the row (start of line through the tail).
+    local dims = span_marks(0, "ManiculePanelViewed")
+    assert.is_true(#dims > 0, "no dim spans on the viewed row")
+    local colored = { { added[1][3], added[1][4].end_col }, { removed[1][3], removed[1][4].end_col } }
+    local covered = 0
+    for _, dim in ipairs(dims) do
+      local dim_start, dim_end = dim[3], dim[4].end_col
+      covered = covered + (dim_end - dim_start)
+      for _, span in ipairs(colored) do
+        assert.is_true(dim_end <= span[1] or dim_start >= span[2], "dim span overlaps a diffstat span")
+      end
+    end
+    local line = panel_lines()[1]
+    local stat_bytes = (added[1][4].end_col - added[1][3]) + (removed[1][4].end_col - removed[1][3])
+    assert.are.equal(#line - stat_bytes, covered, "dim spans do not cover the rest of the row")
+    -- Dim group is a default Comment link, so user overrides win.
+    assert.are.equal("Comment", vim.api.nvim_get_hl(0, { name = "ManiculePanelViewed" }).link)
+  end)
+
+  it("next() auto-marks the pair it leaves and the panel shows it", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "viewed-auto" }))
+    R.next()
+    assert.is_true(R.state().viewed[1])
+    assert.are.equal("\u{2713} [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
+    assert.are.equal("1/2 viewed", vim.wo[assert(panel().winid())].winbar)
+  end)
+end)
+
+describe("manicule review panel placement", function()
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  local function side_width()
+    return math.min(46, math.max(30, math.floor(vim.o.columns * 0.3)))
+  end
+
+  it("left: full-height side split at the far left", function()
+    ctx = H.setup({ review = { panel = { position = "left" } } })
+    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "left" }))
+    local winid = assert(panel().winid())
+    assert.are.equal(0, vim.api.nvim_win_get_position(winid)[2])
+    assert.are.equal(side_width(), vim.api.nvim_win_get_width(winid))
+    assert.is_true(vim.wo[winid].winfixwidth)
+    for _, other in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if other ~= winid then
+        assert.is_true(vim.api.nvim_win_get_position(other)[2] > 0, "panel is not the left-most window")
+      end
+    end
+  end)
+
+  it("right: full-height side split placed OUTERMOST", function()
+    ctx = H.setup({ review = { panel = { position = "right" } } })
+    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "right" }))
+    local winid = assert(panel().winid())
+    local col = vim.api.nvim_win_get_position(winid)[2]
+    assert.are.equal(vim.o.columns, col + vim.api.nvim_win_get_width(winid))
+    assert.are.equal(side_width(), vim.api.nvim_win_get_width(winid))
+    assert.is_true(vim.wo[winid].winfixwidth)
+  end)
+
+  it("size overrides the per-position default", function()
+    ctx = H.setup({ review = { panel = { position = "bottom", size = 5 } } })
+    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "sized" }))
+    local winid = assert(panel().winid())
+    assert.are.equal(5, vim.api.nvim_win_get_height(winid))
+
+    require("manicule.review").stop()
+    -- Runtime mutation (same pattern as ui.icons above): the panel
+    -- reads placement at open time.
+    require("manicule.config").get().review.panel = { position = "right", size = 40 }
+    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "sized-right" }))
+    winid = assert(panel().winid())
+    assert.are.equal(40, vim.api.nvim_win_get_width(winid))
+  end)
+
+  it("float: centered editor-relative window that takes focus", function()
+    ctx = H.setup({ review = { panel = { position = "float" } } })
+    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "float" }))
+    local winid = assert(panel().winid())
+    local cfg = vim.api.nvim_win_get_config(winid)
+    assert.are.equal("editor", cfg.relative)
+    local width = math.floor(vim.o.columns * 0.6)
+    local height = math.floor(vim.o.lines * 0.4)
+    assert.are.equal(width, cfg.width)
+    assert.are.equal(height, cfg.height)
+    assert.are.equal(math.floor((vim.o.lines - height) / 2), cfg.row)
+    assert.are.equal(math.floor((vim.o.columns - width) / 2), cfg.col)
+    assert.is_truthy(cfg.border, "float has no border")
+    -- Modal-ish: the float takes focus on open (splits never do).
+    assert.are.equal(winid, vim.api.nvim_get_current_win())
+  end)
+
+  it("float: q closes the panel and keeps the session", function()
+    ctx = H.setup({ review = { panel = { position = "float" } } })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "float-q" }))
+    press_in_panel(1, "q")
+    assert.is_nil(panel().winid(), "q did not close the float panel")
+    assert.is_truthy(R.state(), "q killed the session")
+    -- Toggle reopens it.
+    assert.is_true(panel().toggle())
+    assert.is_truthy(panel().winid())
+  end)
+
+  it("q is not mapped for split positions", function()
+    ctx = H.setup()
+    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "no-q" }))
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(assert(panel().bufnr()), "n")) do
+      assert.are_not.equal("q", map.lhs, "q leaked into a split-position panel")
+    end
+  end)
+
+  it("rejects an unknown position and a bad size", function()
+    ctx = H.setup()
+    local config = require("manicule.config")
+    local ok, err = pcall(config.setup, { review = { panel = { position = "top" } } })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("review.panel.position", 1, true))
+
+    local ok2, err2 = pcall(config.setup, { review = { panel = { size = 0 } } })
+    assert.is_false(ok2)
+    assert.is_truthy(tostring(err2):find("review.panel.size", 1, true))
+
+    local ok3, err3 = pcall(config.setup, { review = { panel = { size = 2.5 } } })
+    assert.is_false(ok3)
+    assert.is_truthy(tostring(err3):find("review.panel.size", 1, true))
   end)
 end)

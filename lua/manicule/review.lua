@@ -30,6 +30,8 @@ local uv = vim.uv
 ---@field stage_dirs string[]|nil staging dirs the session OWNS; deleted by stop()
 ---@field mapped_bufs table<integer, true>|nil
 ---@field diffstat {added: integer, removed: integer}[]|nil per-pair line counts, filled lazily by M.diffstat()
+---@field viewed table<integer, true> pair index -> viewed; auto-marked by next/prev, toggled by the panel's `v`
+---@field winbar_wins table<integer, true> windows whose winbar the session set (cleared on pair switch and stop)
 
 ---@type manicule.ReviewSession|nil
 local session = nil
@@ -57,10 +59,63 @@ local function is_preserved_window(winid)
   return vim.bo[bufnr].buftype == "quickfix" or vim.bo[bufnr].filetype == "manicule-panel"
 end
 
+---Winbar text must survive the statusline engine: literal `%` doubles.
+---@param text string
+---@return string
+local function winbar_escape(text)
+  return (text:gsub("%%", "%%%%"))
+end
+
+---`path · S · +A −R` for the pair's commentable window, zero diffstat
+---components omitted (matching the panel rows).
+---@param pair {path: string, status: string}
+---@param stat {added: integer, removed: integer}|nil
+---@return string
+local function breadcrumb(pair, stat)
+  local parts = { pair.path, pair.status }
+  local counts = {}
+  if stat and stat.added > 0 then
+    counts[#counts + 1] = ("+%d"):format(stat.added)
+  end
+  if stat and stat.removed > 0 then
+    counts[#counts + 1] = ("\u{2212}%d"):format(stat.removed)
+  end
+  if #counts > 0 then
+    parts[#parts + 1] = table.concat(counts, " ")
+  end
+  return winbar_escape(table.concat(parts, " \u{00B7} "))
+end
+
+---Set a window's winbar and remember it for teardown: winbars are
+---window-local, but pair switches reuse one window (close_session_windows
+---keeps the first) and `:only`/single-tab stop() leave a file window
+---alive — those must not keep a stale breadcrumb.
+---@param winid integer
+---@param text string
+local function set_winbar(winid, text)
+  vim.wo[winid].winbar = text
+  session.winbar_wins[winid] = true
+end
+
+---@param winbar_wins table<integer, true>|nil
+local function clear_winbars(winbar_wins)
+  for winid in pairs(winbar_wins or {}) do
+    if vim.api.nvim_win_is_valid(winid) then
+      vim.wo[winid].winbar = ""
+    end
+  end
+end
+
 local function close_session_windows()
   -- Reduce the session tab windows to diff windows only (preserve the
   -- panel and any user quickfix). Unified paint is buffer-scoped, so it
   -- must be dropped explicitly — `diffoff!` knows nothing about it.
+  if session then
+    -- The surviving window is reused for the next pair; drop this
+    -- pair's winbars so nothing stale outlives the switch.
+    clear_winbars(session.winbar_wins)
+    session.winbar_wins = {}
+  end
   require("manicule.review.inline").clear_all()
   vim.cmd("silent! diffoff!")
   -- Close all non-preserved windows except the first one
@@ -95,10 +150,10 @@ local function map_navigation(bufnr)
   end
   vim.keymap.set("n", "<Tab>", function()
     require("manicule.review").next()
-  end, { buffer = bufnr, desc = "Manicule review: next file" })
+  end, { buffer = bufnr, desc = "Manicule review: next file (marks this one viewed; skips viewed files)" })
   vim.keymap.set("n", "<S-Tab>", function()
     require("manicule.review").prev()
-  end, { buffer = bufnr, desc = "Manicule review: previous file" })
+  end, { buffer = bufnr, desc = "Manicule review: previous file (marks this one viewed; skips viewed files)" })
   session.mapped_bufs = session.mapped_bufs or {}
   session.mapped_bufs[bufnr] = true
 end
@@ -140,10 +195,15 @@ function M.open(index)
   vim.api.nvim_set_current_tabpage(session.tab)
   close_session_windows()
 
+  -- Winbar breadcrumb data: the cached per-pair diffstat (computed
+  -- lazily once per session).
+  local stat = (M.diffstat() or {})[index]
+
   if pair.status == "D" then
     vim.cmd.edit(vim.fn.fnameescape(pair.left))
     protect_left(vim.api.nvim_get_current_buf())
     map_navigation(vim.api.nvim_get_current_buf())
+    set_winbar(vim.api.nvim_get_current_win(), breadcrumb(pair, stat))
     vim.notify(("manicule: %s was deleted; comments here are file-level notes"):format(pair.path), vim.log.levels.INFO)
     require("manicule.review.panel").sync_index(index)
     return
@@ -165,6 +225,7 @@ function M.open(index)
       vim.notify(err or "manicule: cannot render inline diff", vim.log.levels.WARN)
     end
     map_navigation(buf)
+    set_winbar(vim.api.nvim_get_current_win(), breadcrumb(pair, stat))
     require("manicule.review.panel").sync_index(index)
     return
   end
@@ -173,11 +234,14 @@ function M.open(index)
   -- nvim.difftool support could be added later via open() hook if needed.
   vim.cmd.edit(vim.fn.fnameescape(pair.right))
   local right_buf = vim.api.nvim_get_current_buf()
+  local right_win = vim.api.nvim_get_current_win()
   vim.cmd("leftabove vertical diffsplit " .. vim.fn.fnameescape(pair.left))
   local left_win = vim.api.nvim_get_current_win()
   protect_left(vim.api.nvim_get_current_buf())
   map_navigation(vim.api.nvim_get_current_buf())
   map_navigation(right_buf)
+  set_winbar(right_win, breadcrumb(pair, stat))
+  set_winbar(left_win, winbar_escape(pair.path .. " \u{00B7} baseline"))
   vim.cmd.wincmd("p") -- focus back on the right / worktree side
   if cfg.fold_unchanged == false then
     -- Native :diffsplit folds unchanged regions (foldmethod=diff); the
@@ -189,16 +253,52 @@ function M.open(index)
   require("manicule.review.panel").sync_index(index)
 end
 
+---Index of the nearest unviewed pair `dir` (+1/-1) steps away from the
+---current one, wrapping. With every pair viewed, the plain neighbor —
+---the bounded scan can never loop.
+---@param dir integer
+---@return integer
+local function seek_unviewed(dir)
+  local count = #session.files
+  local index = session.index
+  for _ = 1, count do
+    index = (index - 1 + dir) % count + 1
+    if not session.viewed[index] then
+      return index
+    end
+  end
+  return session.index + dir -- all viewed: plain cycle (M.open wraps)
+end
+
+-- next/prev mark the pair the user navigates AWAY from as viewed (the
+-- natural reading flow; the panel's `v` un-marks) and then skip pairs
+-- already viewed while any unviewed pair remains.
 function M.next()
   if session then
-    M.open(session.index + 1)
+    M.set_viewed(session.index, true)
+    M.open(seek_unviewed(1))
   end
 end
 
 function M.prev()
   if session then
-    M.open(session.index - 1)
+    M.set_viewed(session.index, true)
+    M.open(seek_unviewed(-1))
   end
+end
+
+---Mark or un-mark a pair as viewed (session-scoped; read back via
+---`M.state().viewed`). Refreshes the panel so the row dims/undims and
+---the progress count updates. No-op without a session or for an index
+---outside the session's files.
+---@param index integer
+---@param viewed boolean
+function M.set_viewed(index, viewed)
+  if not session or not session.files[index] then
+    return
+  end
+  session.viewed[index] = viewed and true or nil
+  require("manicule.review.panel").refresh()
 end
 
 ---@return manicule.ReviewSession|nil
@@ -385,6 +485,8 @@ function M.start(opts)
     stage_dirs = opts.stage_dirs,
     index = 1,
     tab = vim.api.nvim_get_current_tabpage(),
+    viewed = {},
+    winbar_wins = {},
   }
   build_session_cache(session)
   M.open(1)
@@ -449,6 +551,10 @@ function M.stop()
   -- come off explicitly or the file keeps its diff highlights forever.
   require("manicule.review.inline").clear_all()
   unmap_navigation(session.mapped_bufs)
+  -- Winbars come off while the windows are still valid: the tabclose
+  -- below usually destroys them, but the single-tab branch (and any
+  -- `:only`-surviving worktree window) reuses a session window.
+  clear_winbars(session.winbar_wins)
   session = nil
   if vim.api.nvim_tabpage_is_valid(tab) then
     local tab_count = #vim.api.nvim_list_tabpages()

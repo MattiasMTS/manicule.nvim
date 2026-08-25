@@ -26,10 +26,15 @@ local M = {}
 ---@field root_markers string[] Markers passed to `vim.fs.root`.
 ---@field poll_interval_ms integer Milliseconds between local SQLite sync polls. Set <= 0 to disable.
 
+---@class manicule.ReviewPanelConfig
+---@field position "bottom"|"left"|"right"|"float" Where the review panel opens (default "bottom").
+---@field size? integer Panel size override: rows for "bottom", columns for "left"/"right"; "float" ignores it.
+
 ---@class manicule.ReviewConfig
 ---@field mode "split"|"unified" Diff rendering for `:ManiculeReview`. "split" opens a side-by-side `:diffsplit` pair; "unified" paints the diff inline on the worktree buffer.
 ---@field fold_unchanged boolean Collapse unchanged regions into folds (default false; split mode gets nofoldenable when off).
 ---@field context integer Unified mode only: lines of context kept around each hunk (and the fold's minimum size).
+---@field panel manicule.ReviewPanelConfig Review panel placement.
 
 ---@class manicule.SinksConfig
 ---@field clipboard boolean|table Enable the bundled clipboard sink (default true).
@@ -86,6 +91,17 @@ M.defaults = {
     fold_unchanged = false,
     -- Unified mode: context lines kept around each hunk.
     context = 3,
+    -- Review panel placement. "bottom" (default) is a full-width split
+    -- below the diff; "left"/"right" are full-height side splits
+    -- ("right" places outermost, so it coexists with the comments
+    -- rail); "float" is a centered floating window that takes focus on
+    -- open (`q` closes it). `size` overrides the per-position default:
+    -- rows for "bottom" (default min(12, #files + 2)), columns for
+    -- "left"/"right" (default 30% of the screen clamped to [30, 46]);
+    -- "float" ignores it (60% cols x 40% rows).
+    panel = {
+      position = "bottom",
+    },
   },
   -- Floating editor + popup UI options.
   ui = {
@@ -169,6 +185,29 @@ function M.setup(opts)
     local context = opts.review.context
     if context ~= nil and (context ~= context or context < 0 or context ~= math.floor(context)) then
       error(("manicule: review.context must be a non-negative integer, got %s"):format(tostring(context)))
+    end
+    vim.validate("review.panel", opts.review.panel, "table", true)
+    if opts.review.panel then
+      vim.validate("review.panel.position", opts.review.panel.position, "string", true)
+      vim.validate("review.panel.size", opts.review.panel.size, "number", true)
+      local position = opts.review.panel.position
+      if
+        position ~= nil
+        and position ~= "bottom"
+        and position ~= "left"
+        and position ~= "right"
+        and position ~= "float"
+      then
+        error(
+          ('manicule: review.panel.position must be "bottom", "left", "right", or "float", got %q'):format(
+            tostring(position)
+          )
+        )
+      end
+      local size = opts.review.panel.size
+      if size ~= nil and (size ~= size or size < 1 or size ~= math.floor(size)) then
+        error(("manicule: review.panel.size must be a positive integer, got %s"):format(tostring(size)))
+      end
     end
   end
   if opts.ui then

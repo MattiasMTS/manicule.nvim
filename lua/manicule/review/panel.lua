@@ -1,15 +1,19 @@
--- manicule.nvim: review panel — an owned scratch-buffer bottom split.
+-- manicule.nvim: review panel — an owned scratch-buffer window.
 --
 -- Auto-opens on session start as a plain `manicule://panel` buffer
--- (filetype `manicule-panel`) in a full-width split below the diff, so
--- j/k/search/marks all behave like any normal buffer and the GLOBAL
--- quickfix list stays free for the user during reviews.
+-- (filetype `manicule-panel`), so j/k/search/marks all behave like any
+-- normal buffer and the GLOBAL quickfix list stays free for the user
+-- during reviews. Placement comes from `review.panel.position`: a
+-- full-width "bottom" split (default), a full-height "left"/"right"
+-- column, or a centered "float" (which takes focus; `q` closes it).
 --
 -- Two views share the window. Files view (default) renders one line
 -- per pair — `<icon> [M] path  +12 −4  · N comments` — with a per-file
 -- diffstat and live comment counts; the
 -- OPEN pair's line is marked with a `▸ ` overlay, a full-line
--- `ManiculePanelCurrent` background, and a bold filename. <Tab>
+-- `ManiculePanelCurrent` background, and a bold filename; VIEWED pairs
+-- (`v`, or auto-marked by next/prev) get a `✓ ` lead and dim, and the
+-- window's winbar counts progress (`3/12 viewed`). <Tab>
 -- toggles to the comments view (session-scoped records). In files
 -- view, <CR> drills into a commented pair's comments (or opens the
 -- pair when it has none); `o` always opens the pair. In a scoped
@@ -124,6 +128,7 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculePanelRemoved", { link = "Removed", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelCount", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelResolved", { link = "Comment", default = true })
+  vim.api.nvim_set_hl(0, "ManiculePanelViewed", { link = "Comment", default = true })
 end
 
 ---@class manicule.review.panel.Row
@@ -131,9 +136,35 @@ end
 ---@field spans {[1]: integer, [2]: integer, [3]: string}[] byte-range highlights
 ---@field data table locator stored into `line_data`
 
+---Spans for a VIEWED row: keep the diffstat (+/−) spans colored —
+---Pierre keeps them visible — and dim everything around them with
+---`ManiculePanelViewed` segments (which replace the icon/status/count
+---spans, so no two foreground marks compete on the same bytes).
+---@param spans {[1]: integer, [2]: integer, [3]: string}[] built left-to-right
+---@param text_len integer row byte length
+---@return {[1]: integer, [2]: integer, [3]: string}[]
+local function viewed_spans(spans, text_len)
+  local out = {}
+  local pos = 0
+  for _, span in ipairs(spans) do
+    if span[3] == "ManiculePanelAdded" or span[3] == "ManiculePanelRemoved" then
+      if span[1] > pos then
+        out[#out + 1] = { pos, span[1], "ManiculePanelViewed" }
+      end
+      out[#out + 1] = span
+      pos = span[2]
+    end
+  end
+  if pos < text_len then
+    out[#out + 1] = { pos, text_len, "ManiculePanelViewed" }
+  end
+  return out
+end
+
 ---Files view rows: one per session pair, `<lead><icon> [S] path  +A −R
----· N comments`. The two-space lead reserves the current-pair marker
----column (`▸ ` overlays it on the open pair) so columns never shift.
+---· N comments`. The two-cell lead reserves the current-pair marker
+---column (`▸ ` overlays it on the open pair) so columns never shift;
+---viewed pairs render a `✓ ` lead (same two cells) and dim.
 ---@return manicule.review.panel.Row[]
 local function build_file_rows()
   local review = require("manicule.review")
@@ -159,11 +190,14 @@ local function build_file_rows()
   -- deliberately NOT refreshed when the worktree side changes mid-review.
   local diffstat = review.diffstat() or {}
 
+  local viewed = state.viewed or {}
   local rows = {}
   for idx, pair in ipairs(state.files) do
-    local parts = { "  " }
+    local is_viewed = viewed[idx] == true
+    local lead = is_viewed and "\u{2713} " or "  "
+    local parts = { lead }
     local spans = {}
-    local col = 2
+    local col = #lead
     if with_icons then
       -- One glyph + one space (a blank cell when the provider yields
       -- nothing) keeps the column aligned; the provider's highlight
@@ -216,8 +250,12 @@ local function build_file_rows()
     local count = ("  \u{00B7} %d comments"):format(counts[state.uris[idx]] or 0)
     parts[#parts + 1] = count
     spans[#spans + 1] = { col, col + #count, "ManiculePanelCount" }
+    local text = table.concat(parts)
+    if is_viewed then
+      spans = viewed_spans(spans, #text)
+    end
     rows[#rows + 1] = {
-      text = table.concat(parts),
+      text = text,
       spans = spans,
       data = { pair_index = idx, path_start = path_start, path_end = path_start + #pair.path },
     }
@@ -320,6 +358,24 @@ local function apply_current_marks()
   })
 end
 
+---Viewed progress (`3/12 viewed`) in the panel window's winbar — the
+---panel has no other title surface, and a winbar is native and cheap.
+---Plain text (no `%` items), so no escaping is needed.
+local function update_winbar()
+  if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
+    return
+  end
+  local state = require("manicule.review").state()
+  if not state then
+    return
+  end
+  local viewed = 0
+  for _ in pairs(state.viewed or {}) do
+    viewed = viewed + 1
+  end
+  vim.wo[panel_winid].winbar = ("%d/%d viewed"):format(viewed, #state.files)
+end
+
 ---Rebuild the panel buffer from state: lines, content extmarks, and
 ---`line_data`, then the current-pair marks. Idempotent; never moves
 ---the cursor or focus.
@@ -329,6 +385,7 @@ local function render(comment_records)
   if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
     return
   end
+  update_winbar()
   local rows
   if current_view == "files" then
     rows = build_file_rows()
@@ -547,6 +604,25 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: back to files view")
 
+  -- `v` in files view toggles the row's pair viewed (next/prev also
+  -- auto-mark the pair they leave; `v` is the manual toggle/un-mark).
+  -- Falls through to the default `v` (visual mode) elsewhere.
+  map("v", function()
+    if current_view ~= "files" then
+      feed_default("v")
+      return
+    end
+    local idx = pair_index_at_cursor()
+    if not idx then
+      return
+    end
+    local review = require("manicule.review")
+    local state = review.state()
+    if state then
+      review.set_viewed(idx, not state.viewed[idx])
+    end
+  end, "Manicule review: toggle viewed for the file under cursor")
+
   -- <Tab> toggles files <-> ALL comments. From a drilled-down (scoped)
   -- comments view it first widens to all comments.
   map("<Tab>", function()
@@ -617,9 +693,50 @@ local function hide()
   end
 end
 
+---The configured panel placement: position plus optional size override.
+---@return {position: "bottom"|"left"|"right"|"float", size?: integer}
+local function panel_config()
+  local review_cfg = require("manicule.config").get().review or {}
+  local cfg = type(review_cfg.panel) == "table" and review_cfg.panel or {}
+  return { position = cfg.position or "bottom", size = cfg.size }
+end
+
+---Window config for one placement. Splits mirror the shapes already in
+---the codebase: "bottom" is the `:botright split` full-width strip,
+---"left"/"right" the rail's full-height side column (`win = -1`, so
+---"right" places OUTERMOST and coexists with the comments rail).
+---"float" is a centered editor-relative window.
+---@param position string
+---@param size integer|nil
+---@param file_count integer
+---@return table win_opts, boolean enter
+local function placement_win_opts(position, size, file_count)
+  if position == "float" then
+    local width = math.floor(vim.o.columns * 0.6)
+    local height = math.floor(vim.o.lines * 0.4)
+    return {
+      relative = "editor",
+      width = width,
+      height = height,
+      row = math.floor((vim.o.lines - height) / 2),
+      col = math.floor((vim.o.columns - width) / 2),
+      border = "rounded",
+      focusable = true,
+    },
+      true -- modal-ish: the float takes focus on open
+  end
+  if position == "left" or position == "right" then
+    -- Same clamp as the comments rail: 30% of the screen in [30, 46].
+    local width = size or math.min(46, math.max(30, math.floor(vim.o.columns * 0.3)))
+    return { split = position, win = -1, width = width }, false
+  end
+  return { split = "below", win = -1, height = size or math.min(12, file_count + 2) }, false
+end
+
 ---Create the panel buffer + window for the CURRENT view state and arm
----the live-refresh/lifecycle augroup. `enter = false` — opening never
----steals focus, so there is nothing to restore afterwards.
+---the live-refresh/lifecycle augroup. Splits open with `enter = false`
+---(never steal focus); the float is modal-ish and takes focus, with a
+---float-only `q` map that closes it (toggle-hide — the session lives).
 local function open_window()
   setup_highlights()
 
@@ -639,22 +756,20 @@ local function open_window()
   vim.bo[bufnr].filetype = PANEL_FILETYPE
 
   local state = require("manicule.review").state()
-  local height = math.min(12, (state and #state.files or 1) + 2)
+  local cfg = panel_config()
+  local win_opts, enter = placement_win_opts(cfg.position, cfg.size, state and #state.files or 1)
 
-  -- `split = "below"` + `win = -1` opens a full-width top-level split
-  -- at the bottom of the tab (the `:botright split` shape), under both
-  -- diff windows.
-  local ok, winid = pcall(vim.api.nvim_open_win, bufnr, false, {
-    split = "below",
-    win = -1,
-    height = height,
-  })
+  local ok, winid = pcall(vim.api.nvim_open_win, bufnr, enter, win_opts)
   if not ok or not winid or not vim.api.nvim_win_is_valid(winid) then
     pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
     return
   end
 
-  vim.wo[winid].winfixheight = true
+  if cfg.position == "bottom" then
+    vim.wo[winid].winfixheight = true
+  elseif cfg.position == "left" or cfg.position == "right" then
+    vim.wo[winid].winfixwidth = true
+  end
   vim.wo[winid].cursorline = true
   vim.wo[winid].number = false
   vim.wo[winid].relativenumber = false
@@ -667,6 +782,17 @@ local function open_window()
   panel_winid = winid
   panel_bufnr = bufnr
   setup_panel_keymaps(bufnr)
+  -- Float only: `q` closes the panel like a toggle (the session lives;
+  -- reopen with :ManiculeToggle). <Esc> keeps its view-back meaning in
+  -- every position, so the comments-view drill-down works unchanged.
+  if cfg.position == "float" then
+    vim.keymap.set("n", "q", hide, {
+      buffer = bufnr,
+      nowait = true,
+      silent = true,
+      desc = "Manicule review: close the floating panel",
+    })
+  end
   render()
 
   augroup = vim.api.nvim_create_augroup("ManiculeReviewPanel", { clear = true })
@@ -729,6 +855,13 @@ function M.sync_index(pair_index)
   apply_current_marks()
   local max_row = math.max(1, #line_data)
   pcall(vim.api.nvim_win_set_cursor, panel_winid, { math.min(pair_index, max_row), 0 })
+end
+
+---Re-render the current view in place, preserving the panel cursor.
+---For review-state changes that bypass the store-event path (viewed
+---toggles). No-op while the panel is hidden.
+function M.refresh()
+  refresh()
 end
 
 ---Open the panel (files view) for the active session. Re-renders in

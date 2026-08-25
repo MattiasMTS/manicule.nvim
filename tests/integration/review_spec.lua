@@ -1004,9 +1004,10 @@ describe("manicule review session", function()
     -- Focus must stay in the diff window, not the panel.
     assert.are_not.equal(pwin, vim.api.nvim_get_current_win())
 
+    -- prev() skips pair 1 (auto-marked viewed by next) and wraps to 3.
     R.prev()
-    assert.are.equal(1, panel_current_row())
-    assert.are.equal(1, vim.api.nvim_win_get_cursor(pwin)[1])
+    assert.are.equal(3, panel_current_row())
+    assert.are.equal(3, vim.api.nvim_win_get_cursor(pwin)[1])
   end)
 
   it("comment-add refresh keeps the panel index on the open pair", function()
@@ -1181,5 +1182,247 @@ describe("manicule review session", function()
     -- Panel should be closed, with its augroup gone
     assert.is_false(vim.api.nvim_win_is_valid(panel_winid))
     assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = "ManiculeReviewPanel" }))
+  end)
+end)
+
+describe("manicule review viewed tracking", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  it("next() marks the pair it leaves as viewed and skips viewed pairs", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(3), label = "viewed-skip" }))
+    R.set_viewed(2, true)
+
+    R.next()
+
+    local state = R.state()
+    assert.is_true(state.viewed[1], "leaving pair 1 did not mark it viewed")
+    assert.are.equal(3, state.index, "next() did not skip the viewed pair")
+  end)
+
+  it("prev() auto-marks and skips viewed pairs, wrapping", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(3), label = "viewed-prev" }))
+    R.set_viewed(3, true)
+
+    R.prev() -- from 1: marks 1 viewed, wraps past viewed 3 to 2
+
+    local state = R.state()
+    assert.is_true(state.viewed[1])
+    assert.are.equal(2, state.index)
+  end)
+
+  it("falls back to plain cycling when every pair is viewed", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "viewed-all" }))
+    R.set_viewed(1, true)
+    R.set_viewed(2, true)
+
+    R.next()
+    assert.are.equal(2, R.state().index)
+    R.next() -- wraps, no infinite loop
+    assert.are.equal(1, R.state().index)
+    R.prev() -- wraps back
+    assert.are.equal(2, R.state().index)
+  end)
+
+  it("set_viewed(index, false) un-marks so navigation stops skipping", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(3), label = "viewed-unmark" }))
+    R.set_viewed(2, true)
+    R.set_viewed(2, false)
+
+    R.next()
+    assert.are.equal(2, R.state().index)
+    assert.is_nil(R.state().viewed[2])
+  end)
+
+  it("set_viewed ignores out-of-range indexes and missing sessions", function()
+    local R = require("manicule.review")
+    R.set_viewed(1, true) -- no session: no error
+    assert.is_true(R.start({ files = make_pairs(1), label = "viewed-range" }))
+    R.set_viewed(99, true)
+    assert.is_nil(R.state().viewed[99])
+  end)
+
+  it("viewed state is cleared per session", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "viewed-fresh" }))
+    R.set_viewed(1, true)
+    R.stop()
+
+    assert.is_true(R.start({ files = make_pairs(2), label = "viewed-fresh-2" }))
+    assert.are.same({}, R.state().viewed)
+  end)
+end)
+
+describe("manicule review winbar breadcrumb", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  ---File windows of the current tab keyed by side: `left` matches
+  ---"/left/", `right` is the other non-panel window.
+  local function file_wins()
+    local wins = {}
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].filetype ~= "manicule-panel" then
+        local name = vim.api.nvim_buf_get_name(bufnr)
+        if name:find("/left/", 1, true) then
+          wins.left = winid
+        else
+          wins.right = winid
+        end
+      end
+    end
+    return wins
+  end
+
+  it("split mode: breadcrumb on the right window, baseline tag on the left", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "winbar-split" }))
+
+    local wins = file_wins()
+    assert.are.equal("f1.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[wins.right].winbar)
+    assert.are.equal("f1.lua \u{00B7} baseline", vim.wo[wins.left].winbar)
+
+    -- Pair switch re-labels the new pair's windows.
+    R.next()
+    wins = file_wins()
+    assert.are.equal("f2.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[wins.right].winbar)
+    assert.are.equal("f2.lua \u{00B7} baseline", vim.wo[wins.left].winbar)
+  end)
+
+  it("unified mode: breadcrumb on the single window", function()
+    require("manicule.config").get().review.mode = "unified"
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "winbar-unified" }))
+    assert.are.equal("f1.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[vim.api.nvim_get_current_win()].winbar)
+  end)
+
+  it("omits zero diffstat components and handles D pairs", function()
+    local R = require("manicule.review")
+    local left = ctx.artifact_root .. "/left/gone.lua"
+    vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+    vim.fn.writefile({ "one", "two" }, left)
+    local files = { { left = left, right = ctx.root .. "/gone.lua", status = "D", path = "gone.lua" } }
+    assert.is_true(R.start({ files = files, label = "winbar-d" }))
+    -- D pair: one window (the baseline), removed count only.
+    assert.are.equal("gone.lua \u{00B7} D \u{00B7} \u{2212}2", vim.wo[vim.api.nvim_get_current_win()].winbar)
+  end)
+
+  it("escapes % in the path for the statusline engine", function()
+    local R = require("manicule.review")
+    local left = ctx.artifact_root .. "/left/we%rd.lua"
+    local right = ctx.root .. "/we%rd.lua"
+    vim.fn.mkdir(vim.fn.fnamemodify(left, ":h"), "p")
+    vim.fn.writefile({ "return 1 -- old" }, left)
+    vim.fn.writefile({ "return 1 -- new" }, right)
+    local files = { { left = left, right = right, status = "M", path = "we%rd.lua" } }
+    assert.is_true(R.start({ files = files, label = "winbar-escape" }))
+
+    local wins = file_wins()
+    assert.are.equal("we%%rd.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[wins.right].winbar)
+    assert.are.equal("we%%rd.lua \u{00B7} baseline", vim.wo[wins.left].winbar)
+  end)
+
+  it("stop() clears the winbar from surviving windows", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "winbar-clear" }))
+    -- Reduce to the single-tab, worktree-window-only shape: stop()'s
+    -- single-tab branch reuses this window instead of closing it.
+    vim.cmd("tabonly")
+    local right = file_wins().right
+    vim.api.nvim_set_current_win(right)
+    vim.cmd("only")
+    assert.are_not.equal("", vim.wo[right].winbar)
+
+    R.stop()
+
+    assert.is_true(vim.api.nvim_win_is_valid(right), "single-tab stop() should reuse the window")
+    assert.are.equal("", vim.wo[right].winbar, "winbar survived stop()")
+  end)
+end)
+
+describe("manicule review right panel + comments rail", function()
+  before_each(function()
+    ctx = H.setup({ review = { panel = { position = "right" } }, ui = { expand = "rail" } })
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.ui.rail").close()
+    end)
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  it("coexist: the rail opens beside a right-positioned panel", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    assert.is_true(R.start({ files = files, label = "rail-coexist" }))
+    local panel_winid = require("manicule.review.panel").winid()
+    assert.is_truthy(panel_winid, "panel window not open")
+
+    -- Comment on the worktree line, then move the cursor onto it: the
+    -- eol expansion renders into the rail (ui.expand = "rail").
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("rail me")
+    end
+    -- Focus the worktree window (review.open leaves it current, but the
+    -- panel may have been rendered since; be explicit).
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local bufnr = vim.api.nvim_win_get_buf(winid)
+      if vim.bo[bufnr].modifiable and vim.bo[bufnr].filetype ~= "manicule-panel" then
+        vim.api.nvim_set_current_win(winid)
+        break
+      end
+    end
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    require("manicule").add()
+    ui.prompt = original_prompt
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = bufnr })
+
+    local rail_winid
+    vim.wait(1000, function()
+      for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if vim.bo[vim.api.nvim_win_get_buf(winid)].filetype == "manicule-rail" then
+          rail_winid = winid
+          return true
+        end
+      end
+      return false
+    end, 10)
+
+    assert.is_truthy(rail_winid, "rail did not open next to the right panel")
+    assert.is_true(vim.api.nvim_win_is_valid(panel_winid), "rail displaced the right panel")
+    -- Both are full-height right-side columns; neither stomped the other.
+    assert.are_not.equal(rail_winid, panel_winid)
+    local panel_col = vim.api.nvim_win_get_position(panel_winid)[2]
+    local rail_col = vim.api.nvim_win_get_position(rail_winid)[2]
+    assert.are_not.equal(panel_col, rail_col)
   end)
 end)
