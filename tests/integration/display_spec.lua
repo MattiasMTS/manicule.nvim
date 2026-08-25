@@ -105,6 +105,21 @@ local function inline_virt_lines(bufnr, row)
   return out
 end
 
+---Raw `[text, hl]` chunk arrays of the virt_lines block(s) below `row`
+---(0-indexed) in the manicule namespace: one entry per virtual line.
+local function inline_virt_chunks(bufnr, row)
+  local ns = require("manicule.anchor").ns
+  local marks = vim.api.nvim_buf_get_extmarks(bufnr, ns, { row, 0 }, { row, -1 }, { details = true })
+  local out = {}
+  for _, mark in ipairs(marks) do
+    local details = mark[4] or {}
+    for _, vline in ipairs(details.virt_lines or {}) do
+      table.insert(out, vline)
+    end
+  end
+  return out
+end
+
 ---Number of extmarks on `row` that carry a virt_lines block.
 local function inline_block_count(bufnr, row)
   local ns = require("manicule.anchor").ns
@@ -472,17 +487,32 @@ describe("manicule inline display mode", function()
     local short = tostring(records[1].id):sub(1, 6)
 
     local lines = inline_virt_lines(bufnr, 0)
-    -- Top border (title), two body lines, footer, bottom border.
-    assert.are.equal(5, #lines)
+    -- Card order: top border (title), quoted anchor excerpt, author +
+    -- relative time, blank separator, two body lines, hint, bottom
+    -- border.
+    assert.are.equal(8, #lines)
     assert.is_truthy(lines[1]:find("┌", 1, true))
     assert.is_truthy(lines[1]:find("c" .. short .. " 1/1", 1, true))
-    assert.is_truthy(lines[2]:find("boxed body first", 1, true))
-    assert.is_truthy(lines[3]:find("boxed body second", 1, true))
-    assert.is_truthy(lines[4]:find("edit gca | delete gcd", 1, true))
+    assert.is_truthy(lines[2]:find('▍ "local value = 1"', 1, true))
+    assert.is_truthy(lines[3]:find("· just now", 1, true))
+    -- The separator row is border + padding only.
+    assert.is_truthy((lines[4]:gsub("│", "")):match("^%s*$"))
+    assert.is_truthy(lines[5]:find("boxed body first", 1, true))
+    assert.is_truthy(lines[6]:find("boxed body second", 1, true))
+    assert.is_truthy(lines[7]:find("edit gca | delete gcd", 1, true))
     assert.is_truthy(lines[#lines]:find("└", 1, true))
     for _, line in ipairs(lines) do
       assert.is_truthy(line:find("│", 1, true) or line:find("─", 1, true))
     end
+
+    -- Quote and author rows carry the card highlights; body rows keep
+    -- the box body group. Row chunks are indent, left border, text,
+    -- right border — the text chunk is [3].
+    local chunks = inline_virt_chunks(bufnr, 0)
+    assert.are.equal("ManiculeInlineQuote", chunks[2][3][2])
+    assert.are.equal("ManiculeInlineMeta", chunks[3][3][2])
+    assert.are.equal("ManiculeInlineBody", chunks[5][3][2])
+    assert.are.equal("ManiculeInlineMeta", chunks[7][3][2])
 
     -- The code lines themselves are untouched — the box is virtual only.
     assert.are.same(before, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))

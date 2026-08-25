@@ -929,6 +929,18 @@ local function finalize_add(body, bufnr, range)
     return
   end
 
+  -- Capture what the comment anchors to at creation time: the comment
+  -- card's quote line cites this excerpt even after the code changes,
+  -- and editing the comment keeps it (it quotes what was commented on).
+  -- Stored on `meta` — the extensible JSON blob persisted with the
+  -- record — so no store schema change is needed. Multi-line ranges
+  -- cite the first line with a `…` continuation marker.
+  local start_row = range and range.start and tonumber(range.start[1]) or 0
+  local end_row = range and range.end_ and tonumber(range.end_[1]) or start_row
+  local first_line = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
+  local meta = identity.ephemeral and { ephemeral = true } or {}
+  meta.excerpt = require("manicule.str").excerpt(first_line, end_row > start_row)
+
   local now = os.time()
   local record = {
     id = id_mod.new(),
@@ -941,7 +953,7 @@ local function finalize_add(body, bufnr, range)
     created_at = now,
     updated_at = now,
     resolved = false,
-    meta = identity.ephemeral and { ephemeral = true } or {},
+    meta = meta,
   }
   -- Invariant canary: re-run `identify` and refuse to persist if it
   -- doesn't reproduce the identity we built the record around. Guards

@@ -568,12 +568,15 @@ describe("manicule float placement", function()
     assert.are.equal(1, tonumber(second_cfg.col))
 
     -- Still vertically stacked below the anchor: the stack head sits one
-    -- row below the line, the next member a full popup (body + borders)
-    -- further down. Stack order is created_at/id, so assert set-wise.
+    -- row below the line, the next member a full popup (card + borders)
+    -- further down. The card is 5 content rows here — 2 quote lines (the
+    -- long anchored line wraps to the two-line cap), author, blank
+    -- separator, 1 body row — so the next member starts at 1 + 5 + 2.
+    -- Stack order is created_at/id, so assert set-wise.
     local rows = { tonumber(first_cfg.row), tonumber(second_cfg.row) }
     table.sort(rows)
     assert.are.equal(1, rows[1])
-    assert.are.equal(4, rows[2])
+    assert.are.equal(8, rows[2])
   end)
 
   it("places the popup above the anchor on the last visible line", function()
@@ -595,9 +598,11 @@ describe("manicule float placement", function()
     assert.is_true(wait_for_popup_count("bottom note", 1))
     local cfg = vim.api.nvim_win_get_config(floating_windows_containing("bottom note")[1])
     -- Above the anchor: the popup's bottom border rests on the row just
-    -- above the anchor line (1 body row + 2 border rows = offset -3).
+    -- above the anchor line (5 card rows — 2 quote lines for the long
+    -- anchored line, author, blank, 1 body row — + 2 border rows =
+    -- offset -7).
     assert.are.equal(win_height - 1, cfg.bufpos[1])
-    assert.are.equal(-3, tonumber(cfg.row))
+    assert.are.equal(-7, tonumber(cfg.row))
     assert.are.equal(1, tonumber(cfg.col))
   end)
 end)
@@ -710,5 +715,182 @@ describe("manicule sticky render", function()
       return false
     end, 10)
     assert.are.equal(0, #floating_windows_containing("sticky orphan note"))
+  end)
+end)
+
+-- Google-Docs-style comment cards: every annotation view (float popup,
+-- inline box, eol expansion) renders a quoted anchor excerpt, an
+-- author + relative-time line, a blank separator, then the body; the
+-- edit/delete hint stays at the bottom (the float keeps it in the
+-- border footer). The excerpt is captured at add time into
+-- `meta.excerpt` so the card quotes the ORIGINAL text even after the
+-- code changes; records that predate capture fall back to the current
+-- buffer line at the anchored range.
+describe("manicule comment card", function()
+  before_each(setup_env)
+  after_each(teardown_env)
+
+  local function popup_footer(winid)
+    local footer = vim.api.nvim_win_get_config(winid).footer
+    if type(footer) == "string" then
+      return footer
+    end
+    if type(footer) == "table" then
+      local parts = {}
+      for _, item in ipairs(footer) do
+        if type(item) == "string" then
+          table.insert(parts, item)
+        elseif type(item) == "table" and type(item[1]) == "string" then
+          table.insert(parts, item[1])
+        end
+      end
+      return table.concat(parts, "")
+    end
+    return ""
+  end
+
+  local function popup_lines(text)
+    local winid = floating_windows_containing(text)[1]
+    assert.is_truthy(winid)
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(winid), 0, -1, false), winid
+  end
+
+  it("formats relative time against a fixed clock", function()
+    local rt = require("manicule.ui.render").relative_time
+    local now = os.time({ year = 2026, month = 8, day = 25, hour = 12, min = 0, sec = 0 })
+    assert.are.equal("just now", rt(now, now))
+    assert.are.equal("just now", rt(now - 59, now))
+    assert.are.equal("1m ago", rt(now - 60, now))
+    assert.are.equal("59m ago", rt(now - 3599, now))
+    assert.are.equal("1h ago", rt(now - 90 * 60, now))
+    assert.are.equal("23h ago", rt(now - 86400 + 1, now))
+    assert.are.equal("1d ago", rt(now - 86400, now))
+    assert.are.equal("3d ago", rt(now - 3 * 86400, now))
+    assert.are.equal("30d ago", rt(now - 30 * 86400, now))
+    -- Past 30 days the label falls back to the old footer's absolute date.
+    local old = now - 31 * 86400
+    assert.are.equal(os.date("%b %d %H:%M", old), rt(old, now))
+    -- A future timestamp (clock skew) clamps to "just now".
+    assert.are.equal("just now", rt(now + 120, now))
+  end)
+
+  it("renders quote, author/time, blank, body — hint stays in the footer", function()
+    require("manicule").add({
+      body = "card body",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("card body", 1))
+
+    local lines, winid = popup_lines("card body")
+    assert.are.equal(4, #lines)
+    assert.are.equal('▍ "local value = 1"', lines[1])
+    assert.is_truthy(lines[2]:match("^%S.* · just now$"))
+    assert.is_nil(lines[2]:find("▍", 1, true))
+    assert.are.equal("", lines[3])
+    assert.are.equal("card body", lines[4])
+    -- The stack position stays visible in the box title; the hint keeps
+    -- the border footer to itself (no date prefix anymore).
+    assert.is_truthy(popup_title(winid):find("1/1", 1, true))
+    assert.are.equal("edit gca | delete gcd", popup_footer(winid))
+    -- The window is exactly as tall as the card content.
+    assert.are.equal(4, tonumber(vim.api.nvim_win_get_config(winid).height))
+  end)
+
+  it("captures the excerpt at add time and quotes it after the line changes", function()
+    local manicule = require("manicule")
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    manicule.add({
+      body = "excerpt note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    local records = manicule.list({ _quiet = true })
+    assert.are.equal("local value = 1", records[1].meta.excerpt)
+
+    -- The anchored line changes: the card keeps quoting the ORIGINAL
+    -- text (the excerpt cites what was commented on).
+    vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "local value = 999" })
+    render.update_viewport_popups(bufnr, records, records)
+    assert.is_true(wait_for_popup_count("excerpt note", 1))
+    local lines = popup_lines("excerpt note")
+    assert.are.equal('▍ "local value = 1"', lines[1])
+  end)
+
+  it("marks a multi-line range excerpt with a continuation ellipsis", function()
+    require("manicule").add({
+      body = "span note",
+      range = { start = { 0, 0 }, end_ = { 1, 0 } },
+    })
+    local records = require("manicule").list({ _quiet = true })
+    assert.are.equal("local value = 1…", records[1].meta.excerpt)
+  end)
+
+  it("quotes the live buffer line for records without a stored excerpt", function()
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    local record = {
+      id = "pre-excerpt-1",
+      uri = require("manicule.uri").for_bufnr(bufnr),
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+      body = "legacy note",
+      author = "octocat",
+      created_at = os.time(),
+      updated_at = os.time(),
+      resolved = false,
+      meta = {},
+    }
+    render.reconcile(bufnr, { record }, { record })
+    render.update_viewport_popups(bufnr, { record }, { record })
+    assert.is_true(wait_for_popup_count("legacy note", 1))
+
+    local lines = popup_lines("legacy note")
+    assert.are.equal('▍ "value = value + 1"', lines[1])
+    assert.is_truthy(lines[2]:find("octocat · just now", 1, true))
+  end)
+
+  it("skips the quote when neither excerpt nor buffer text is available", function()
+    H.edit_project_file(ctx, "src/blank.lua", { "", "return true" })
+    local render = require("manicule.ui.render")
+    local bufnr = vim.api.nvim_get_current_buf()
+    local record = {
+      id = "no-quote-1",
+      uri = require("manicule.uri").for_bufnr(bufnr),
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+      body = "quoteless note",
+      author = "octocat",
+      created_at = os.time(),
+      updated_at = os.time(),
+      resolved = false,
+      meta = {},
+    }
+    render.reconcile(bufnr, { record }, { record })
+    render.update_viewport_popups(bufnr, { record }, { record })
+    assert.is_true(wait_for_popup_count("quoteless note", 1))
+
+    local lines = popup_lines("quoteless note")
+    assert.are.equal(3, #lines)
+    assert.is_truthy(lines[1]:find("octocat · just now", 1, true))
+    assert.are.equal("", lines[2])
+    assert.are.equal("quoteless note", lines[3])
+    assert.is_nil(table.concat(lines, "\n"):find("▍", 1, true))
+  end)
+
+  it("caps the quote at two display lines with a trailing ellipsis", function()
+    local long_line = ("local phrase = phrase .. ' word' "):rep(12):gsub("%s+$", "")
+    H.edit_project_file(ctx, "src/longline.lua", { long_line, "return phrase" })
+    require("manicule").add({
+      body = "cap note",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    assert.is_true(wait_for_popup_count("cap note", 1))
+
+    local lines = popup_lines("cap note")
+    -- Two quote lines, then author, blank, body.
+    assert.are.equal(5, #lines)
+    assert.is_truthy(lines[1]:find("▍ ", 1, true) == 1)
+    assert.is_truthy(lines[2]:find("▍ ", 1, true) == 1)
+    assert.are.equal('…"', lines[2]:sub(-#'…"'))
+    assert.is_nil(lines[3]:find("▍", 1, true))
   end)
 end)

@@ -52,9 +52,10 @@
 --                 for every record regardless (extmarks are cheap).
 --   * "inline" -> each record renders as a bordered `virt_lines` box
 --                 below its anchor line — code is pushed down, never
---                 covered. The box reuses the float popup's content
---                 (title with short-id + n/m counter, body, date/actions
---                 footer) via the shared `build_popup_content`, with
+--                 covered. The box reuses the float popup's card content
+--                 (title with short-id + n/m counter, quoted anchor
+--                 excerpt, author + relative time, body, edit/delete
+--                 hint) via the shared `build_popup_content`, with
 --                 body lines word-wrapped to the box width instead of
 --                 ellipsis-truncated (there is no popup to reveal the
 --                 rest). Same-line stacks render sequentially inside ONE
@@ -95,6 +96,11 @@ local str = require("manicule.str")
 --- handles[bufnr][comment_id] = Handle
 ---@type table<integer, table<string, manicule.ui.render.Handle>>
 local handles = {}
+
+-- Namespace for the card line highlights inside popup scratch buffers
+-- (quote + author rows). Separate from `anchor.ns`, which lives in the
+-- annotated source buffers.
+local card_ns = vim.api.nvim_create_namespace("manicule.card")
 
 -- Transient visibility flag. When true, every render path is gated off
 -- (reconcile / viewport update no-op). In-memory only, not persisted —
@@ -176,13 +182,18 @@ local function setup_comment_highlights()
 
   local border_hl = { fg = border_fg }
   local meta_hl = { fg = meta_fg }
+  -- Card quote line ("▍ \"…\""): the meta foreground italicised, so the
+  -- cited code reads as a citation, not as part of the comment body.
+  local quote_hl = { fg = meta_fg, italic = true }
   if type(float_bg) == "number" then
     border_hl.bg = float_bg
     meta_hl.bg = float_bg
+    quote_hl.bg = float_bg
   end
 
   vim.api.nvim_set_hl(0, "ManiculeCommentBorder", border_hl)
   vim.api.nvim_set_hl(0, "ManiculeCommentMeta", meta_hl)
+  vim.api.nvim_set_hl(0, "ManiculeCommentQuote", quote_hl)
   vim.api.nvim_set_hl(0, "ManiculeLineNr", { link = "DiagnosticSignInfo", default = true })
   -- "eol" display-mode marker: accent bullet, dim id/counter, dim body.
   -- `default` links so user overrides win.
@@ -194,6 +205,7 @@ local function setup_comment_highlights()
   -- float's NormalFloat. `default` links so user overrides win.
   vim.api.nvim_set_hl(0, "ManiculeInlineBorder", { link = "ManiculeCommentBorder", default = true })
   vim.api.nvim_set_hl(0, "ManiculeInlineMeta", { link = "ManiculeCommentMeta", default = true })
+  vim.api.nvim_set_hl(0, "ManiculeInlineQuote", { link = "ManiculeCommentQuote", default = true })
   vim.api.nvim_set_hl(0, "ManiculeInlineBody", { link = "NormalFloat", default = true })
 end
 
@@ -327,35 +339,35 @@ local function short_id(record_id)
   return s:sub(1, 6)
 end
 
----Edit/delete hint shown in the popup footer. Matches the default
----`gca` / `gcd` bindings shipped in `plugin/manicule.lua`; there is no
----user-facing keymap-hint config.
+---Edit/delete hint shown at the bottom of the comment card. Matches the
+---default `gca` / `gcd` bindings shipped in `plugin/manicule.lua`; there
+---is no user-facing keymap-hint config.
 local COMMENT_HINT = "edit gca | delete gcd"
 
----Footer strings memoized by their timestamp: `os.date` for the same
----epoch second is deterministic, and one render pass formats the same
----record's footer several times (width measurement + content build),
----across passes on every cursor move. Keyed by the raw number so there
----is no staleness to invalidate; growth is bounded by the number of
----distinct record timestamps seen this session.
----@type table<number, string>
-local footer_by_ts = {}
-
----Compose the popup footer: "<Mon DD HH:MM> · <hint>", or just the hint
----when the record carries no timestamp.
----@param record table
+--- Relative-time label for the card's author line. Pure — `now` is
+--- injectable so tests can run against a fixed clock. Boundaries: under
+--- a minute (including future timestamps from clock skew) → "just now";
+--- under an hour → "Nm ago"; under a day → "Nh ago"; up to 30 days →
+--- "Nd ago"; older → the absolute "%b %d %H:%M" date the old footer
+--- used.
+---@param ts number Epoch seconds of the record's timestamp
+---@param now? number Epoch seconds to measure from (default `os.time()`)
 ---@return string
-local function comment_footer_text(record)
-  local ts = record and (record.updated_at or record.created_at)
-  if type(ts) ~= "number" then
-    return COMMENT_HINT
+function M.relative_time(ts, now)
+  local diff = (now or os.time()) - ts
+  if diff < 60 then
+    return "just now"
   end
-  local footer = footer_by_ts[ts]
-  if not footer then
-    footer = os.date("%b %d %H:%M", ts) .. " · " .. COMMENT_HINT
-    footer_by_ts[ts] = footer
+  if diff < 3600 then
+    return ("%dm ago"):format(math.floor(diff / 60))
   end
-  return footer
+  if diff < 86400 then
+    return ("%dh ago"):format(math.floor(diff / 3600))
+  end
+  if diff <= 30 * 86400 then
+    return ("%dd ago"):format(math.floor(diff / 86400))
+  end
+  return os.date("%b %d %H:%M", ts) --[[@as string]]
 end
 
 ---Find any window (in any tab) currently showing `bufnr`.
@@ -402,6 +414,98 @@ local function record_end_line(record)
     return end_[1] + 1
   end
   return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Comment card: quoted anchor excerpt + author/relative-time line
+-- ---------------------------------------------------------------------------
+
+-- Prefix of every rendered quote line ("▍ " — accent bar + gap).
+local QUOTE_PREFIX = "▍ "
+
+-- Display lines the quoted excerpt may take in a card at most; longer
+-- excerpts are ellipsis-truncated on the last kept line.
+local QUOTE_MAX_LINES = 2
+
+---Raw text the card's quote line cites: the excerpt stored on the
+---record at creation (`meta.excerpt` — quotes what was commented on,
+---even after the code changed), else the CURRENT buffer line(s) at the
+---anchored range for records that predate excerpt capture (including
+---GitHub imports, whose meta carries no diff text; in a codediff view
+---`bufnr` is the staged side itself, so left-side records cite the
+---staged text), else nil — no quote line at all.
+---@param record table
+---@param bufnr integer?
+---@return string?
+local function resolve_quote_text(record, bufnr)
+  local meta = record and record.meta
+  local stored = type(meta) == "table" and meta.excerpt or nil
+  if type(stored) == "string" and stored ~= "" then
+    return stored
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  local start_line = record_start_line(record)
+  local line = vim.api.nvim_buf_get_lines(bufnr, start_line - 1, start_line, false)[1]
+  if not line then
+    return nil
+  end
+  local end_line = record_end_line(record)
+  return str.excerpt(line, end_line ~= nil and end_line > start_line)
+end
+
+---Fit the quoted excerpt into at most `QUOTE_MAX_LINES` display lines
+---of `width` cells: `▍ "<text>"`, word-wrapped past the prefix, the
+---last kept line ellipsis-truncated to `…"` when the text overflows.
+---Empty when there is nothing to quote or the width leaves no room.
+---@param quote string?
+---@param width integer Content width in display cells
+---@return string[]
+local function quote_display_lines(quote, width)
+  if not quote or quote == "" then
+    return {}
+  end
+  local budget = width - vim.fn.strdisplaywidth(QUOTE_PREFIX)
+  if budget < 4 then
+    return {}
+  end
+  local wrapped = wrap_display('"' .. quote .. '"', budget)
+  if #wrapped > QUOTE_MAX_LINES then
+    local kept = {}
+    for index = 1, QUOTE_MAX_LINES do
+      kept[index] = wrapped[index]
+    end
+    -- Reserve the ellipsis + closing-quote cells on the last kept line.
+    kept[QUOTE_MAX_LINES] = fit_chars(kept[QUOTE_MAX_LINES], budget - 2) .. '…"'
+    wrapped = kept
+  end
+  local out = {}
+  for _, line in ipairs(wrapped) do
+    table.insert(out, QUOTE_PREFIX .. line)
+  end
+  return out
+end
+
+---The card's author line: "<author> · <relative time>". The author is
+---the record's stored value (what `M.add` persisted — an email keeps
+---only its local part for display), falling back to $USER, then "you";
+---the time is `M.relative_time` of the record's timestamp (updated_at
+---preferred, matching the old footer). Just the author when the record
+---carries no timestamp.
+---@param record table
+---@return string
+local function author_line_text(record)
+  local author = record and record.author
+  if type(author) ~= "string" or author == "" then
+    author = vim.env.USER or "you"
+  end
+  author = author:match("^([^@]+)@") or author
+  local ts = record and (record.updated_at or record.created_at)
+  if type(ts) ~= "number" then
+    return author
+  end
+  return author .. " · " .. M.relative_time(ts)
 end
 
 ---@param a table
@@ -794,13 +898,19 @@ end
 -- anchor line's column 0, mirroring the inline box's one-cell gutter.
 local FLOAT_FALLBACK_COL = 1
 
----Popup body height in content rows (borders add 2). Shared by the
----stack layout, the viewport cascade, and the occlusion measurement so
----they all agree on how tall a record's popup is.
+---Popup card height in content rows (borders add 2): quote lines +
+---author line + blank separator + one row per body line — exactly what
+---`build_popup_content` renders for a float popup (`wrap = false` keeps
+---one row per body line; the inline box wraps and never reads this).
+---Shared by the stack layout, the viewport cascade, and the occlusion
+---measurement so they all agree on how tall a record's popup is.
 ---@param record table
+---@param bufnr integer? Buffer the record renders in (quote fallback)
+---@param content_width integer The card's content width in display cells
 ---@return integer
-local function popup_body_height(record)
-  return math.max(1, #split_lines(record.body))
+local function popup_card_height(record, bufnr, content_width)
+  local quote_rows = #quote_display_lines(resolve_quote_text(record, bufnr), content_width)
+  return quote_rows + 2 + math.max(1, #split_lines(record.body))
 end
 
 ---Widest content a float popup may take in a `win_width`-cell window.
@@ -812,25 +922,28 @@ local function popup_width_cap(win_width)
   return math.max(24, math.floor(win_width * 0.52))
 end
 
----Content display width of `record`'s popup: the widest body/footer
----line clamped to `max_width` — a short comment stays narrow. Shared by
+---Content display width of `record`'s card: the widest of the quote
+---line, the author line, the body lines, and the hint footer, clamped
+---to `max_width` — a short comment stays narrow. Shared by
 ---`build_popup_content` and the float placement measurement (which
 ---needs widths for a whole stack without building every popup's
----content).
+---content), so the measured spot is the placed spot. `bufnr` feeds the
+---quote's live-line fallback.
 ---@param record table
 ---@param max_width integer Content-width cap in display cells
+---@param bufnr integer? Buffer the record renders in (quote fallback)
 ---@return integer
-local function popup_content_width(record, max_width)
-  local max_line_width = 0
+local function popup_content_width(record, max_width, bufnr)
+  local max_line_width = vim.fn.strdisplaywidth(COMMENT_HINT)
   for _, line in ipairs(split_lines(record.body)) do
     max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(line))
   end
-  if max_line_width == 0 then
-    max_line_width = 1
+  local quote = resolve_quote_text(record, bufnr)
+  if quote then
+    max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(QUOTE_PREFIX .. '"' .. quote .. '"'))
   end
-  local footer = comment_footer_text(record)
-  local footer_width = footer and vim.fn.strdisplaywidth(footer) or 0
-  return math.min(math.max(max_line_width, footer_width), math.max(1, max_width))
+  max_line_width = math.max(max_line_width, vim.fn.strdisplaywidth(author_line_text(record)))
+  return math.min(max_line_width, math.max(1, max_width))
 end
 
 ---Left column of a margin-placed popup (cells right of the anchor
@@ -924,15 +1037,19 @@ end
 
 ---@class manicule.ui.render.PopupContent
 ---@field title string Title: " c<short-id> <n>/<m> "
----@field footer string? Timestamp + edit/delete hint (nil when both absent)
----@field lines string[] Body lines fitted to `width` display cells
+---@field footer string Edit/delete hint (bottom of the card)
+---@field lines string[] Card lines fitted to `width` cells: quote → author → blank → body
+---@field kinds ("quote"|"meta"|"body")[] Per-line highlight kind, parallel to `lines`
 ---@field width integer Content width in display cells
 
----Build the formatted comment content shared by the float popup and the
----inline virt_lines box: the title (short id + display counter), body
----lines fitted to a width cap, and the date/actions footer. The content
----width is the widest body/footer line clamped to `max_width` — so a
----short comment stays narrow. `wrap = false` ellipsis-truncates each
+---Build the formatted comment card shared by the float popup, the
+---inline virt_lines box, and the eol cursor-expansion: the title (short
+---id + display counter), then — in card order — the quoted anchor
+---excerpt (`▍ "…"`, at most `QUOTE_MAX_LINES` rows, skipped when
+---nothing is quotable), the author + relative-time line, a blank
+---separator, the body lines, with the edit/delete hint as the footer.
+---The content width is the widest card line clamped to `max_width` — so
+---a short comment stays narrow. `wrap = false` ellipsis-truncates each
 ---body line (float popups keep one row per body line); `wrap = true`
 ---word-wraps long lines across rows instead (the inline box has no
 ---expanded popup to reveal the rest, so it must show the whole body).
@@ -941,25 +1058,38 @@ end
 ---@param display_index integer
 ---@param display_total integer
 ---@param wrap boolean
+---@param bufnr integer? Buffer the record renders in (quote fallback)
 ---@return manicule.ui.render.PopupContent
-local function build_popup_content(record, max_width, display_index, display_total, wrap)
-  local footer = comment_footer_text(record)
-  local body_lines = split_lines(record.body)
-  local content_width = popup_content_width(record, max_width)
+local function build_popup_content(record, max_width, display_index, display_total, wrap, bufnr)
+  local content_width = popup_content_width(record, max_width, bufnr)
 
-  local fitted = {}
-  for _, line in ipairs(body_lines) do
+  local lines = {}
+  local kinds = {}
+  local function push(line, kind)
+    table.insert(lines, line)
+    table.insert(kinds, kind)
+  end
+
+  for _, quote_line in ipairs(quote_display_lines(resolve_quote_text(record, bufnr), content_width)) do
+    push(quote_line, "quote")
+  end
+  push(truncate_display(author_line_text(record), content_width), "meta")
+  push("", "body")
+  for _, line in ipairs(split_lines(record.body)) do
     if wrap then
-      vim.list_extend(fitted, wrap_display(line, content_width))
+      for _, wrapped in ipairs(wrap_display(line, content_width)) do
+        push(wrapped, "body")
+      end
     else
-      table.insert(fitted, truncate_text(line, content_width))
+      push(truncate_text(line, content_width), "body")
     end
   end
 
   return {
     title = string.format(" c%s %d/%d ", short_id(record.id), display_index, display_total),
-    footer = footer,
-    lines = fitted,
+    footer = COMMENT_HINT,
+    lines = lines,
+    kinds = kinds,
     width = content_width,
   }
 end
@@ -1006,7 +1136,7 @@ local function render_comment_popup(record, handle, layout)
 
   local win_width = vim.api.nvim_win_get_width(anchor_win)
   local width_cap = popup_width_cap(win_width)
-  local content = build_popup_content(record, width_cap, display_index, display_total, false)
+  local content = build_popup_content(record, width_cap, display_index, display_total, false, handle.bufnr)
 
   local my_line = record_start_line(record)
   local my_id = tostring(record.id or "")
@@ -1033,7 +1163,8 @@ local function render_comment_popup(record, handle, layout)
     local entries = {}
     local total = 0
     for index, other in ipairs(stack) do
-      local height = popup_body_height(other)
+      local other_width = popup_content_width(other, width_cap, handle.bufnr)
+      local height = popup_card_height(other, handle.bufnr, other_width)
       if tostring(other.id or "") == my_id then
         stack_index = index
         stack_offset = total
@@ -1041,7 +1172,7 @@ local function render_comment_popup(record, handle, layout)
       table.insert(entries, {
         row = total,
         height = height,
-        col = margin_col(win_width, popup_content_width(other, width_cap), math.min((index - 1) * 2, 12)),
+        col = margin_col(win_width, other_width, math.min((index - 1) * 2, 12)),
       })
       total = total + height + 2
     end
@@ -1117,6 +1248,17 @@ local function render_comment_popup(record, handle, layout)
   vim.bo[popup_bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(popup_bufnr, 0, -1, false, content.lines)
   vim.bo[popup_bufnr].modifiable = false
+
+  -- Card line highlights: quote and author/meta rows; body rows keep
+  -- the float's NormalFloat. Cleared first — the scratch buffer (and
+  -- its marks) is reused across renders.
+  vim.api.nvim_buf_clear_namespace(popup_bufnr, card_ns, 0, -1)
+  for row, kind in ipairs(content.kinds) do
+    local hl = kind == "quote" and "ManiculeCommentQuote" or kind == "meta" and "ManiculeCommentMeta" or nil
+    if hl then
+      pcall(vim.api.nvim_buf_set_extmark, popup_bufnr, card_ns, row - 1, 0, { line_hl_group = hl })
+    end
+  end
 
   -- Re-applied even on reuse (one cheap winblend write) so a live
   -- config change to ui.opacity keeps taking effect on the next render.
@@ -1384,8 +1526,11 @@ local INLINE_FRAME_CELLS = 5
 ---Append one record's bordered box to `out` (a virt_lines list — each
 ---entry is one virtual line as `[text, hl]` chunks):
 ---  ┌ c<short-id> <n>/<m> ─────────────┐
+---  │ ▍ "quoted anchor excerpt"        │
+---  │ author · relative time           │
+---  │                                  │
 ---  │ body line (wrapped to width)     │
----  │ <Mon DD HH:MM> · edit … | delete…│
+---  │ edit … | delete …                │
 ---  └──────────────────────────────────┘
 ---@param content manicule.ui.render.PopupContent
 ---@param out table[]
@@ -1408,8 +1553,15 @@ local function append_inline_box(content, out)
       { "│", "ManiculeInlineBorder" },
     })
   end
-  for _, line in ipairs(content.lines) do
-    body_row(line, "ManiculeInlineBody")
+  for index, line in ipairs(content.lines) do
+    local kind = content.kinds[index]
+    local hl = "ManiculeInlineBody"
+    if kind == "quote" then
+      hl = "ManiculeInlineQuote"
+    elseif kind == "meta" then
+      hl = "ManiculeInlineMeta"
+    end
+    body_row(line, hl)
   end
   if content.footer then
     body_row(truncate_display(content.footer, content.width), "ManiculeInlineMeta")
@@ -1476,7 +1628,10 @@ local function render_inline_virt_lines(record, handle, ctx)
   for _, member in ipairs(stack) do
     local pos = ctx.display[tostring(member.id or "")]
     local display_index, display_total = pos and pos.index or 1, pos and pos.total or 1
-    append_inline_box(build_popup_content(member, max_width, display_index, display_total, true), virt_lines)
+    append_inline_box(
+      build_popup_content(member, max_width, display_index, display_total, true, handle.bufnr),
+      virt_lines
+    )
   end
 
   local opts = {
@@ -1844,19 +1999,20 @@ function M.update_viewport_popups(bufnr, records, counter_records)
       local natural_top = group.line - active_range.top
       for _, record in ipairs(group.records) do
         group_stagger = group_stagger + 1
-        local body_height = popup_body_height(record)
+        local record_width = popup_content_width(record, width_cap, bufnr)
+        local card_height = popup_card_height(record, bufnr, record_width)
         local row = 0
         if group_next_top and natural_top < group_next_top then
           row = group_next_top - natural_top
         end
-        group_next_top = natural_top + row + body_height + 2
+        group_next_top = natural_top + row + card_height + 2
         local col_shift = math.min((group_stagger - 1) * 2, 12)
         table.insert(entries, {
           record = record,
           row = row,
-          height = body_height,
+          height = card_height,
           col_shift = col_shift,
-          col = margin_col(win_width, popup_content_width(record, width_cap), col_shift),
+          col = margin_col(win_width, record_width, col_shift),
         })
       end
 
