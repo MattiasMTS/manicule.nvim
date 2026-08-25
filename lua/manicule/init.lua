@@ -267,30 +267,30 @@ local function reconcile_records(bufnr, records, counter_records)
   end
 end
 
----Run reconcile for every buffer that already has an entry in `buffer_to_path`
----or is loaded and visible. Returns the records passed in.
+---True when `bufnr` is one of manicule's own UI surfaces — the review
+---panel (`manicule-panel`) or the comment rail (`manicule-rail`). These
+---scratch buffers can never hold records, so editor-wide sweeps (paint,
+---position sync, viewport refresh) skip them instead of paying an
+---identify + store read per pass on every mutation.
 ---@param bufnr integer
-local function reconcile_buffer(bufnr)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
-    return
-  end
-  -- Single-pass: one identify + one project/session read derives both
-  -- the per-buffer records and the counter set. `render_inputs` loads
-  -- the relevant stores internally (identity resolution routes staged
-  -- buffers to the real project cache, same as `project_root_for_bufnr`).
-  local records, counter_records = render_inputs(bufnr)
-  reconcile_records(bufnr, records, counter_records)
+---@return boolean
+local function is_own_surface(bufnr)
+  return vim.bo[bufnr].filetype:match("^manicule%-") ~= nil
 end
 
 ---Paint `bufnr` in a SINGLE pass: resolve `render_inputs` once, then feed
 ---the same records/counters into both reconcile (with orphan detection)
----and the (sticky-gated) viewport update. `attach_buffer` and
----`refresh_all_loaded` share this so an attach no longer runs two full
----identity+store passes (one in reconcile, one in the viewport refresh).
+---and the (sticky-gated) viewport update. Shared by `attach_buffer`,
+---`refresh_all_loaded`, and the mutation paths (add, rename) so none of
+---them runs two full identity+store passes (one in reconcile, one in
+---the viewport refresh).
 ---@param bufnr integer
 ---@param sticky boolean? whether sticky mode is on (pass the resolved flag to avoid re-reading config per buffer)
 local function paint_buffer(bufnr, sticky)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+  if is_own_surface(bufnr) then
     return
   end
   if sticky == nil then
@@ -447,6 +447,9 @@ end
 local function sync_positions_for_buffer(bufnr)
   local touched = { roots = {}, session = false, count = 0 }
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return touched
+  end
+  if is_own_surface(bufnr) then
     return touched
   end
 
@@ -642,12 +645,12 @@ local function on_bufname_changed(bufnr)
   if #ids == 0 then
     return
   end
-  -- Re-reconcile the buffer so the render layer (which keyed handles
-  -- off the old URI via reconcile_buffer) rebuilds against the new
-  -- URI. Without this, BufWinEnter's reconcile during the saveas
-  -- flow tore down every handle before we rewrote the records.
-  reconcile_buffer(bufnr)
-  refresh_viewport(bufnr)
+  -- Re-paint the buffer (single-pass reconcile + viewport) so the
+  -- render layer, which keyed handles off the old URI, rebuilds
+  -- against the new URI. Without this, BufWinEnter's reconcile during
+  -- the saveas flow tore down every handle before we rewrote the
+  -- records.
+  paint_buffer(bufnr)
   emit("ManiculeRenamed", {
     bufnr = bufnr,
     old_uri = old_uri,
@@ -696,6 +699,11 @@ function M.setup(opts)
     callback = function(ev)
       local bufnr = ev.buf
       if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      -- Manicule's own surfaces (panel, rail) never hold records —
+      -- don't even schedule a refresh for cursor motion inside them.
+      if is_own_surface(bufnr) then
         return
       end
       -- Coalesce the burst: a single user action fires several of these
@@ -999,10 +1007,10 @@ local function finalize_add(body, bufnr, range)
     notify_save_failed("new comment", err)
     return
   end
-  -- Reconcile rebuilds extmarks + popups idempotently; no need for a
-  -- per-mutation attach/detach API.
-  reconcile_buffer(bufnr)
-  refresh_viewport(bufnr)
+  -- Single-pass paint: reconcile (extmarks + popups, idempotent) and
+  -- the viewport update off ONE identity + store read — the same path
+  -- attach_buffer uses. No per-mutation attach/detach API needed.
+  paint_buffer(bufnr)
   emit("ManiculeAdded", record)
 end
 
@@ -1429,7 +1437,7 @@ end
 ---List comments, optionally filtered. Results are always sorted by
 ---`uri → start line → id` so the ordering seen in `:ManiculeList`,
 ---the picker, and the positional-number completer is identical.
----@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean, _root?: string}|nil
+---@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean, _root?: string, _no_sync?: boolean}|nil
 ---@return table[]
 function M.list(filter)
   filter = filter or {}
@@ -1438,7 +1446,15 @@ function M.list(filter)
   -- own comments are never echoed back; a plain :ManiculeSend still
   -- includes them (explicit user action).
   local is_import = filter.exclude_imported and require("manicule.review.import").is_import or nil
-  sync_all_loaded_positions()
+  -- `_no_sync` skips the editor-wide extmark → record position sync.
+  -- Read-only surfaces (the review panel) render right after mutations,
+  -- whose paths already carry current positions — re-walking every
+  -- loaded buffer (a store sync probe + root resolution per buffer) on
+  -- each render is pure overhead there. Writing paths (send, picker,
+  -- quickfix) keep the sync.
+  if not filter._no_sync then
+    sync_all_loaded_positions()
+  end
   local store = require("manicule.store")
   local anchor = require("manicule.anchor")
   local render = require("manicule.ui.render")

@@ -17,10 +17,12 @@
 --
 -- All rendering goes through one idempotent `render()` from
 -- review.state() + the store: buffer lines plus extmarks in the
--- panel's namespaces, rebuilt wholesale on every refresh. Per-row
--- locators live in a module-local `line_data` table (files view: the
--- pair index; comments view: record id + uri + line), which replaces
--- the quickfix `user_data` the previous implementation rode on.
+-- panel's namespaces, rebuilt wholesale on every refresh — except when
+-- the rebuilt rows come out identical, where the write is skipped.
+-- Per-row locators live in a module-local `line_data` table (files
+-- view: the pair index; comments view: record id + uri + line), which
+-- replaces the quickfix `user_data` the previous implementation rode
+-- on.
 
 local M = {}
 
@@ -58,6 +60,23 @@ local augroup = nil
 ---`line`).
 ---@type table[]
 local line_data = {}
+
+---Lines + view of the previous render. A refresh that rebuilds
+---identical rows (event bursts, mutations on files outside the view)
+---skips the buffer rewrite and extmark rebuild. Reset by `hide()` —
+---the buffer is recreated on reopen, so nothing rendered survives.
+---@type string[]|nil
+local last_lines = nil
+---@type "files"|"comments"|nil
+local last_view = nil
+
+---Coalesces `User Manicule*` bursts into ONE refresh: a consuming send
+---emits ManiculeDeleted PER RECORD, and refreshing inline would run a
+---full render per event. The first event of a synchronous burst
+---schedules the refresh (same event-loop tick — no timer delay, no
+---added latency); the rest find the flag set and no-op. Mirrors
+---init.lua's `qf_refresh_pending`.
+local refresh_pending = false
 
 -- The session's project root, URI array/set, and uri -> pair-index map
 -- all come pre-computed on review.state() (session cache built once in
@@ -121,7 +140,11 @@ local function build_file_rows()
   end
 
   local counts = {}
-  local records = require("manicule").list({ _quiet = true, uris = state.uri_set, _root = state.root })
+  -- `_no_sync`: the panel is a read-only surface rendering right after
+  -- a mutation, whose path already synced extmark positions — skip the
+  -- editor-wide position sweep on every render (all three list() call
+  -- sites here pass it).
+  local records = require("manicule").list({ _quiet = true, _no_sync = true, uris = state.uri_set, _root = state.root })
   for _, record in ipairs(records) do
     counts[record.uri] = (counts[record.uri] or 0) + 1
   end
@@ -183,15 +206,17 @@ local function build_comment_rows(records)
   local state = require("manicule.review").state()
   if not records then
     local uris = file_filter and { [file_filter] = true } or (state and state.uri_set or {})
-    records = require("manicule").list({ _quiet = true, uris = uris, _root = state and state.root or nil })
+    records =
+      require("manicule").list({ _quiet = true, _no_sync = true, uris = uris, _root = state and state.root or nil })
   end
   local range = require("manicule.range")
   local str = require("manicule.str")
-  local ordered = vim.deepcopy(records)
-  table.sort(ordered, range.compare)
 
+  -- `manicule.list()` already returns a fresh array sorted by
+  -- `range.compare` — the canonical order — so the records are used
+  -- as-is.
   local rows = {}
-  for _, record in ipairs(ordered) do
+  for _, record in ipairs(records) do
     local meta = type(record.meta) == "table" and record.meta or nil
     local gh = meta and type(meta.github) == "table" and meta.github or nil
     local gh_resolved = gh ~= nil and gh.resolved == true
@@ -286,6 +311,16 @@ local function render(comment_records)
     lines[i] = row.text
     line_data[i] = row.data
   end
+
+  -- Same view, identical lines: the content extmark spans derive from
+  -- the row text, so only the current-pair marks can differ — re-apply
+  -- those and skip the buffer rewrite + extmark rebuild.
+  if last_view == current_view and vim.deep_equal(last_lines, lines) then
+    apply_current_marks()
+    return
+  end
+  last_view = current_view
+  last_lines = lines
 
   vim.bo[panel_bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(panel_bufnr, 0, -1, false, lines)
@@ -411,7 +446,8 @@ local function setup_panel_keymaps(bufnr)
       local pair = state and state.files[idx]
       if pair then
         local uri = state.uris[idx]
-        local records = require("manicule").list({ _quiet = true, uris = { [uri] = true }, _root = state.root })
+        local records =
+          require("manicule").list({ _quiet = true, _no_sync = true, uris = { [uri] = true }, _root = state.root })
         if #records > 0 then
           current_view = "comments"
           file_filter = uri
@@ -534,6 +570,8 @@ local function hide()
   panel_winid = nil
   panel_bufnr = nil
   line_data = {}
+  last_lines = nil
+  last_view = nil
   if augroup then
     pcall(vim.api.nvim_del_augroup_by_id, augroup)
     augroup = nil
@@ -606,8 +644,18 @@ local function open_window()
     pattern = { "ManiculeAdded", "ManiculeDeleted", "ManiculeEdited", "ManiculeResolved", "ManiculeRestored" },
     callback = function()
       -- Refresh both views: files for live counts, comments so dd/ce/u
-      -- in a (scoped) comments view update the list in place.
-      refresh()
+      -- in a (scoped) comments view update the list in place. The
+      -- pending flag coalesces a synchronous event burst (a consuming
+      -- send fires one ManiculeDeleted per record) into ONE scheduled
+      -- refresh.
+      if refresh_pending then
+        return
+      end
+      refresh_pending = true
+      vim.schedule(function()
+        refresh_pending = false
+        refresh()
+      end)
     end,
   })
   vim.api.nvim_create_autocmd("ColorScheme", {

@@ -623,6 +623,11 @@ describe("manicule review session", function()
     local files = make_pairs(2)
     assert.is_true(R.start({ files = files, label = "drill" }))
     add_comment(files[1].right, "first file comment")
+    -- The add's panel refresh is scheduled (event bursts coalesce);
+    -- wait for the live count before pressing.
+    assert.is_true(vim.wait(1000, function()
+      return panel_lines()[1]:find("\u{00B7} 1 comments", 1, true) ~= nil
+    end, 10))
 
     press_in_panel(2, "<CR>")
 

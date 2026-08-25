@@ -625,6 +625,39 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
+  it("paints the buffer in a single pass when a comment is added", function()
+    local manicule = require("manicule")
+    -- Drain callbacks scheduled by setup's edit (BufWinEnter attach).
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    local adapter = require("manicule.adapter")
+    local original_identify = adapter.identify
+    local identify_calls = 0
+    adapter.identify = function(b, ...)
+      if b == bufnr then
+        identify_calls = identify_calls + 1
+      end
+      return original_identify(b, ...)
+    end
+
+    -- With a body, add() runs synchronously — nothing scheduled can
+    -- inflate the count before the spy is removed.
+    manicule.add({
+      body = "single pass",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    adapter.identify = original_identify
+
+    -- finalize_add resolves identity twice itself (record build + the
+    -- invariant canary); the repaint must add exactly ONE more pass —
+    -- not two (reconcile + viewport each re-identifying and re-reading
+    -- the store).
+    assert.are.equal(3, identify_calls)
+  end)
+
   it("repaints buffers once per consuming send, not once per cleared record", function()
     local calls = H.register_fake_sink("consume-batch", { clear_on_success = true })
     local manicule = require("manicule")

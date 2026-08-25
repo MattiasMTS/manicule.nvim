@@ -291,6 +291,141 @@ describe("manicule review panel refresh", function()
     assert.are.equal(3, vim.api.nvim_win_get_cursor(winid)[1])
   end)
 
+  it("coalesces a synchronous burst of mutation events into one render", function()
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(2), label = "burst" }))
+
+    -- Drain callbacks already scheduled by start so the spy below only
+    -- sees renders caused by the burst fired here.
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    -- Every files-view render fetches counts through ONE manicule.list
+    -- call, so list calls count renders.
+    local manicule = require("manicule")
+    local original_list = manicule.list
+    local list_calls = 0
+    manicule.list = function(...)
+      list_calls = list_calls + 1
+      return original_list(...)
+    end
+
+    -- Five synchronous events, zero event-loop ticks in between — the
+    -- burst shape a consuming send produces (one ManiculeDeleted per
+    -- cleared record).
+    for _ = 1, 5 do
+      vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    end
+    assert.is_true(vim.wait(1000, function()
+      return list_calls > 0
+    end, 10))
+    vim.wait(50, function()
+      return false
+    end, 10)
+    manicule.list = original_list
+
+    assert.are.equal(1, list_calls)
+  end)
+
+  it("skips the buffer rewrite when a refresh produces identical rows", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    assert.is_true(R.start({ files = files, label = "nowrite" }))
+    local bufnr = assert(panel().bufnr())
+
+    local writes = 0
+    vim.api.nvim_buf_attach(bufnr, false, {
+      on_lines = function()
+        writes = writes + 1
+      end,
+    })
+
+    -- Nothing changed since the initial render: the refresh must not
+    -- rewrite the buffer.
+    vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.are.equal(0, writes)
+
+    -- A real change (a live count flips 0 → 1) still rewrites — once.
+    add_comment(files[1].right, "count me")
+    vim.wait(1000, function()
+      return writes > 0
+    end, 10)
+    vim.wait(50, function()
+      return false
+    end, 10)
+    assert.is_truthy(panel_lines()[1]:find("1 comments", 1, true))
+    assert.are.equal(1, writes)
+  end)
+
+  it("panel renders skip the editor-wide position sync", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    assert.is_true(R.start({ files = files, label = "nosync" }))
+    add_comment(files[1].right, "synced by the mutating path")
+    -- Drain the add's own scheduled refresh before installing the spy.
+    vim.wait(200, function()
+      return false
+    end, 10)
+
+    -- `sync_positions_for_buffer` reaches `capture_position_patches`
+    -- for every loaded buffer that owns records — the only caller of
+    -- that render API, so it is a clean seam for "did list() sync?".
+    local render = require("manicule.ui.render")
+    local original = render.capture_position_patches
+    local sync_calls = 0
+    render.capture_position_patches = function(...)
+      sync_calls = sync_calls + 1
+      return original(...)
+    end
+
+    vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+    vim.wait(100, function()
+      return false
+    end, 10)
+    render.capture_position_patches = original
+
+    assert.are.equal(0, sync_calls)
+  end)
+
+  it("editor-wide sweeps skip manicule's own panel buffer", function()
+    local R = require("manicule.review")
+    local files = make_pairs(1)
+    assert.is_true(R.start({ files = files, label = "own-surface" }))
+    add_comment(files[1].right, "sweep me")
+    local manicule = require("manicule")
+    local record = manicule.list({ _quiet = true, _root = ctx.root })[1]
+    local panel_bufnr = assert(panel().bufnr())
+    vim.wait(200, function()
+      return false
+    end, 10)
+
+    local adapter = require("manicule.adapter")
+    local original_identify = adapter.identify
+    local panel_identify_calls = 0
+    adapter.identify = function(bufnr, ...)
+      if bufnr == panel_bufnr then
+        panel_identify_calls = panel_identify_calls + 1
+      end
+      return original_identify(bufnr, ...)
+    end
+
+    -- delete() runs the paint sweep (refresh_all_loaded); a syncing
+    -- list() runs the position-sync sweep. Neither may pay identify /
+    -- store work on the panel, which can never hold records.
+    manicule.delete(record.id, { scope = record.scope, project_root = record.project_root })
+    manicule.list({ _quiet = true, _root = ctx.root })
+    vim.wait(100, function()
+      return false
+    end, 10)
+    adapter.identify = original_identify
+
+    assert.are.equal(0, panel_identify_calls)
+  end)
+
   it("refreshes on ManiculeRestored so panel-local undo shows the comment again", function()
     local R = require("manicule.review")
     local files = make_pairs(1)
