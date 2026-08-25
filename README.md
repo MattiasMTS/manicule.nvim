@@ -229,6 +229,15 @@ open pair auto-expands its chain to stay visible — and `v` marks the
 whole subtree viewed. File rows behave identically in both layouts
 (`<CR>` drills into comments or opens the pair, `o` always opens).
 
+Plugins can add their own panel tabs after the builtin Files/Comments
+pair with `require("manicule").register_review_tab({...})`: a unique
+`name`, a winbar `title` (a string, or a function for a live count like
+`Checks 7/9`), and a `build(ctx)` returning the rows to render.
+Optional extras: `available(session)` gates the tab per session,
+tab-local `keymaps` are active only while it is current, `on_show` is a
+lazy-fetch hook, and `ctx.refresh()` re-renders after an async fetch.
+See ARCHITECTURE.md ("Extension Points") for the full spec.
+
 When you review a PR with its head checked out, existing GitHub review
 comments are imported as manicule records and render inline. They can be
 edited or deleted locally (changes never sync back to GitHub) and are

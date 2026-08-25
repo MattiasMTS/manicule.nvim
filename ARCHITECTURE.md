@@ -296,6 +296,9 @@ Events are native `User` autocmds.
 
 ## Extension Points
 
+Three registries: sinks (below), review panel tabs (below), and review
+source resolvers (`sources.register`, documented under Review Mode).
+
 Sinks are the stable extension point:
 
 ```lua
@@ -313,6 +316,50 @@ require("manicule").register_sink({
 Sinks should use `lua/manicule/sinks/helpers.lua` for shared formatting where
 possible, including the optional `pre_text` and `post_text` wrappers for text
 payloads. Tests should exercise sinks with local fakes, not real network calls.
+
+Review panel tabs (`panel.register_tab`, re-exported as
+`require("manicule").register_review_tab`) append custom tabs after the
+builtin Files/Comments pair in the panel's H/L cycle, in registration
+order — the builtins stay hardcoded:
+
+```lua
+require("manicule").register_review_tab({
+  name = "checks",                     -- unique id, also the H/L cycle key
+  title = function(ctx)                -- winbar label (string or function),
+    return ("Checks %d/%d"):format(7, 9) -- resolved per render: live counts work
+  end,
+  available = function(session)        -- optional per-session gate (default: always)
+    return session ~= nil
+  end,
+  project = false,                     -- optional: also offer the tab in
+                                       -- :ManiculeList project mode (default: no)
+  build = function(ctx)                -- rows for render;
+    -- ctx = { session, bufnr, width, refresh }
+    return { { text = "lint ok", spans = { { 0, 4, "DiagnosticOk" } }, data = { id = 1 } } }
+  end,
+  keymaps = {                          -- buffer-local, active only while current
+    ["<CR>"] = function(row, ctx) end, -- row = the line_data entry under the cursor
+  },
+  on_show = function(ctx) end,         -- fires entering the tab, before build
+  on_hide = function(ctx) end,         -- (the lazy-fetch hook); on_hide on leave
+})
+```
+
+Rows render through the panel's existing set_lines+extmark pass:
+`spans` are `{col, end_col, hl}` byte ranges, and `data` lands in the
+panel's per-row `line_data` under `kind = "custom:<name>"`. An
+unavailable tab is skipped by H/L and absent from the winbar
+(availability is re-evaluated per render/switch). The panel's own keys
+(`H` `L` `<Esc>` `q` `dd` `ce` `u` `<C-r>` `r` `gr` `v` `t` `za` `o`)
+are reserved — registering a keymap over one errors; `<CR>` is allowed
+(custom rows need activation) and is routed by the panel's own map.
+`ctx.refresh()` re-renders the open panel — whatever tab is current —
+and is safe to call from `vim.schedule` after an async fetch; it no-ops
+once the panel is closed. Registering while a panel is open takes
+effect on the next render. Bundled tabs load through
+`lua/manicule/review/tabs/init.lua` on the first panel open
+(pcall-required, so an absent module is skipped silently);
+`panel._reset_tabs()` is the test seam.
 
 ## Review Mode
 

@@ -1139,6 +1139,57 @@ describe("manicule review panel tab bar", function()
   end)
 end)
 
+describe("manicule review panel registered tabs", function()
+  before_each(function()
+    ctx = H.setup()
+    require("manicule.review.panel")._reset_tabs()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    require("manicule.review.panel")._reset_tabs()
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  local function winbar()
+    return vim.wo[assert(panel().winid(), "panel window not open")].winbar
+  end
+
+  it("appends registered tabs after the builtin Files/Comments cycle", function()
+    panel().register_tab({
+      name = "checks",
+      title = "Checks",
+      build = function()
+        return { { text = "check row" } }
+      end,
+    })
+    local R = require("manicule.review")
+    assert.is_true(R.start({ files = make_pairs(1), label = "reg-tabs" }))
+
+    -- Winbar order: Files, Comments, then the registered tab.
+    local bar = winbar()
+    assert.is_true(bar:find("Files", 1, true) < bar:find("Comments", 1, true), bar)
+    assert.is_true(bar:find("Comments", 1, true) < bar:find("Checks", 1, true), bar)
+
+    -- The H/L cycle wraps through the registered tab back to Files.
+    press_in_panel(1, "L") -- comments
+    press_in_panel(1, "L") -- checks
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Checks", 1, true), winbar())
+    assert.are.equal("check row", panel_lines()[1])
+    press_in_panel(1, "L") -- wraps to files
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
+
+    -- <Esc> on a registered tab returns to the Files tab like the
+    -- comments view does.
+    press_in_panel(1, "H") -- back to checks
+    press_in_panel(1, "<Esc>")
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
+    assert.is_truthy(panel_lines()[1]:find("f1.lua", 1, true))
+  end)
+end)
+
 describe("manicule review panel placement", function()
   after_each(function()
     pcall(function()

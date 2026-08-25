@@ -32,7 +32,17 @@
 -- PROJECT mode (M.list): a single `Comments N · project` tab listing
 -- every project comment — same rows, same dd/ce/u/<C-r> maps, <CR>
 -- jumps to the file in the previous window, `q` closes in any
--- placement. H/L are not mapped (one tab; the native motions stay).
+-- placement. H/L are not mapped (one tab; the native motions stay)
+-- unless a registered tab opted into project mode.
+--
+-- The tab bar is EXTENSIBLE: `M.register_tab(spec)` (re-exported as
+-- `require("manicule").register_review_tab`) appends a custom tab
+-- after the builtin Files/Comments pair in the H/L cycle. The builtins
+-- stay hardcoded; registered tabs render their rows through the same
+-- set_lines+extmark pass and store row `data` in line_data under
+-- `kind = "custom:<name>"`. The registry mirrors sources.lua/sinks:
+-- validated spec table, `_reset_tabs()` test seam; builtin tab modules
+-- load through review/tabs/init.lua on the first panel open.
 --
 -- All rendering goes through one idempotent `render()` from
 -- review.state() + the store: buffer lines plus extmarks in the
@@ -55,16 +65,14 @@ local PANEL_FILETYPE = "manicule-panel"
 local ns = vim.api.nvim_create_namespace("manicule.review.panel")
 local ns_current = vim.api.nvim_create_namespace("manicule.review.panel.current")
 
----@type "files"|"comments"
+---"files", "comments", or a registered tab's name.
+---@type string
 local current_view = "files"
 
 ---URI scoping the comments view to a single file (set by drill-down
 ---from the files view); nil means ALL session comments.
 ---@type string|nil
 local file_filter = nil
-
----Tab order for H/L switching (review mode).
-local TAB_ORDER = { "files", "comments" }
 
 ---Files-tab layout: flat pair rows or the directory tree. Session-
 ---scoped like `collapsed`: seeded from `review.panel.layout` on first
@@ -137,6 +145,203 @@ local last_view = nil
 ---added latency); the rest find the flag set and no-op. Mirrors
 ---init.lua's `viewport_refresh_pending`.
 local refresh_pending = false
+
+-- ------------------------------------------------------------------
+-- Tab registry (see M.register_tab below). Registered tabs append
+-- after the builtin Files/Comments pair in the H/L cycle, in
+-- registration order; availability is evaluated per render/switch.
+-- ------------------------------------------------------------------
+
+---@class manicule.PanelTabCtx
+---@field session manicule.ReviewSession|nil the active review session (nil in project mode)
+---@field bufnr integer|nil panel buffer
+---@field width integer panel window width (0 while closed)
+---@field refresh fun() re-render the open panel; safe from vim.schedule, no-op once the panel is closed
+
+---@class manicule.PanelRow
+---@field text string rendered buffer line
+---@field spans? {[1]: integer, [2]: integer, [3]: string}[] byte-range highlights {col, end_col, hl}
+---@field data? table lands in the row's line_data entry with kind = "custom:"..name
+
+---@class manicule.PanelTab
+---@field name string unique id; also the H/L cycle key
+---@field title string|fun(ctx: manicule.PanelTabCtx): string winbar label, resolved per render (may embed a live count)
+---@field available? fun(session: manicule.ReviewSession|nil): boolean gate per session (default: always available)
+---@field project? boolean also offer the tab in project mode (default: false)
+---@field build fun(ctx: manicule.PanelTabCtx): manicule.PanelRow[] rows for render
+---@field keymaps? table<string, fun(row: table|nil, ctx: manicule.PanelTabCtx)> buffer-local maps active only while the tab is current
+---@field on_show? fun(ctx: manicule.PanelTabCtx) called when the tab becomes current via H/L (lazy fetch hook)
+---@field on_hide? fun(ctx: manicule.PanelTabCtx) called when H/L or <Esc> leaves the tab
+
+---@type manicule.PanelTab[] registration order = cycle order
+local registered_tabs = {}
+
+---lhs strings of the CURRENT registered tab's applied keymaps, so
+---leaving the tab can remove exactly what entering it set.
+---@type string[]
+local active_tab_keys = {}
+
+---Keys the panel maps for itself (H/L tab cycle, view-guarded maps,
+---comment mutations, `q` close in float/project placements). A
+---registered tab may not shadow them — validated at register time,
+---keyed by termcode so spelling variants (`<esc>`) still match. `<CR>`
+---is deliberately NOT reserved: custom rows need an activation key, so
+---the panel's own <CR> map routes to the tab's handler instead.
+local RESERVED_KEYS = {}
+for _, lhs in ipairs({ "H", "L", "<Esc>", "q", "dd", "ce", "u", "<C-r>", "r", "gr", "v", "t", "za", "o" }) do
+  RESERVED_KEYS[vim.keycode(lhs)] = lhs
+end
+
+---@param name string
+---@return manicule.PanelTab|nil
+local function tab_by_name(name)
+  for _, tab in ipairs(registered_tabs) do
+    if tab.name == name then
+      return tab
+    end
+  end
+  return nil
+end
+
+---Is the tab offered right now? Project mode excludes registered tabs
+---unless the spec opted in; `available(session)` gates per session and
+---an erroring gate counts as unavailable.
+---@param tab manicule.PanelTab
+---@return boolean
+local function tab_available(tab)
+  if project_mode and tab.project ~= true then
+    return false
+  end
+  if tab.available then
+    local ok, avail = pcall(tab.available, require("manicule.review").state())
+    return ok and avail == true
+  end
+  return true
+end
+
+---The H/L cycle: builtins first (hardcoded — Files/Comments in review
+---mode, the single Comments tab in project mode), then the AVAILABLE
+---registered tabs in registration order.
+---@return string[]
+local function tab_cycle()
+  local cycle = project_mode and { "comments" } or { "files", "comments" }
+  for _, tab in ipairs(registered_tabs) do
+    if tab_available(tab) then
+      cycle[#cycle + 1] = tab.name
+    end
+  end
+  return cycle
+end
+
+---Any registered tab that can appear in project mode? Decides whether
+---a project-mode panel maps H/L at all (availability is still checked
+---per switch).
+---@return boolean
+local function has_project_tabs()
+  for _, tab in ipairs(registered_tabs) do
+    if tab.project == true then
+      return true
+    end
+  end
+  return false
+end
+
+---Per-call ctx handed to a registered tab's title/build/keymaps/hooks.
+---`refresh` goes through M.refresh, which already no-ops while the
+---panel is hidden — so a tab may safely call it from vim.schedule
+---after an async fetch. It re-renders whatever tab is CURRENT (not
+---necessarily the caller): simpler than tracking view ownership, and
+---a re-render of another view is harmless.
+---@return manicule.PanelTabCtx
+local function tab_ctx()
+  return {
+    session = require("manicule.review").state(),
+    bufnr = panel_bufnr,
+    width = (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) and vim.api.nvim_win_get_width(panel_winid) or 0,
+    refresh = function()
+      M.refresh()
+    end,
+  }
+end
+
+---A registered tab's winbar label: a function title is resolved per
+---render (live counts), falling back to the tab name on error or a
+---non-string result. Escaping happens at the winbar assembly site.
+---@param tab manicule.PanelTab
+---@return string
+local function tab_title(tab)
+  local title = tab.title
+  if type(title) == "function" then
+    local ok, result = pcall(title, tab_ctx())
+    title = ok and result or nil
+  end
+  return type(title) == "string" and title or tab.name
+end
+
+---The handler a tab declared for `lhs`, matched by termcode so spelling
+---variants (`<cr>` vs `<CR>`) resolve to the same key.
+---@param tab manicule.PanelTab
+---@param lhs string
+---@return fun(row: table|nil, ctx: manicule.PanelTabCtx)|nil
+local function tab_keymap_for(tab, lhs)
+  local want = vim.keycode(lhs)
+  for declared, fn in pairs(tab.keymaps or {}) do
+    if vim.keycode(declared) == want then
+      return fn
+    end
+  end
+  return nil
+end
+
+---Remove the keymaps the current registered tab applied. Safe when the
+---panel buffer is already gone (maps died with it).
+local function clear_tab_keymaps()
+  if panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr) then
+    for _, lhs in ipairs(active_tab_keys) do
+      pcall(vim.keymap.del, "n", lhs, { buffer = panel_bufnr })
+    end
+  end
+  active_tab_keys = {}
+end
+
+---Register a custom panel tab. Appended after the builtins in the H/L
+---cycle; takes effect on the panel's next render when one is open.
+---Errors on an invalid spec, a duplicate name, or a keymap over a
+---reserved panel key (see RESERVED_KEYS; `<CR>` is allowed).
+---@param spec manicule.PanelTab
+function M.register_tab(spec)
+  vim.validate("spec", spec, "table")
+  vim.validate("spec.name", spec.name, "string")
+  vim.validate("spec.title", spec.title, { "string", "function" })
+  vim.validate("spec.build", spec.build, "function")
+  vim.validate("spec.available", spec.available, "function", true)
+  vim.validate("spec.project", spec.project, "boolean", true)
+  vim.validate("spec.keymaps", spec.keymaps, "table", true)
+  vim.validate("spec.on_show", spec.on_show, "function", true)
+  vim.validate("spec.on_hide", spec.on_hide, "function", true)
+  if spec.name == "files" or spec.name == "comments" or tab_by_name(spec.name) then
+    error(("manicule: panel tab %q is already registered"):format(spec.name))
+  end
+  for lhs, fn in pairs(spec.keymaps or {}) do
+    vim.validate("spec.keymaps key", lhs, "string")
+    vim.validate(("spec.keymaps[%q]"):format(lhs), fn, "function")
+    local reserved = RESERVED_KEYS[vim.keycode(lhs)]
+    if reserved then
+      error(("manicule: panel tab %q may not override the reserved panel key %q"):format(spec.name, reserved))
+    end
+  end
+  registered_tabs[#registered_tabs + 1] = spec
+end
+
+---Internal: exposed for tests. Drops every registered tab; a view left
+---pointing at one falls back to the mode's builtin view.
+function M._reset_tabs()
+  registered_tabs = {}
+  clear_tab_keymaps()
+  if current_view ~= "files" and current_view ~= "comments" then
+    current_view = project_mode and "comments" or "files"
+  end
+end
 
 -- The session's project root, URI array/set, and uri -> pair-index map
 -- all come pre-computed on review.state() (session cache built once in
@@ -617,7 +822,7 @@ local function apply_current_marks()
     return
   end
   vim.api.nvim_buf_clear_namespace(panel_bufnr, ns_current, 0, -1)
-  if current_view == "comments" then
+  if current_view ~= "files" then
     return
   end
   local state = require("manicule.review").state()
@@ -640,32 +845,38 @@ end
 
 ---The panel winbar: a Pierre-style tab bar — `Files 12 │ Comments 5`,
 ---active tab in `ManiculePanelTabActive` — with the `3/12 viewed`
----progress right-aligned via `%=`. Project mode shows its single tab
----as `Comments N · project`. The winbar is the panel's only title
----surface, and it is native and cheap.
+---progress right-aligned via `%=`. Registered tabs follow the builtins
+---with their `title` resolved per render (escaped like everything else
+---dynamic). Project mode shows `Comments N · project` plus any
+---project-capable registered tabs. The winbar is the panel's only
+---title surface, and it is native and cheap.
 ---@param comment_count? integer comments listed by the current render
 local function update_winbar(comment_count)
   if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return
   end
-  if project_mode then
-    vim.wo[panel_winid].winbar = ("%%#ManiculePanelTabActive#%s%%#ManiculePanelTab# \u{00B7} project"):format(
-      winbar_escape(("Comments %d"):format(comment_count or 0))
-    )
-    return
-  end
   local state = require("manicule.review").state()
-  if not state then
+  if not project_mode and not state then
     return
   end
   local labels = {
-    files = ("Files %d"):format(#state.files),
+    files = state and ("Files %d"):format(#state.files) or "Files",
     comments = ("Comments %d"):format(comment_count or 0),
   }
   local parts = {}
-  for _, view in ipairs(TAB_ORDER) do
+  for _, view in ipairs(tab_cycle()) do
     local hl = view == current_view and "ManiculePanelTabActive" or "ManiculePanelTab"
-    parts[#parts + 1] = ("%%#%s#%s"):format(hl, winbar_escape(labels[view]))
+    local label = labels[view]
+    if not label then
+      local tab = tab_by_name(view)
+      label = tab and tab_title(tab) or view
+    end
+    parts[#parts + 1] = ("%%#%s#%s"):format(hl, winbar_escape(label))
+  end
+  local bar = table.concat(parts, "%#ManiculePanelTab# \u{2502} ")
+  if project_mode then
+    vim.wo[panel_winid].winbar = bar .. "%#ManiculePanelTab# \u{00B7} project"
+    return
   end
   local viewed = 0
   for _ in pairs(state.viewed or {}) do
@@ -674,21 +885,77 @@ local function update_winbar(comment_count)
   local progress = ("%d/%d viewed"):format(viewed, #state.files)
   -- `%*` after `%=` resets to the plain WinBar highlight for the
   -- right-aligned progress.
-  vim.wo[panel_winid].winbar = table.concat(parts, "%#ManiculePanelTab# \u{2502} ") .. "%=%*" .. winbar_escape(progress)
+  vim.wo[panel_winid].winbar = bar .. "%=%*" .. winbar_escape(progress)
+end
+
+---Comment total for the winbar while a REGISTERED tab renders: the
+---builtin views derive it from the list() call that built their rows;
+---a custom tab has no such call, so query the store directly (same
+---filters as build_comment_rows).
+---@return integer
+local function session_comment_count()
+  if project_mode then
+    return #require("manicule").list({ _quiet = true, _root = project_root })
+  end
+  local state = require("manicule.review").state()
+  if not state then
+    return 0
+  end
+  return #require("manicule").list({ _quiet = true, _no_sync = true, uris = state.uri_set, _root = state.root })
+end
+
+---Rows for a REGISTERED tab: spec.build(ctx) through the same
+---set_lines+extmark pass as the builtin views. Row `data` lands in
+---line_data under `kind = "custom:<name>"` (copied, so a build may
+---reuse its tables). A failing build renders an empty tab with a
+---notification instead of breaking the panel's event-driven refreshes.
+---@param tab manicule.PanelTab
+---@return manicule.review.panel.Row[]
+local function build_tab_rows(tab)
+  local ok, result = pcall(tab.build, tab_ctx())
+  if not ok then
+    vim.notify(("manicule: panel tab %q build failed: %s"):format(tab.name, result), vim.log.levels.ERROR)
+    return {}
+  end
+  local rows = {}
+  for _, row in ipairs(type(result) == "table" and result or {}) do
+    local data = { kind = "custom:" .. tab.name }
+    for k, v in pairs(type(row.data) == "table" and row.data or {}) do
+      if k ~= "kind" then
+        data[k] = v
+      end
+    end
+    rows[#rows + 1] = { text = tostring(row.text or ""), spans = row.spans or {}, data = data }
+  end
+  return rows
 end
 
 ---Rebuild the panel buffer from state: lines, content extmarks, and
 ---`line_data`, then the current-pair marks. Idempotent; never moves
 ---the cursor or focus.
 ---@param comment_records? table[] pre-fetched records for a comments
----view render (see build_comment_rows); ignored in files view.
+---view render (see build_comment_rows); ignored in other views.
 local function render(comment_records)
   if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
     return
   end
+  -- A registered tab that vanished (unregistered) or became
+  -- unavailable while current falls back to the mode's builtin view,
+  -- keeping the winbar (built from the availability-filtered cycle)
+  -- and the rendered rows in agreement.
+  local custom = tab_by_name(current_view)
+  if current_view ~= "files" and current_view ~= "comments" and not (custom and tab_available(custom)) then
+    clear_tab_keymaps()
+    current_view = project_mode and "comments" or "files"
+    custom = nil
+  end
   local rows, comment_count
   local view_key = current_view
-  if current_view == "files" then
+  if custom then
+    view_key = "custom:" .. custom.name
+    rows = build_tab_rows(custom)
+    comment_count = session_comment_count()
+  elseif current_view == "files" then
     view_key = "files:" .. current_layout()
     if current_layout() == "tree" then
       rows, comment_count = build_tree_rows()
@@ -784,6 +1051,58 @@ local function record_locator_at_cursor()
     return { id = data.id, scope = data.scope, project_root = data.project_root }
   end
   return nil
+end
+
+---Apply a registered tab's keymaps to the panel buffer (entering the
+---tab). Each handler receives the line_data entry under the cursor and
+---a fresh ctx. `<CR>` is skipped: the panel's own <CR> map routes to
+---the tab handler, so entering/leaving never has to restore the base
+---map that a set/del pair would destroy.
+---@param tab manicule.PanelTab|nil
+local function apply_tab_keymaps(tab)
+  clear_tab_keymaps()
+  if not (tab and tab.keymaps and panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
+    return
+  end
+  for lhs, fn in pairs(tab.keymaps) do
+    if vim.keycode(lhs) ~= vim.keycode("<CR>") then
+      vim.keymap.set("n", lhs, function()
+        fn(data_at_cursor(), tab_ctx())
+      end, {
+        buffer = panel_bufnr,
+        nowait = true,
+        silent = true,
+        desc = ("Manicule panel tab %s: %s"):format(tab.name, lhs),
+      })
+      active_tab_keys[#active_tab_keys + 1] = lhs
+    end
+  end
+end
+
+---Switch the panel to `view` ("files", "comments", or a registered
+---tab's name), running the registered-tab lifecycle: the old tab's
+---keymaps are removed and its on_hide fires; the new tab's on_show
+---fires BEFORE the render (the lazy-fetch hook) and its keymaps are
+---applied. Clears any comments-view drill-down scope.
+---@param view string
+local function set_view(view)
+  local old = tab_by_name(current_view)
+  if old then
+    clear_tab_keymaps()
+    if old.on_hide then
+      pcall(old.on_hide, tab_ctx())
+    end
+  end
+  current_view = view
+  file_filter = nil
+  local new = tab_by_name(view)
+  if new then
+    if new.on_show then
+      pcall(new.on_show, tab_ctx())
+    end
+    apply_tab_keymaps(new)
+  end
+  refresh()
 end
 
 ---Jump to the comment under the cursor in a comments view: resolve its
@@ -935,9 +1254,17 @@ local function setup_panel_keymaps(bufnr)
   -- comment through review.open (never a raw window jump, which could
   -- stomp a diff window's buffer); in project mode there is no session
   -- to route through, so the jump opens the file in the previous
-  -- window.
+  -- window. On a REGISTERED tab it routes to the tab's own <CR>
+  -- keymap when declared, else no-ops (custom rows have no default
+  -- activation).
   map("<CR>", function()
-    if project_mode then
+    local tab = tab_by_name(current_view)
+    if tab then
+      local fn = tab_keymap_for(tab, "<CR>")
+      if fn then
+        fn(data_at_cursor(), tab_ctx())
+      end
+    elseif project_mode then
       jump_to_project_comment()
     elseif current_view == "files" then
       local data = data_at_cursor()
@@ -976,8 +1303,9 @@ local function setup_panel_keymaps(bufnr)
 
   -- `o` on any pair row (either Files layout) always opens the pair —
   -- the escape hatch when <CR> would drill into comments instead.
+  -- Falls through outside the Files tab (comments and registered tabs).
   map("o", function()
-    if current_view == "comments" then
+    if current_view ~= "files" then
       feed_default("o")
       return
     end
@@ -1026,15 +1354,13 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: toggle GitHub thread resolution")
 
-  -- <Esc> in the comments view returns to the Files tab (clearing any
-  -- file filter, keeping its layout); in the Files tab — and in
-  -- project mode, which has no Files tab — it falls through to the
-  -- default behavior.
+  -- <Esc> in the comments view — or on a registered tab — returns to
+  -- the Files tab (clearing any file filter, keeping its layout); in
+  -- the Files tab — and in project mode, which has no Files tab — it
+  -- falls through to the default behavior.
   map("<Esc>", function()
     if not project_mode and current_view ~= "files" then
-      current_view = "files"
-      file_filter = nil
-      refresh()
+      set_view("files")
     else
       feed_default("<Esc>")
     end
@@ -1044,9 +1370,9 @@ local function setup_panel_keymaps(bufnr)
   -- leave; `v` is the manual toggle/un-mark): a pair row toggles that
   -- pair; a tree directory row toggles its whole subtree — any unviewed
   -- file marks everything viewed, an all-viewed subtree un-marks. Falls
-  -- through to the default `v` (visual mode) in comments view.
+  -- through to the default `v` (visual mode) outside the Files tab.
   map("v", function()
-    if current_view == "comments" then
+    if current_view ~= "files" then
       feed_default("v")
       return
     end
@@ -1076,33 +1402,41 @@ local function setup_panel_keymaps(bufnr)
     end
   end, "Manicule review: toggle viewed for the file or directory under cursor")
 
-  -- L/H switch the panel tabs (Files → Comments), wrapping in both
-  -- directions. Switching always clears a drill-down scope, so the
-  -- Comments tab lists ALL session comments. Review mode only —
-  -- project mode has a single tab and keeps the native H/L motions.
-  local function switch_tab(step)
+  -- L/H switch the panel tabs — builtins first, then the AVAILABLE
+  -- registered tabs — wrapping in both directions. Switching always
+  -- clears a drill-down scope, so the Comments tab lists ALL session
+  -- comments. Project mode maps H/L only when a registered tab opted
+  -- into it (spec.project); with none, the single Comments tab keeps
+  -- the native H/L motions — and a mapped H/L still falls through
+  -- whenever availability leaves a single tab in the cycle.
+  local function switch_tab(step, lhs)
+    local cycle = tab_cycle()
+    if #cycle < 2 then
+      feed_default(lhs)
+      return
+    end
     local index = 1
-    for i, view in ipairs(TAB_ORDER) do
+    for i, view in ipairs(cycle) do
       if view == current_view then
         index = i
         break
       end
     end
-    current_view = TAB_ORDER[(index - 1 + step) % #TAB_ORDER + 1]
-    file_filter = nil
-    refresh()
+    set_view(cycle[(index - 1 + step) % #cycle + 1])
   end
-  if not project_mode then
+  if not project_mode or has_project_tabs() then
     map("L", function()
-      switch_tab(1)
+      switch_tab(1, "L")
     end, "Manicule review: next panel tab")
     map("H", function()
-      switch_tab(-1)
+      switch_tab(-1, "H")
     end, "Manicule review: previous panel tab")
+  end
+  if not project_mode then
     -- `t` flips the Files tab between its flat and tree layouts; the
     -- new layout sticks for the session. Falls through to the default
-    -- `t` (till-motion) in the comments view; project mode has no
-    -- Files tab, so the key stays unmapped there.
+    -- `t` (till-motion) in the other views; project mode has no Files
+    -- tab, so the key stays unmapped there.
     map("t", function()
       if current_view ~= "files" then
         feed_default("t")
@@ -1155,6 +1489,9 @@ local function hide()
   line_data = {}
   last_lines = nil
   last_view = nil
+  -- Tab keymaps die with the wiped buffer; only the bookkeeping resets
+  -- (reopen re-applies them for the restored current view).
+  active_tab_keys = {}
   if augroup then
     pcall(vim.api.nvim_del_augroup_by_id, augroup)
     augroup = nil
@@ -1218,6 +1555,10 @@ end
 ---@param comment_records? table[] pre-fetched records: sizes the
 ---bottom split by row count and feeds the initial render (project mode).
 local function open_window(comment_records)
+  -- Builtin tabs register here — the panel's setup path — because the
+  -- panel is the only surface that renders them; the loader's own
+  -- guard makes the per-open call idempotent.
+  require("manicule.review.tabs").setup()
   setup_highlights()
 
   -- A stale buffer holding the panel's name (e.g. left from an aborted
@@ -1263,6 +1604,9 @@ local function open_window(comment_records)
   panel_winid = winid
   panel_bufnr = bufnr
   setup_panel_keymaps(bufnr)
+  -- A toggle-reopen restores the hidden view, which may be a
+  -- registered tab: re-apply its keymaps to the fresh buffer.
+  apply_tab_keymaps(tab_by_name(current_view))
   -- `q` closes the panel like a toggle: floats in review mode (reopen
   -- with :ManiculeToggle), and EVERY placement in project mode (reopen
   -- with :ManiculeList). <Esc> keeps its view-back meaning in every
@@ -1335,7 +1679,7 @@ end
 ---session.
 ---@param pair_index integer
 function M.sync_index(pair_index)
-  if current_view == "comments" then
+  if current_view ~= "files" then
     return
   end
   if not require("manicule.review").state() then
@@ -1368,6 +1712,9 @@ function M.open()
     return
   end
   -- Always start in files view; a session panel is never project mode.
+  -- Forcing the view bypasses set_view, so drop any registered tab's
+  -- keymaps directly (its hooks are for user-driven switches).
+  clear_tab_keymaps()
   project_mode = false
   project_root = nil
   current_view = "files"
@@ -1386,6 +1733,9 @@ end
 ---project comment, refreshed on the same store events and closed with
 ---`q` in any placement.
 function M.list()
+  -- Both branches force the Comments view past set_view: drop any
+  -- registered tab's keymaps (its hooks are for user-driven switches).
+  clear_tab_keymaps()
   if require("manicule.review").state() then
     project_mode = false
     project_root = nil

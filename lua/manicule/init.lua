@@ -1553,6 +1553,12 @@ function M.register_sink(spec)
   return require("manicule.sinks").register(spec)
 end
 
+---Register a review panel tab. Delegates to the panel's tab registry.
+---@param spec manicule.PanelTab
+function M.register_review_tab(spec)
+  return require("manicule.review.panel").register_tab(spec)
+end
+
 -- Exposed for tests + <Plug> maps; not part of the stable public API.
 -- Returns `{ [bufnr] = { [comment_id] = extmark_id, ... }, ... }` by
 -- projecting from the render layer's handle table so there is exactly
