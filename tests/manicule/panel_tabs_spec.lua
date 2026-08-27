@@ -70,9 +70,28 @@ local function tab_spec(overrides)
   return spec
 end
 
+local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+
+---The first spinner frame found in `text`, or nil.
+local function frame_in(text)
+  for _, frame in ipairs(SPINNER_FRAMES) do
+    if text:find(frame, 1, true) then
+      return frame
+    end
+  end
+  return nil
+end
+
 describe("manicule panel tab registry", function()
   before_each(function()
     ctx = H.setup()
+    -- Flip the builtin loader's once-per-process guard so the panel's
+    -- own tabs.setup() on open cannot register the real builtin tabs
+    -- and collide with this spec's fake "checks" tab (same pattern as
+    -- the sibling tab specs).
+    pcall(function()
+      require("manicule.review.tabs").setup()
+    end)
     panel()._reset_tabs()
   end)
   after_each(function()
@@ -97,6 +116,17 @@ describe("manicule panel tab registry", function()
     ok, err = pcall(p.register_tab, { name = "x", title = "X" })
     assert.is_false(ok)
     assert.is_truthy(tostring(err):find("build", 1, true), tostring(err))
+
+    -- The optional prefetch/busy/animated fields are type-checked too.
+    ok, err = pcall(p.register_tab, tab_spec({ name = "p1", prefetch = "yes" }))
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("prefetch", 1, true), tostring(err))
+    ok, err = pcall(p.register_tab, tab_spec({ name = "p2", busy = true }))
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("busy", 1, true), tostring(err))
+    ok, err = pcall(p.register_tab, tab_spec({ name = "p3", animated = "nope" }))
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("animated", 1, true), tostring(err))
 
     p.register_tab(tab_spec())
     ok, err = pcall(p.register_tab, tab_spec())
@@ -367,9 +397,224 @@ describe("manicule panel tab registry", function()
   end)
 end)
 
+describe("manicule panel tab prefetch", function()
+  before_each(function()
+    ctx = H.setup()
+    -- Flip the builtin loader's once-per-process guard so the panel's
+    -- own tabs.setup() on open cannot register the real builtin tabs
+    -- and collide with this spec's fake "checks" tab (same pattern as
+    -- the sibling tab specs).
+    pcall(function()
+      require("manicule.review.tabs").setup()
+    end)
+    panel()._reset_tabs()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    panel()._reset_tabs()
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  it("fires the on_show fetch once at review start for opted-in tabs", function()
+    local shown = 0
+    local seen_ctx
+    panel().register_tab(tab_spec({
+      prefetch = true,
+      on_show = function(tab_ctx)
+        shown = shown + 1
+        seen_ctx = tab_ctx
+      end,
+    }))
+    start_review(1)
+
+    assert.are.equal(1, shown, "prefetch did not fire at session open")
+    -- A valid ctx, handed out WITHOUT switching tabs: the Files tab is
+    -- still current and refresh from the prefetch ctx stays safe.
+    assert.are.equal(require("manicule.review").state(), seen_ctx.session)
+    assert.are.equal(panel().bufnr(), seen_ctx.bufnr)
+    assert.are.equal("function", type(seen_ctx.refresh))
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
+    seen_ctx.refresh()
+    assert.is_truthy(panel_lines()[1]:find("f1.lua", 1, true), panel_lines()[1])
+  end)
+
+  it("skips tabs that did not opt in", function()
+    local shown = 0
+    panel().register_tab(tab_spec({
+      on_show = function()
+        shown = shown + 1
+      end,
+    }))
+    start_review(1)
+    assert.are.equal(0, shown)
+  end)
+
+  it("skips unavailable tabs", function()
+    local shown = 0
+    panel().register_tab(tab_spec({
+      prefetch = true,
+      available = function()
+        return false
+      end,
+      on_show = function()
+        shown = shown + 1
+      end,
+    }))
+    start_review(1)
+    assert.are.equal(0, shown)
+  end)
+
+  it("review.prefetch = false disables all eager fetching", function()
+    require("manicule.config").get().review.prefetch = false
+    local shown = 0
+    panel().register_tab(tab_spec({
+      prefetch = true,
+      on_show = function()
+        shown = shown + 1
+      end,
+    }))
+    start_review(1)
+    assert.are.equal(0, shown)
+
+    -- Entering the tab still fetches lazily.
+    press_in_panel(1, "L")
+    press_in_panel(1, "L")
+    assert.are.equal(1, shown)
+  end)
+end)
+
+describe("manicule panel spinner ticker", function()
+  before_each(function()
+    ctx = H.setup()
+    -- Flip the builtin loader's once-per-process guard so the panel's
+    -- own tabs.setup() on open cannot register the real builtin tabs
+    -- and collide with this spec's fake "checks" tab (same pattern as
+    -- the sibling tab specs).
+    pcall(function()
+      require("manicule.review.tabs").setup()
+    end)
+    panel()._reset_tabs()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    panel()._reset_tabs()
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  it("busy tabs get a winbar spinner frame that disappears when done", function()
+    local busy = true
+    panel().register_tab(tab_spec({
+      busy = function()
+        return busy
+      end,
+    }))
+    start_review(1)
+
+    -- The frame shows while the Files tab is current — busy decorates
+    -- the tab's winbar title, not its rows.
+    assert.is_truthy(frame_in(winbar()), winbar())
+    assert.is_true(panel()._spinner_active(), "ticker not running while a tab is busy")
+
+    busy = false
+    panel().refresh()
+    assert.is_nil(frame_in(winbar()), winbar())
+    assert.is_false(panel()._spinner_active(), "ticker kept running with nothing busy")
+  end)
+
+  it("re-renders an animated tab's rows each tick with fresh frames", function()
+    panel().register_tab(tab_spec({
+      animated = function()
+        return true
+      end,
+      build = function(build_ctx)
+        return { { text = "spin " .. (build_ctx.spinner_frame or "?") } }
+      end,
+    }))
+    start_review(1)
+    press_in_panel(1, "L")
+    press_in_panel(1, "L") -- checks current
+
+    local first = panel_lines()[1]
+    assert.is_truthy(frame_in(first), first)
+    vim.wait(2000, function()
+      return panel_lines()[1] ~= first
+    end, 10)
+    local second = panel_lines()[1]
+    assert.are_not.equal(first, second, "rows did not re-render on a tick")
+    vim.wait(2000, function()
+      return panel_lines()[1] ~= second
+    end, 10)
+    assert.are_not.equal(second, panel_lines()[1], "rows stopped animating after one tick")
+  end)
+
+  it("does not animate rows while the tab is not current", function()
+    local builds = 0
+    panel().register_tab(tab_spec({
+      animated = function()
+        return true
+      end,
+      build = function()
+        builds = builds + 1
+        return { { text = "row" } }
+      end,
+    }))
+    start_review(1) -- files stays current
+    local before = builds
+    vim.wait(400)
+    assert.are.equal(before, builds, "ticker rebuilt a non-current tab's rows")
+  end)
+
+  it("stops the ticker once nothing is busy or animated", function()
+    local animated = true
+    panel().register_tab(tab_spec({
+      animated = function()
+        return animated
+      end,
+    }))
+    start_review(1)
+    press_in_panel(1, "L")
+    press_in_panel(1, "L")
+    assert.is_true(panel()._spinner_active())
+
+    animated = false
+    vim.wait(2000, function()
+      return not panel()._spinner_active()
+    end, 10)
+    assert.is_false(panel()._spinner_active(), "ticker survived going idle")
+  end)
+
+  it("panel close stops the ticker", function()
+    panel().register_tab(tab_spec({
+      animated = function()
+        return true
+      end,
+    }))
+    start_review(1)
+    press_in_panel(1, "L")
+    press_in_panel(1, "L")
+    assert.is_true(panel()._spinner_active())
+
+    panel().close()
+    assert.is_false(panel()._spinner_active(), "ticker survived the panel close")
+  end)
+end)
+
 describe("manicule panel tab registry in project mode", function()
   before_each(function()
     ctx = H.setup()
+    -- Flip the builtin loader's once-per-process guard so the panel's
+    -- own tabs.setup() on open cannot register the real builtin tabs
+    -- and collide with this spec's fake "checks" tab (same pattern as
+    -- the sibling tab specs).
+    pcall(function()
+      require("manicule.review.tabs").setup()
+    end)
     panel()._reset_tabs()
   end)
   after_each(function()
@@ -411,6 +656,13 @@ end)
 describe("manicule builtin tabs loader", function()
   before_each(function()
     ctx = H.setup()
+    -- Flip the builtin loader's once-per-process guard so the panel's
+    -- own tabs.setup() on open cannot register the real builtin tabs
+    -- and collide with this spec's fake "checks" tab (same pattern as
+    -- the sibling tab specs).
+    pcall(function()
+      require("manicule.review.tabs").setup()
+    end)
     panel()._reset_tabs()
   end)
   after_each(function()

@@ -249,6 +249,32 @@ describe("manicule github PR panel tab", function()
     assert.is_nil(winbar():find("PR #", 1, true), winbar())
   end)
 
+  it("prefetches the PR header at session open, before the tab is entered", function()
+    start_pr_review()
+    vim.wait(2000, function()
+      return log_has("pr view 42 --json")
+    end, 10)
+    assert.is_true(log_has("pr view 42 --json"), table.concat(gh.log(), "\n"))
+    -- The landed fetch decorates the title while Files is still current.
+    vim.wait(2000, function()
+      return winbar():find("PR #42 ✗", 1, true) ~= nil
+    end, 10)
+    assert.is_truthy(winbar():find("PR #42 ✗", 1, true), winbar())
+    assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
+  end)
+
+  it("review.prefetch = false keeps the header fetch lazy", function()
+    require("manicule.config").get().review.prefetch = false
+    start_pr_review()
+    vim.wait(300)
+    assert.is_false(log_has("pr view 42 --json"), table.concat(gh.log(), "\n"))
+    switch_to_pr_tab()
+    vim.wait(2000, function()
+      return log_has("pr view 42 --json")
+    end, 10)
+    assert.is_true(log_has("pr view 42 --json"), table.concat(gh.log(), "\n"))
+  end)
+
   it("fetches PR details on show, renders the header, and caches the result", function()
     start_pr_review()
     switch_to_pr_tab()

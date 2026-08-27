@@ -1298,4 +1298,18 @@ describe("manicule review panel placement", function()
     assert.is_false(ok4)
     assert.is_truthy(tostring(err4):find('review.panel.layout must be "flat" or "tree", got "nested"', 1, true))
   end)
+
+  it("review.prefetch defaults to true and rejects non-booleans", function()
+    ctx = H.setup()
+    local config = require("manicule.config")
+    assert.is_true(config.get().review.prefetch)
+
+    local ok, err = pcall(config.setup, { review = { prefetch = "yes" } })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("review.prefetch", 1, true), tostring(err))
+
+    -- Booleans pass and land on the merged config.
+    require("manicule").setup({ review = { prefetch = false } })
+    assert.is_false(config.get().review.prefetch)
+  end)
 end)

@@ -55,6 +55,8 @@
 
 local M = {}
 
+local uv = vim.uv
+
 local PANEL_BUFNAME = "manicule://panel"
 local PANEL_FILETYPE = "manicule-panel"
 
@@ -147,6 +149,31 @@ local last_view = nil
 local refresh_pending = false
 
 -- ------------------------------------------------------------------
+-- Spinner ticker state. ONE shared ~100ms uv timer (see sync_spinner
+-- below, defined after refresh) drives every animation the panel has:
+-- the winbar spinner next to a busy tab's title and the per-tick row
+-- re-render of the current tab while it reports animated(). The timer
+-- runs ONLY while some available tab needs frames and the panel window
+-- exists — sync_spinner (called from every render) starts it, and the
+-- tick itself, hide(), or the next render stop it once nothing spins.
+-- ------------------------------------------------------------------
+
+local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+local SPINNER_INTERVAL_MS = 100
+
+---@type uv.uv_timer_t|nil live only while something needs frames
+local spinner_timer = nil
+---Current frame index, advanced per tick (frozen while the timer is
+---stopped — harmless, since nothing renders frames then).
+local spinner_index = 1
+---Comment count of the LAST render, so a winbar-only spinner tick can
+---repaint the tab bar without re-listing the store.
+local last_comment_count = 0
+---Forward declaration: defined with the ticker below (it needs
+---refresh/update_winbar), called from render() and M.prefetch().
+local sync_spinner
+
+-- ------------------------------------------------------------------
 -- Tab registry (see M.register_tab below). Registered tabs append
 -- after the builtin Files/Comments pair in the H/L cycle, in
 -- registration order; availability is evaluated per render/switch.
@@ -157,6 +184,7 @@ local refresh_pending = false
 ---@field bufnr integer|nil panel buffer
 ---@field width integer panel window width (0 while closed)
 ---@field refresh fun() re-render the open panel; safe from vim.schedule, no-op once the panel is closed
+---@field spinner_frame string current spinner frame; advances per ticker tick while anything is busy/animated
 
 ---@class manicule.PanelRow
 ---@field text string rendered buffer line
@@ -172,6 +200,9 @@ local refresh_pending = false
 ---@field keymaps? table<string, fun(row: table|nil, ctx: manicule.PanelTabCtx)> buffer-local maps active only while the tab is current
 ---@field on_show? fun(ctx: manicule.PanelTabCtx) called when the tab becomes current via H/L (lazy fetch hook)
 ---@field on_hide? fun(ctx: manicule.PanelTabCtx) called when H/L or <Esc> leaves the tab
+---@field prefetch? boolean run on_show once at review-session open (gated by `review.prefetch`), so the tab's data loads before its first show
+---@field busy? fun(ctx: manicule.PanelTabCtx): boolean report in-flight work: the winbar renders `<title> <frame>` while true
+---@field animated? fun(ctx: manicule.PanelTabCtx): boolean report animated rows: while the tab is CURRENT and this is true, the ticker re-renders its rows each tick so build() can draw fresh frames/elapsed
 
 ---@type manicule.PanelTab[] registration order = cycle order
 local registered_tabs = {}
@@ -258,6 +289,7 @@ local function tab_ctx()
     session = require("manicule.review").state(),
     bufnr = panel_bufnr,
     width = (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) and vim.api.nvim_win_get_width(panel_winid) or 0,
+    spinner_frame = SPINNER_FRAMES[spinner_index],
     refresh = function()
       M.refresh()
     end,
@@ -276,6 +308,29 @@ local function tab_title(tab)
     title = ok and result or nil
   end
   return type(title) == "string" and title or tab.name
+end
+
+---Does the tab report in-flight work right now? An erroring probe
+---counts as not busy (same tolerance as tab_available).
+---@param tab manicule.PanelTab
+---@return boolean
+local function tab_busy(tab)
+  if not tab.busy then
+    return false
+  end
+  local ok, busy = pcall(tab.busy, tab_ctx())
+  return ok and busy == true
+end
+
+---Does the tab want its rows re-rendered per ticker tick?
+---@param tab manicule.PanelTab
+---@return boolean
+local function tab_animated(tab)
+  if not tab.animated then
+    return false
+  end
+  local ok, animated = pcall(tab.animated, tab_ctx())
+  return ok and animated == true
 end
 
 ---The handler a tab declared for `lhs`, matched by termcode so spelling
@@ -319,6 +374,9 @@ function M.register_tab(spec)
   vim.validate("spec.keymaps", spec.keymaps, "table", true)
   vim.validate("spec.on_show", spec.on_show, "function", true)
   vim.validate("spec.on_hide", spec.on_hide, "function", true)
+  vim.validate("spec.prefetch", spec.prefetch, "boolean", true)
+  vim.validate("spec.busy", spec.busy, "function", true)
+  vim.validate("spec.animated", spec.animated, "function", true)
   if spec.name == "files" or spec.name == "comments" or tab_by_name(spec.name) then
     error(("manicule: panel tab %q is already registered"):format(spec.name))
   end
@@ -870,6 +928,12 @@ local function update_winbar(comment_count)
     if not label then
       local tab = tab_by_name(view)
       label = tab and tab_title(tab) or view
+      -- Busy tabs spin in the tab bar: `<title> <frame>`, the frame
+      -- advanced by the shared ticker (see sync_spinner). The spinner
+      -- rides the winbar only — busy never rebuilds rows.
+      if tab and tab_busy(tab) then
+        label = label .. " " .. SPINNER_FRAMES[spinner_index]
+      end
     end
     parts[#parts + 1] = ("%%#%s#%s"):format(hl, winbar_escape(label))
   end
@@ -966,8 +1030,13 @@ local function render(comment_records)
     rows, comment_count = build_comment_rows(comment_records)
   end
   -- After the row build: the tab bar's Comments count derives from the
-  -- same list() call that produced the rows.
+  -- same list() call that produced the rows. The count is kept for the
+  -- ticker's winbar-only repaints, and the ticker itself is started or
+  -- stopped to match what this render revealed (a fetch beginning or
+  -- ending, animation gaining/losing its subject).
+  last_comment_count = comment_count or 0
   update_winbar(comment_count)
+  sync_spinner()
 
   local lines = {}
   line_data = {}
@@ -1013,6 +1082,74 @@ local function refresh(comment_records)
   render(comment_records)
   local max_row = math.max(1, #line_data)
   pcall(vim.api.nvim_win_set_cursor, panel_winid, { math.min(saved[1], max_row), saved[2] })
+end
+
+-- ------------------------------------------------------------------
+-- Spinner ticker (state and forward declaration near the top). One
+-- timer serves every tab; each tick advances the frame and does the
+-- CHEAPEST repaint that shows it: a full row refresh only when the
+-- current tab is animated, otherwise just the winbar (busy titles).
+-- ------------------------------------------------------------------
+
+local function stop_spinner()
+  if spinner_timer then
+    spinner_timer:stop()
+    spinner_timer:close()
+    spinner_timer = nil
+  end
+end
+
+---Does anything need frames right now? True while the panel window is
+---up and some available registered tab reports busy(), or the CURRENT
+---tab reports animated(). This is the ticker's run condition — checked
+---per tick, so the timer stops itself the moment everything settles.
+---@return boolean
+local function spinner_needed()
+  if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
+    return false
+  end
+  for _, tab in ipairs(registered_tabs) do
+    if tab_available(tab) and (tab_busy(tab) or (tab.name == current_view and tab_animated(tab))) then
+      return true
+    end
+  end
+  return false
+end
+
+local function spinner_tick()
+  if not spinner_needed() then
+    stop_spinner()
+    return
+  end
+  spinner_index = spinner_index % #SPINNER_FRAMES + 1
+  local tab = tab_by_name(current_view)
+  if tab and tab_animated(tab) then
+    -- Animated rows: a full refresh so build() draws the fresh frame
+    -- and recomputes anything time-derived (elapsed counters).
+    refresh()
+  else
+    -- Busy titles only: resetting the winbar is cheap and never
+    -- rebuilds rows.
+    update_winbar(last_comment_count)
+  end
+end
+
+---Start the ticker when spinner_needed(), stop it otherwise. Called
+---from every render and from M.prefetch (fetches kicked off before any
+---render notices them); hide() stops the timer directly, so it can
+---never outlive the panel window.
+function sync_spinner()
+  if not spinner_needed() then
+    stop_spinner()
+    return
+  end
+  if spinner_timer then
+    return
+  end
+  spinner_timer = uv.new_timer()
+  if spinner_timer then
+    spinner_timer:start(SPINNER_INTERVAL_MS, SPINNER_INTERVAL_MS, vim.schedule_wrap(spinner_tick))
+  end
 end
 
 ---Locator under the cursor. Keymaps are buffer-local to the panel, so
@@ -1482,6 +1619,9 @@ end
 ---exactly where it was. Idempotent — safe when the window is already
 ---gone (e.g. called from its own WinClosed).
 local function hide()
+  -- The ticker dies with the window — nothing left to animate, and a
+  -- timer surviving the panel would be a leak.
+  stop_spinner()
   local win = panel_winid
   local buf = panel_bufnr
   panel_winid = nil
@@ -1705,6 +1845,32 @@ function M.refresh()
   refresh()
 end
 
+---Eagerly run the on_show fetch of every AVAILABLE registered tab that
+---opted in (spec.prefetch) — called once by review.start, right after
+---the panel opens, so tab data is already loading before the user
+---first switches to it. The hook gets the same ctx an on_show gets,
+---WITHOUT the tab becoming current: ctx.refresh re-renders only the
+---current view, so a prefetching tab repainting from its async
+---callback is harmless. Gated by `review.prefetch` (default true);
+---no-op while the panel is closed.
+function M.prefetch()
+  local review_cfg = require("manicule.config").get().review or {}
+  if review_cfg.prefetch == false then
+    return
+  end
+  if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then
+    return
+  end
+  for _, tab in ipairs(registered_tabs) do
+    if tab.prefetch == true and tab.on_show and tab_available(tab) then
+      pcall(tab.on_show, tab_ctx())
+    end
+  end
+  -- The fetches just kicked off may already report busy; without this
+  -- the ticker would only start on the next render.
+  sync_spinner()
+end
+
 ---Open the panel (files view) for the active session. Re-renders in
 ---place when the window already exists. No-op without a session.
 function M.open()
@@ -1824,6 +1990,12 @@ end
 ---@return integer?
 function M.bufnr()
   return panel_bufnr
+end
+
+---Internal: exposed for tests — is the spinner ticker running?
+---@return boolean
+function M._spinner_active()
+  return spinner_timer ~= nil
 end
 
 return M

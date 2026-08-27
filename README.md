@@ -235,8 +235,11 @@ pair with `require("manicule").register_review_tab({...})`: a unique
 `Checks 7/9`), and a `build(ctx)` returning the rows to render.
 Optional extras: `available(session)` gates the tab per session,
 tab-local `keymaps` are active only while it is current, `on_show` is a
-lazy-fetch hook, and `ctx.refresh()` re-renders after an async fetch.
-See ARCHITECTURE.md ("Extension Points") for the full spec.
+lazy-fetch hook, `prefetch = true` fires it at review open (disable all
+eager fetching with `review.prefetch = false`), `busy`/`animated` drive
+the winbar spinner and live row ticking, and `ctx.refresh()` re-renders
+after an async fetch. See ARCHITECTURE.md ("Extension Points") for the
+full spec.
 
 When you review a PR with its head checked out, existing GitHub review
 comments are imported as manicule records and render inline. They can be

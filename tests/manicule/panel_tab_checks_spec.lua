@@ -27,6 +27,7 @@ local function fake_gh(output)
     "#!/bin/sh",
     "dir=" .. vim.fn.shellescape(home),
     'echo "$@" >> "$dir/calls.log"',
+    'if [ -f "$dir/slow" ]; then sleep 1; fi',
     'if [ -f "$dir/fail" ]; then echo "gh: kaboom" >&2; exit 1; fi',
     'cat "$dir/output.json"',
   }, script)
@@ -38,6 +39,9 @@ local function fake_gh(output)
     end,
     set_fail = function()
       vim.fn.writefile({ "" }, home .. "/fail")
+    end,
+    set_slow = function()
+      vim.fn.writefile({ "" }, home .. "/slow")
     end,
     calls = function()
       return vim.fn.readfile(home .. "/calls.log")
@@ -89,13 +93,30 @@ local function press_in_panel(row, lhs)
 end
 
 ---Enter the checks tab (files -> comments -> checks) and wait for the
----async fetch to replace the loading row.
+---async fetch to replace the loading row (which may carry a spinner
+---frame prefix while the ticker runs).
 local function enter_checks_tab()
   press_in_panel(1, "L")
   press_in_panel(1, "L")
   vim.wait(2000, function()
-    return panel_lines()[1] ~= "fetching checks\u{2026}"
+    return not panel_lines()[1]:find("fetching checks", 1, true)
   end, 10)
+end
+
+local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+
+---Is `glyph` a spinner frame (or the static ● fallback)? All candidates
+---are 3-byte UTF-8, so rows can be split as text:sub(1, 3).
+local function is_running_glyph(glyph)
+  if glyph == "\u{25CF}" then
+    return true
+  end
+  for _, frame in ipairs(SPINNER_FRAMES) do
+    if frame == glyph then
+      return true
+    end
+  end
+  return false
 end
 
 ---Content extmarks on `row` (0-indexed) using highlight group `hl`.
@@ -219,13 +240,15 @@ describe("manicule checks panel tab", function()
       start_review({ pr = 42 })
       enter_checks_tab()
 
-      assert.are.same({
-        "\u{2717} lint-test (ubuntu, nightly)  1m 48s",
-        "\u{25CF} deploy",
-        "\u{2713} build  18s",
-        "\u{25CB} docs",
-        FOOTER,
-      }, panel_lines())
+      -- The running row's glyph is a live spinner frame (● fallback),
+      -- so it is asserted separately from the static rows.
+      local rows = panel_lines()
+      assert.are.equal("\u{2717} lint-test (ubuntu, nightly)  1m 48s", rows[1])
+      assert.is_true(is_running_glyph(rows[2]:sub(1, 3)), rows[2])
+      assert.are.equal(" deploy", rows[2]:sub(4))
+      assert.are.equal("\u{2713} build  18s", rows[3])
+      assert.are.equal("\u{25CB} docs", rows[4])
+      assert.are.equal(FOOTER, rows[5])
 
       -- One gh call, against the session's PR.
       assert.are.same({ "pr checks 42 --json name,state,link,startedAt,completedAt" }, gh.calls())
@@ -330,16 +353,130 @@ describe("manicule checks panel tab", function()
       start_review({ root = root })
       enter_checks_tab()
 
-      assert.are.same({
-        "\u{2717} ci  40s",
-        "\u{25CF} nightly",
-        "\u{2713} docs  5s",
-        "\u{25CB} optional",
-        FOOTER,
-      }, panel_lines())
+      local rows = panel_lines()
+      assert.are.equal("\u{2717} ci  40s", rows[1])
+      assert.is_true(is_running_glyph(rows[2]:sub(1, 3)), rows[2])
+      assert.are.equal(" nightly", rows[2]:sub(4))
+      assert.are.equal("\u{2713} docs  5s", rows[3])
+      assert.are.equal("\u{25CB} optional", rows[4])
+      assert.are.equal(FOOTER, rows[5])
       assert.are.same({
         "run list --branch main --json name,status,conclusion,url,startedAt,updatedAt --limit 30",
       }, gh.calls())
+    end)
+  end)
+
+  describe("prefetch and live updates", function()
+    it("prefetches at session open: gh runs before the tab is entered", function()
+      local gh = fake_gh(PR_CHECKS)
+      start_review({ pr = 42 })
+      vim.wait(2000, function()
+        return #gh.calls() == 1
+      end, 10)
+      assert.are.same({ "pr checks 42 --json name,state,link,startedAt,completedAt" }, gh.calls())
+      -- The landed fetch decorates the title while Files is still current.
+      vim.wait(2000, function()
+        return winbar():find("Checks \u{2717}", 1, true) ~= nil
+      end, 10)
+      assert.is_truthy(winbar():find("Checks \u{2717}", 1, true), winbar())
+      assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
+    end)
+
+    it("review.prefetch = false keeps the fetch lazy", function()
+      local gh = fake_gh(PR_CHECKS)
+      require("manicule.config").get().review.prefetch = false
+      start_review({ pr = 42 })
+      vim.wait(300)
+      assert.are.equal(0, #gh.calls(), "prefetch fired despite review.prefetch = false")
+      enter_checks_tab()
+      assert.are.equal(1, #gh.calls())
+    end)
+
+    it("animates running rows: braille frame and a live elapsed counter", function()
+      local started = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time() - 5)
+      fake_gh(vim.json.encode({
+        { name = "deploy", state = "IN_PROGRESS", link = "https://example.test/runs/3", startedAt = started },
+      }))
+      start_review({ pr = 42 })
+      enter_checks_tab()
+
+      local function glyph()
+        return panel_lines()[1]:sub(1, 3)
+      end
+      local function seconds()
+        return tonumber(panel_lines()[1]:match("running (%d+)s"))
+      end
+      local line = panel_lines()[1]
+      assert.is_truthy(line:find(" deploy  running ", 1, true), line)
+      assert.is_true(is_running_glyph(glyph()), line)
+      assert.are_not.equal("\u{25CF}", glyph(), "running glyph is the static fallback, not a frame")
+
+      -- The frame advances across ticks...
+      local first_glyph = glyph()
+      vim.wait(2000, function()
+        return glyph() ~= first_glyph
+      end, 10)
+      assert.are_not.equal(first_glyph, glyph(), "frame did not advance")
+
+      -- ...and the elapsed counter is recomputed per build, so it ticks.
+      local first_seconds = assert(seconds(), panel_lines()[1])
+      vim.wait(3000, function()
+        return seconds() ~= first_seconds
+      end, 50)
+      assert.is_true((seconds() or 0) > first_seconds, "elapsed counter froze")
+    end)
+
+    it("the loading row carries a spinner frame while fetching", function()
+      local gh = fake_gh(ALL_PASS)
+      gh.set_slow()
+      start_review({ pr = 42 }) -- prefetch kicks off the slow fetch
+      press_in_panel(1, "L")
+      press_in_panel(1, "L") -- checks current while the fetch is in flight
+
+      local line = panel_lines()[1]
+      assert.is_truthy(line:find("fetching checks", 1, true), line)
+      assert.is_true(is_running_glyph(line:sub(1, 3)), line)
+      -- The ticker animates the loading row too.
+      vim.wait(2000, function()
+        local now = panel_lines()[1]
+        return now ~= line and now:find("fetching checks", 1, true) ~= nil
+      end, 10)
+      assert.are_not.equal(line, panel_lines()[1], "loading row froze")
+    end)
+
+    it("repolls a running check every 30s while the tab is current", function()
+      local gh = fake_gh(PR_CHECKS)
+      start_review({ pr = 42 })
+      enter_checks_tab()
+      assert.are.equal(1, #gh.calls())
+
+      -- Age the fetch past the repoll threshold; the ticker's next build
+      -- notices and quietly refetches (rows stay on screen meanwhile).
+      gh.set_output(ALL_PASS)
+      local st = checks()._state_for(require("manicule.review").state())
+      st.fetched_at = os.time() - 30
+      vim.wait(2000, function()
+        return #gh.calls() == 2
+      end, 10)
+      assert.are.equal(2, #gh.calls(), "repoll did not refetch")
+      vim.wait(2000, function()
+        return panel_lines()[1] == "\u{2713} build  18s"
+      end, 10)
+      assert.are.same({ "\u{2713} build  18s", "\u{2713} lint  2m 14s", FOOTER }, panel_lines())
+    end)
+
+    it("does not repoll when nothing is running", function()
+      local gh = fake_gh(ALL_PASS)
+      start_review({ pr = 42 })
+      enter_checks_tab()
+      assert.are.equal(1, #gh.calls())
+
+      local st = checks()._state_for(require("manicule.review").state())
+      st.fetched_at = os.time() - 3600
+      -- Force renders: builds must see the stale clock and still not fetch.
+      vim.api.nvim_exec_autocmds("User", { pattern = "ManiculeEdited" })
+      vim.wait(300)
+      assert.are.equal(1, #gh.calls(), "repolled with no running check")
     end)
   end)
 

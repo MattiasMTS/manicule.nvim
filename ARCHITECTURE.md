@@ -334,8 +334,18 @@ require("manicule").register_review_tab({
   project = false,                     -- optional: also offer the tab in
                                        -- :ManiculeList project mode (default: no)
   build = function(ctx)                -- rows for render;
-    -- ctx = { session, bufnr, width, refresh }
+    -- ctx = { session, bufnr, width, refresh, spinner_frame }
     return { { text = "lint ok", spans = { { 0, 4, "DiagnosticOk" } }, data = { id = 1 } } }
+  end,
+  prefetch = true,                     -- optional: fire on_show once at review
+                                       -- open (gated by `review.prefetch`)
+  busy = function(ctx)                 -- optional: true while fetching — the
+    return false                       -- winbar title gets a spinner frame
+  end,
+  animated = function(ctx)             -- optional: true while rows should tick —
+    return false                       -- the panel re-renders the CURRENT tab
+                                       -- ~100ms so build() can draw
+                                       -- ctx.spinner_frame / live counters
   end,
   keymaps = {                          -- buffer-local, active only while current
     ["<CR>"] = function(row, ctx) end, -- row = the line_data entry under the cursor

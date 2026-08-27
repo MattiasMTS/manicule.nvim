@@ -3,11 +3,14 @@
 -- Registered through review/tabs/init.lua on the first panel open.
 -- Available only when the active session carries a PR number in its
 -- sink_ctx (a `:ManiculeReview pr <n>` session) and the gh CLI is
--- executable. PR details are fetched lazily on first show — one async
--- `gh pr view`, cached per session+PR — and the threads section derives
--- entirely from records review/import.lua already materialized locally,
--- so rendering never networks beyond that single fetch. A failed fetch
--- renders as a dim error row; the rest of the tab stays usable.
+-- executable. PR details are fetched eagerly at session open
+-- (spec.prefetch, gated by `review.prefetch`) or lazily on first show
+-- — either way one async `gh pr view`, cached per session+PR, with the
+-- registry's winbar spinner marking the in-flight window (spec.busy) —
+-- and the threads section derives entirely from records
+-- review/import.lua already materialized locally, so rendering never
+-- networks beyond that single fetch. A failed fetch renders as a dim
+-- error row; the rest of the tab stays usable.
 
 local M = {}
 
@@ -64,6 +67,17 @@ end
 ---@return boolean
 local function available(session)
   return pr_number(session) ~= nil and require("manicule.sinks.helpers").executable(gh_cli())
+end
+
+---True while the `gh pr view` fetch is in flight — the slot is claimed
+---but neither data nor an error has landed. Drives the registry's
+---winbar spinner next to the tab title. No row animation: the header
+---placeholder is static text.
+---@param ctx manicule.PanelTabCtx
+---@return boolean
+local function busy(ctx)
+  local slot = cached(ctx.session)
+  return slot ~= nil and slot.data == nil and slot.err == nil
 end
 
 ---Winbar label: `PR #<n>`, decorated with the review decision once the
@@ -347,6 +361,8 @@ function M.setup()
     available = available,
     build = build,
     on_show = fetch,
+    prefetch = true,
+    busy = busy,
     keymaps = {
       ["<CR>"] = jump,
       S = send_review,

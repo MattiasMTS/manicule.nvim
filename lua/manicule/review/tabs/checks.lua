@@ -10,20 +10,37 @@
 -- {name, state pass|fail|running|skipped, url, elapsed} and render
 -- sorted fail → running → pass → skipped.
 --
--- The fetch runs asynchronously (sinks helpers' system_async) on
--- entering the tab and is cached per session with a `fetching` guard;
--- `R` drops the cache and refetches, `<CR>`/`gl` open the row's page in
--- the browser. No polling/timers in v1 — a refresh poll could hang off
--- on_show later if live updates prove worth it.
+-- The fetch runs asynchronously (sinks helpers' system_async), kicked
+-- off eagerly at session open (spec.prefetch, gated by the
+-- `review.prefetch` config) and again on entering the tab, cached per
+-- session with a `fetching` guard; `R` drops the cache and refetches,
+-- `<CR>`/`gl` open the row's page in the browser.
+--
+-- Live updates ride the panel's shared spinner ticker: `busy` puts a
+-- winbar spinner next to the title while a fetch is in flight, and
+-- `animated` makes the ticker re-render the rows each tick while the
+-- tab is current and a check is running — so running rows spin their
+-- glyph and their elapsed counter (recomputed per build) ticks. The
+-- same builds drive a GENTLE REPOLL: while a check is running, a build
+-- that finds the last fetch older than REPOLL_SECONDS quietly
+-- refetches (cached rows stay on screen). Repolling stops with the
+-- animation — tab left, panel closed, or nothing running.
 
 local M = {}
 
+---Seconds between background refetches while the tab is CURRENT and a
+---check is still running. The panel ticker re-renders the tab each
+---tick in that state, so build() is the natural clock — no timer of
+---our own to leak.
+local REPOLL_SECONDS = 30
+
 ---Per-session tab state, weak-keyed so it dies with the session table:
----  upstream  boolean|nil  cached `@{upstream}` probe (nil = not probed)
----  fetching  boolean      an async gh call is in flight
----  done      boolean      a fetch completed (checks or error below set)
----  checks    table[]|nil  normalized {name, state, url, elapsed}
----  error     string|nil   fetch failure message (rendered as a dim row)
+---  upstream    boolean|nil  cached `@{upstream}` probe (nil = not probed)
+---  fetching    boolean      an async gh call is in flight
+---  done        boolean      a fetch completed (checks or error below set)
+---  fetched_at  integer|nil  epoch seconds of the last completed fetch
+---  checks      table[]|nil  normalized {name, state, url, started, completed}
+---  error       string|nil   fetch failure message (rendered as a dim row)
 ---@type table<table, table>
 local states = setmetatable({}, { __mode = "k" })
 
@@ -87,7 +104,13 @@ local function iso_epoch(ts)
     min = tonumber(mi),
     sec = tonumber(s),
   })
-  return t + os.difftime(t, os.time(os.date("!*t", t)))
+  -- The UTC field table comes back with isdst=false; during local DST
+  -- that makes os.time mix standard/summer interpretations and the
+  -- offset gains a phantom hour. Mirror the local flag so both
+  -- os.time calls share one DST assumption.
+  local utc = os.date("!*t", t)
+  utc.isdst = os.date("*t", t).isdst
+  return t + os.difftime(t, os.time(utc))
 end
 
 ---`18s` / `2m 14s`, clamped at zero.
@@ -141,7 +164,10 @@ local PR_STATES = {
   STALE = "fail",
 }
 
----One `gh pr checks` item -> {name, state, url, elapsed}.
+---One `gh pr checks` item -> {name, state, url, started, completed}.
+---The raw timestamps are kept (instead of a pre-formatted elapsed
+---string) so build() can recompute a running check's elapsed per
+---render and the counter ticks live.
 ---@param item table
 ---@return table
 local function pr_check(item)
@@ -150,7 +176,8 @@ local function pr_check(item)
     name = tostring(item.name or "?"),
     state = state,
     url = type(item.link) == "string" and item.link or nil,
-    elapsed = M._elapsed(item.startedAt, state ~= "running" and item.completedAt or nil),
+    started = item.startedAt,
+    completed = state ~= "running" and item.completedAt or nil,
   }
 end
 
@@ -158,7 +185,8 @@ end
 ---COMPLETED runs (failure/cancelled/timed_out/… all read as "fail").
 local RUN_CONCLUSIONS = { success = "pass", neutral = "pass", skipped = "skipped" }
 
----One `gh run list` item -> {name, state, url, elapsed}.
+---One `gh run list` item -> {name, state, url, started, completed}
+---(raw timestamps, like pr_check).
 ---@param item table
 ---@return table
 local function run_check(item)
@@ -172,7 +200,8 @@ local function run_check(item)
     name = tostring(item.name or "?"),
     state = state,
     url = type(item.url) == "string" and item.url or nil,
-    elapsed = M._elapsed(item.startedAt, state ~= "running" and item.updatedAt or nil),
+    started = item.startedAt,
+    completed = state ~= "running" and item.updatedAt or nil,
   }
 end
 
@@ -245,6 +274,7 @@ local function fetch(ctx)
   require("manicule.sinks.helpers").system_async(argv, { cwd = session.root }, function(result)
     st.fetching = false
     st.done = true
+    st.fetched_at = os.time() -- the repoll clock (see maybe_repoll)
     local ok, decoded = pcall(vim.json.decode, result.stdout)
     if ok and type(decoded) == "table" and vim.islist(decoded) then
       local checks = {}
@@ -333,16 +363,37 @@ local GLYPHS = {
 ---Render order: failures first, then in-flight, passes, skips.
 local ORDER = { "fail", "running", "pass", "skipped" }
 
+---Any check still in flight? Running checks are what the row animation
+---and the gentle repoll key off.
+---@param checks table[]|nil
+---@return boolean
+local function any_running(checks)
+  for _, check in ipairs(checks or {}) do
+    if check.state == "running" then
+      return true
+    end
+  end
+  return false
+end
+
 ---`✗ lint-test (ubuntu, nightly)  1m 48s` — colored glyph, dim elapsed.
+---Running rows swap the static ● for the panel's current spinner frame
+---and recompute their `running 34s…` elapsed from the raw timestamps,
+---so each ticker-driven build advances both.
 ---@param check table normalized check
+---@param frame string|nil ctx.spinner_frame
 ---@return manicule.PanelRow
-local function check_row(check)
-  local glyph = GLYPHS[check.state]
-  local text = glyph[1] .. " " .. check.name
-  local spans = { { 0, #glyph[1], glyph[2] } }
-  if check.elapsed then
-    spans[#spans + 1] = { #text + 2, #text + 2 + #check.elapsed, "Comment" }
-    text = text .. "  " .. check.elapsed
+local function check_row(check, frame)
+  local glyph, glyph_hl = GLYPHS[check.state][1], GLYPHS[check.state][2]
+  if check.state == "running" and frame then
+    glyph = frame
+  end
+  local text = glyph .. " " .. check.name
+  local spans = { { 0, #glyph, glyph_hl } }
+  local elapsed = M._elapsed(check.started, check.completed, os.time())
+  if elapsed then
+    spans[#spans + 1] = { #text + 2, #text + 2 + #elapsed, "Comment" }
+    text = text .. "  " .. elapsed
   end
   return {
     text = text,
@@ -360,28 +411,68 @@ end
 
 local FOOTER = "<CR> open in browser \u{00B7} R refresh"
 
+---Gentle repoll: when a build finds the tab showing a RUNNING check
+---whose data is older than REPOLL_SECONDS, clear `done` (re-arming the
+---fetch guards) and refetch in the background. Builds only happen
+---while the tab is current and the panel is open, and the ticker only
+---drives them while something runs — so the repoll stops exactly when
+---the task does: tab left, panel closed, or nothing running.
+---@param ctx manicule.PanelTabCtx
+---@param st table
+local function maybe_repoll(ctx, st)
+  if st.fetching or not st.done or not any_running(st.checks) then
+    return
+  end
+  if os.time() - (st.fetched_at or 0) < REPOLL_SECONDS then
+    return
+  end
+  st.done = false
+  fetch(ctx)
+end
+
 ---@param ctx manicule.PanelTabCtx
 ---@return manicule.PanelRow[]
 local function build(ctx)
   local st = ctx.session and state_for(ctx.session) or {}
+  maybe_repoll(ctx, st)
   local rows = {}
-  if st.fetching then
-    rows[#rows + 1] = dim_row("fetching checks\u{2026}")
-  elseif st.error then
-    rows[#rows + 1] = dim_row(st.error)
-  elseif st.checks and #st.checks == 0 then
-    rows[#rows + 1] = dim_row("no checks found")
-  elseif st.checks then
+  if st.checks and #st.checks > 0 then
+    -- Cached rows render even while a repoll is in flight — a
+    -- background refresh must not flash the loading row.
     for _, state in ipairs(ORDER) do
       for _, check in ipairs(st.checks) do
         if check.state == state then
-          rows[#rows + 1] = check_row(check)
+          rows[#rows + 1] = check_row(check, ctx.spinner_frame)
         end
       end
     end
+  elseif st.fetching then
+    rows[#rows + 1] = dim_row((ctx.spinner_frame or "\u{25CF}") .. " fetching checks\u{2026}")
+  elseif st.error then
+    rows[#rows + 1] = dim_row(st.error)
+  elseif st.checks then
+    rows[#rows + 1] = dim_row("no checks found")
   end
   rows[#rows + 1] = dim_row(FOOTER)
   return rows
+end
+
+---Winbar spinner while a fetch is in flight (initial, R, or repoll).
+---@param ctx manicule.PanelTabCtx
+---@return boolean
+local function busy(ctx)
+  local st = ctx.session and states[ctx.session] or nil
+  return st ~= nil and st.fetching == true
+end
+
+---Row animation while anything needs live frames: a running check
+---(spinning glyph + ticking elapsed) or an in-flight fetch showing the
+---loading row. Only consulted while the tab is current.
+---@param ctx manicule.PanelTabCtx
+---@return boolean
+local function animated(ctx)
+  local st = ctx.session and states[ctx.session] or nil
+  return st ~= nil and (st.fetching == true or any_running(st.checks))
 end
 
 ---Open the row's check page in the browser via vim.ui.open (0.12 has
@@ -430,6 +521,9 @@ function M.setup()
     available = available,
     build = build,
     on_show = fetch,
+    prefetch = true,
+    busy = busy,
+    animated = animated,
     keymaps = {
       ["<CR>"] = function(row)
         open_url(row)
@@ -440,6 +534,14 @@ function M.setup()
       ["R"] = refetch,
     },
   })
+end
+
+---Internal: exposed for tests — the per-session tab state (repoll
+---clock, fetch guards).
+---@param session table
+---@return table
+function M._state_for(session)
+  return state_for(session)
 end
 
 return M

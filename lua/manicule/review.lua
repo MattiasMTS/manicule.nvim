@@ -502,6 +502,11 @@ function M.start(opts)
   -- The panel is an owned scratch-buffer split (files/comments views);
   -- review mode never touches the quickfix stack.
   require("manicule.review.panel").open()
+  -- Session and panel both exist now: eagerly kick off the fetches of
+  -- prefetch-enabled panel tabs (PR header, CI checks) so their first
+  -- show renders data instead of a loading row. Gated by
+  -- `review.prefetch`; the fetches are async and never block start.
+  require("manicule.review.panel").prefetch()
   return true
 end
 

@@ -35,6 +35,7 @@ local M = {}
 ---@field mode "split"|"unified" Diff rendering for `:ManiculeReview`. "split" opens a side-by-side `:diffsplit` pair; "unified" paints the diff inline on the worktree buffer.
 ---@field fold_unchanged boolean Collapse unchanged regions into folds (default false; split mode gets nofoldenable when off).
 ---@field context integer Unified mode only: lines of context kept around each hunk (and the fold's minimum size).
+---@field prefetch boolean Eagerly run opted-in panel tabs' fetches when a review session opens (default true); false keeps every tab fetch lazy (on first show).
 ---@field panel manicule.ReviewPanelConfig Review panel placement.
 
 ---@class manicule.SinksConfig
@@ -92,6 +93,11 @@ M.defaults = {
     fold_unchanged = false,
     -- Unified mode: context lines kept around each hunk.
     context = 3,
+    -- Eagerly fetch panel-tab data (PR header, CI checks) when a review
+    -- session opens, so switching to a tab shows results instead of a
+    -- loading row. Set false to keep every tab fetch lazy (on first
+    -- show). Only tabs that opted in (spec.prefetch) are affected.
+    prefetch = true,
     -- Review panel placement. "bottom" (default) is a full-width split
     -- below the diff; "left"/"right" are full-height side splits
     -- ("right" places outermost, so it coexists with the comments
@@ -184,6 +190,7 @@ function M.setup(opts)
     vim.validate("review.mode", opts.review.mode, "string", true)
     vim.validate("review.fold_unchanged", opts.review.fold_unchanged, "boolean", true)
     vim.validate("review.context", opts.review.context, "number", true)
+    vim.validate("review.prefetch", opts.review.prefetch, "boolean", true)
     if opts.review.mode ~= nil and opts.review.mode ~= "split" and opts.review.mode ~= "unified" then
       error(('manicule: review.mode must be "split" or "unified", got %q'):format(tostring(opts.review.mode)))
     end
