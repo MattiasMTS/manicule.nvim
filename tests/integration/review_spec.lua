@@ -459,6 +459,11 @@ describe("manicule review session", function()
       on_choice(items[1])
     end
     local ok, err = pcall(vim.cmd, "ManiculeReview pr")
+    -- The PR list fetch is async too now: the picker fires only when the
+    -- fake gh answers, so the stub must stay installed until then.
+    vim.wait(2000, function()
+      return seen_item ~= nil
+    end)
     vim.ui.select = original_select
     -- PATH/cwd stay in place until the ASYNC resolve chain (gh pr view,
     -- staging) has attached — the command only opened the shell.
