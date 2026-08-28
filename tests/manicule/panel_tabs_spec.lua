@@ -630,7 +630,7 @@ describe("manicule panel tab registry in project mode", function()
   it("excludes registered tabs by default", function()
     panel().register_tab(tab_spec())
     H.edit_project_file(ctx, "a.lua", { "return 1" })
-    panel().list()
+    panel().open_comments()
 
     assert.is_nil(winbar():find("Checks", 1, true), winbar())
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(assert(panel().bufnr()), "n")) do
@@ -642,7 +642,7 @@ describe("manicule panel tab registry in project mode", function()
   it("includes project = true tabs and wires H/L to reach them", function()
     panel().register_tab(tab_spec({ project = true }))
     H.edit_project_file(ctx, "a.lua", { "return 1" })
-    panel().list()
+    panel().open_comments()
 
     assert.is_truthy(winbar():find("%#ManiculePanelTab#Checks", 1, true), winbar())
     press_in_panel(1, "L") -- comments -> checks

@@ -24,16 +24,6 @@ function M.start_line(record)
   return 1
 end
 
----1-indexed start column of `record`, or 1 when the range is missing.
----@param record table
----@return integer
-function M.start_col(record)
-  if record and record.range and record.range.start then
-    return (record.range.start[2] or 0) + 1
-  end
-  return 1
-end
-
 ---1-indexed end line of `record`, or nil when the range (or a numeric
 ---end row) is missing.
 ---@param record table

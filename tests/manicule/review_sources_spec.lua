@@ -340,7 +340,7 @@ describe("manicule review sources", function()
     -- The PR number must reach the session's sink context, or
     -- :ManiculeReviewFinish github falls back to `gh pr view` on the
     -- current branch and posts to the wrong PR.
-    assert.are.same({ pr = 42 }, job.sink_ctx)
+    assert.are.same({ pr = 42 }, job.ctx)
     assert.are.equal(1, #job.files)
     assert.are.equal("a.lua", job.files[1].path)
     assert.are.equal(root .. "/a.lua", job.files[1].right)
@@ -365,7 +365,7 @@ describe("manicule review sources", function()
     vim.env.PATH = saved_path
 
     assert.is_nil(err)
-    assert.are.same({ pr = 42 }, job.sink_ctx)
+    assert.are.same({ pr = 42 }, job.ctx)
     assert.are.equal(1, #job.files)
     -- With core.quotePath=true a non -z diff reports `"\303\245.txt"`;
     -- the staged pair must use the literal path on both sides.
@@ -896,5 +896,51 @@ describe("manicule review sources", function()
       assert.are.equal(1, #sent)
       assert.are.equal("local comment", sent[1].body)
     end)
+  end)
+end)
+
+describe("manicule review source registration", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  it("register() validates the resolver shape", function()
+    local S = require("manicule.review.sources")
+    local ok, err = pcall(S.register, { match = function() end, resolve = function() end })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("name", 1, true))
+
+    ok, err = pcall(S.register, { name = "x", match = "not a function", resolve = function() end })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("match", 1, true))
+
+    ok, err = pcall(S.register, { name = "x", match = function() end })
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("resolve", 1, true))
+
+    assert.is_false(pcall(S.register, nil))
+  end)
+
+  it("manicule.register_review_source registers a resolver that shadows builtins", function()
+    -- The magic first arg keeps the resolver inert for every other spec
+    -- (registration is process-global; there is no registry reset).
+    local marker = "hub-spec-" .. tostring(math.random(1e6))
+    require("manicule").register_review_source({
+      name = "hub-spec",
+      match = function(fargs)
+        return fargs[1] == marker
+      end,
+      resolve = function()
+        return { files = { { left = "/l", right = "/r", status = "M", path = "r" } }, label = "hub-spec" }
+      end,
+    })
+    -- Prepend-shadows: the fresh resolver wins over the builtin git
+    -- resolver, which also matches single-argument invocations.
+    local job = assert(require("manicule.review.sources").resolve({ marker }, {}))
+    assert.are.equal("hub-spec", job.label)
   end)
 end)

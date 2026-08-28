@@ -406,19 +406,19 @@ worktree right). One active session at a time, in its own tab page.
   `review.panel.layout` and toggled with `t` (layout and collapse state are
   session-scoped, reset in `close()`). File rows behave identically in both
   layouts: `<CR>` drills into a scoped comments view or calls
-  `review.open(idx)`; the Comments tab lists the session records (resolved
+  `review.open_pair(idx)`; the Comments tab lists the session records (resolved
   ones dimmed, `dd`/`ce`/`u`/`<C-r>`/`r`/`gr` buffer-local). Lifecycle
   mirrors `ui/rail.lua`: dedicated augroup, WinClosed teardown,
   window+buffer+autocmds dropped on hide, full state reset in `close()`
   (called by `stop()`).
-- Project mode (`panel.list()`, wired to `:ManiculeList`): outside a
+- Project mode (`panel.open_comments()`, wired to `:ManiculeList`): outside a
   session, the same panel opens with a single `Comments N · project` tab
   listing every project comment (paths project-root-relative, root
   captured from the invoking buffer). Same comment-row maps; `<CR>` opens
   the file in the previous window; `q` closes in any placement; refreshes
   coalesce over the same `User Manicule*` events. Inside a session,
   `:ManiculeList` focuses the review panel on its Comments tab. There is
-  no quickfix machinery anywhere — `manicule.list()` is a pure query.
+  no quickfix machinery anywhere — `manicule.list()` renders nothing (its default position sync is its only side effect; `opts.sync = false` disables it).
 - `finish()`: collects session comments via URI filter, dispatches to
   configured sink; auto-flushes on `VimLeavePre` when sink is configured and
   comments exist.
@@ -446,7 +446,7 @@ worktree right). One active session at a time, in its own tab page.
 - Removed lines are virtual, so they are not commentable — the same
   restriction split mode has on its read-only baseline side.
 - `]h` / `[h` navigate hunks; both maps are buffer-local and removed on
-  `clear()`. `review.open()`/`stop()` call `clear_all()`.
+  `clear()`. `review.open_pair()`/`stop()` call `clear_all()`.
 
 **Resolver registry** (`lua/manicule/review/sources.lua`):
 - Turns `:ManiculeReview` arguments into staged file pairs.

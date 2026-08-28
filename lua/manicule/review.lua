@@ -20,7 +20,8 @@ local uv = vim.uv
 ---@field files {left: string, right: string, status: string, path: string}[]
 ---@field label string
 ---@field sink string|nil
----@field sink_ctx table|nil
+---@field ctx table|nil sink dispatch context (finish() passes it to the sink)
+---@field sink_ctx table|nil DEPRECATED alias of `ctx` (the same table) kept one wave for out-of-tree readers; remove in wave 2
 ---@field index integer
 ---@field tab integer
 ---@field root string|nil project root the worktree files live under (cached by start)
@@ -167,8 +168,12 @@ local function unmap_navigation(mapped_bufs)
   end
 end
 
+---Open the pair at `index` in the session tab: rebuild the diff layout
+---(split or unified per `review.mode`), set the winbar breadcrumbs, and
+---point the panel's files view at the pair. Out-of-range indexes wrap.
+---No-op without a session.
 ---@param index integer
-function M.open(index)
+function M.open_pair(index)
   if not session then
     return
   end
@@ -267,23 +272,29 @@ local function seek_unviewed(dir)
       return index
     end
   end
-  return session.index + dir -- all viewed: plain cycle (M.open wraps)
+  return session.index + dir -- all viewed: plain cycle (M.open_pair wraps)
 end
 
 -- next/prev mark the pair the user navigates AWAY from as viewed (the
 -- natural reading flow; the panel's `v` un-marks) and then skip pairs
 -- already viewed while any unviewed pair remains.
+
+---Open the nearest unviewed pair after the current one (wrapping),
+---marking the pair navigated away from as viewed. With every pair
+---viewed, plain-cycles forward. No-op without a session.
 function M.next()
   if session then
     M.set_viewed(session.index, true)
-    M.open(seek_unviewed(1))
+    M.open_pair(seek_unviewed(1))
   end
 end
 
+---`M.next` in the other direction: the nearest unviewed pair before the
+---current one (wrapping). No-op without a session.
 function M.prev()
   if session then
     M.set_viewed(session.index, true)
-    M.open(seek_unviewed(-1))
+    M.open_pair(seek_unviewed(-1))
   end
 end
 
@@ -368,31 +379,35 @@ local function pair_diffstat(pair)
   return { added = added, removed = removed }
 end
 
----Per-pair {added, removed} counts over explicit pairs. Exposed for the
----benchmark; sessions go through M.diffstat().
----@param files {left: string, right: string, status: string}[]
----@return {added: integer, removed: integer}[]
-function M.compute_diffstat(files)
-  local stats = {}
-  for idx, pair in ipairs(files) do
-    stats[idx] = pair_diffstat(pair)
+---Per-pair `{added, removed}` line counts.
+---
+---With explicit `files`, computes the stat for exactly those pairs — a
+---plain function of the paths on disk that neither reads nor fills the
+---session cache (and needs no session at all); the benchmark uses this
+---form.
+---
+---Without arguments, the ACTIVE session's diffstat, index-aligned with
+---`state().files`. Computed ONCE, lazily on the first call (the first
+---panel render), and cached on the session — pairs are immutable, so
+---there is nothing to invalidate. The worktree side CAN change under a
+---live session; the stat deliberately stays as-of-first-request rather
+---than re-reading every pair per render (the next :ManiculeReview
+---recomputes).
+---@param files? {left: string, right: string, status: string}[] explicit pairs (bypasses the session cache)
+---@return {added: integer, removed: integer}[]|nil stats nil only for the argless form without a session
+function M.diffstat(files)
+  if files then
+    local stats = {}
+    for idx, pair in ipairs(files) do
+      stats[idx] = pair_diffstat(pair)
+    end
+    return stats
   end
-  return stats
-end
-
----The session's per-pair diffstat, index-aligned with `state().files`.
----Computed ONCE, lazily on the first call (the first panel render), and
----cached on the session — pairs are immutable, so there is nothing to
----invalidate. The worktree side CAN change under a live session; the
----stat deliberately stays as-of-first-request rather than re-reading
----every pair per render (the next :ManiculeReview recomputes).
----@return {added: integer, removed: integer}[]|nil nil without a session
-function M.diffstat()
   if not session then
     return nil
   end
   if not session.diffstat then
-    session.diffstat = M.compute_diffstat(session.files)
+    session.diffstat = M.diffstat(session.files)
   end
   return session.diffstat
 end
@@ -418,7 +433,7 @@ function M.set_diff_mode(mode)
   if session then
     -- Re-render the pair on screen so the switch is visible immediately
     -- rather than at the next file.
-    M.open(session.index)
+    M.open_pair(session.index)
   end
   vim.notify(("manicule: review diff mode is %s"):format(mode), vim.log.levels.INFO)
   return mode
@@ -436,8 +451,8 @@ end
 ---CURRENT buffer, falling back to cwd — which, from an unnamed buffer,
 ---the VimLeavePre autoflush, or a job-driven review of an external
 ---worktree, can miss the reviewed project entirely and silently drop
----the session's comments. It is passed as `_root` on every list/send
----filter instead.
+---the session's comments. It is passed as `opts.root` on every
+---list/send call instead.
 ---@param s manicule.ReviewSession
 local function build_session_cache(s)
   local uri_mod = require("manicule.uri")
@@ -465,8 +480,9 @@ end
 ---Start a review session over explicit file pairs. `stage_dirs` lists
 ---staging directories the session OWNS: stop() deletes them (and wipes
 ---any buffer still pointing into them). Resolvers report only dirs they
----created themselves.
----@param opts {files: table[], label?: string, sink?: string, sink_ctx?: table, stage_dirs?: string[]}
+---created themselves. Pure: returns instead of notifying (the command
+---layer notifies).
+---@param opts {files: table[], label?: string, sink?: string, ctx?: table, stage_dirs?: string[]}
 ---@return boolean ok, string|nil err
 function M.start(opts)
   opts = opts or {}
@@ -481,7 +497,10 @@ function M.start(opts)
     files = opts.files,
     label = opts.label or "review",
     sink = opts.sink,
-    sink_ctx = opts.sink_ctx,
+    ctx = opts.ctx,
+    -- DEPRECATED wave-2 alias: the SAME table under the old field name,
+    -- for readers outside this wave's rename (review/tabs/checks.lua).
+    sink_ctx = opts.ctx,
     stage_dirs = opts.stage_dirs,
     index = 1,
     tab = vim.api.nvim_get_current_tabpage(),
@@ -498,7 +517,7 @@ function M.start(opts)
     session.saved_diffopt = diffopt
     vim.o.diffopt = diffopt:gsub("inline:simple", "inline:word")
   end
-  M.open(1)
+  M.open_pair(1)
   -- The panel is an owned scratch-buffer split (files/comments views);
   -- review mode never touches the quickfix stack.
   require("manicule.review.panel").open()
@@ -554,9 +573,14 @@ local function cleanup_stage_dirs(stage_dirs)
   end
 end
 
+---End the active session: close the panel and session tab, remove the
+---buffer-local navigation maps, winbars, and inline paint, restore
+---diffopt, and delete owned staging dirs. Pure: returns instead of
+---notifying (the command layer notifies on false).
+---@return boolean ok, string|nil err false when no session is active
 function M.stop()
   if not session then
-    return
+    return false, "manicule: no active review session"
   end
   require("manicule.review.panel").close()
   local tab = session.tab
@@ -592,6 +616,7 @@ function M.stop()
   -- finish its send first, and leaking dirs on a hard exit is the
   -- accepted trade (in-session stop/restart is what must not leak).
   cleanup_stage_dirs(stage_dirs)
+  return true
 end
 
 ---Count the session's pending comments without side effects. Records
@@ -603,31 +628,30 @@ local function pending_comments()
   if not session then
     return {}
   end
-  return require("manicule").list({
-    _quiet = true,
-    uris = session.uri_set,
-    exclude_imported = true,
-    _root = session.root,
-  })
+  return require("manicule").list({ uris = session.uri_set, exclude_imported = true }, { root = session.root })
 end
 
----Dispatch the session's comments to the configured sink.
----@param opts? {sink?: string}
+---Dispatch the session's pending comments to the configured sink
+---(async, through manicule.send — dispatch failures notify from its
+---callback). Pure up to that dispatch: the pre-flight failures below
+---return instead of notifying; the command layer
+---(`:ManiculeReviewFinish`, the PR tab's `S`) notifies on false, and
+---the VimLeavePre autoflush pre-checks session/sink/pending so its
+---direct call cannot fail.
+---@param opts? {sink?: string} override the session's sink for this send
+---@return boolean ok, string|nil err false when there is no session, no sink, or nothing to send
 function M.finish(opts)
   opts = opts or {}
   if not session then
-    vim.notify("manicule: no active review session", vim.log.levels.WARN)
-    return
+    return false, "manicule: no active review session"
   end
   local sink = opts.sink or session.sink
   if not sink then
-    vim.notify("manicule: review session has no sink configured", vim.log.levels.WARN)
-    return
+    return false, "manicule: review session has no sink configured"
   end
   local comments = pending_comments()
   if #comments == 0 then
-    vim.notify("manicule: review has no comments to send", vim.log.levels.INFO)
-    return
+    return false, "manicule: review has no comments to send"
   end
   -- send() re-lists internally — its contract takes a filter, never
   -- pre-fetched records — so the pending_comments() gate above plus
@@ -636,9 +660,11 @@ function M.finish(opts)
   -- each pass is cheap, so the double list stays.
   require("manicule").send(
     sink,
-    { uris = session.uri_set, exclude_imported = true, _root = session.root },
-    session.sink_ctx
+    { uris = session.uri_set, exclude_imported = true },
+    session.ctx,
+    { root = session.root }
   )
+  return true
 end
 
 ---Start a review from a JSON job file written by an external driver
@@ -659,17 +685,17 @@ function M.start_from_job(path)
     vim.notify(err, vim.log.levels.ERROR)
     return false, err
   end
-  local sink_ctx = nil
+  local ctx = nil
   local sink = nil
   if type(job.return_socket) == "string" and job.return_socket ~= "" then
     sink = "socket"
-    sink_ctx = { socket = job.return_socket, job = job.id, label = job.label }
+    ctx = { socket = job.return_socket, job = job.id, label = job.label }
   end
   local ok, err = M.start({
     files = job.files,
     label = job.label or "review",
     sink = sink,
-    sink_ctx = sink_ctx,
+    ctx = ctx,
     -- External drivers own their staged files: stop() deletes them only
     -- when the job opts in by listing them under `stage_dirs`.
     stage_dirs = type(job.stage_dirs) == "table" and job.stage_dirs or nil,

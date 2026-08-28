@@ -2,7 +2,7 @@
 --
 -- Registered through review/tabs/init.lua on the first panel open.
 -- Available only when the active session carries a PR number in its
--- sink_ctx (a `:ManiculeReview pr <n>` session) and the gh CLI is
+-- ctx (a `:ManiculeReview pr <n>` session) and the gh CLI is
 -- executable. PR details are fetched eagerly at session open
 -- (spec.prefetch, gated by `review.prefetch`) or lazily on first show
 -- — either way one async `gh pr view`, cached per session+PR, with the
@@ -46,11 +46,11 @@ end
 ---@param session table|nil
 ---@return integer|nil
 local function pr_number(session)
-  local sink_ctx = session and session.sink_ctx
-  if type(sink_ctx) ~= "table" then
+  local review_ctx = session and session.ctx
+  if type(review_ctx) ~= "table" then
     return nil
   end
-  return tonumber(sink_ctx.pr)
+  return tonumber(review_ctx.pr)
 end
 
 ---The cache slot, but only when it belongs to exactly this session+PR.
@@ -233,12 +233,7 @@ local function build(ctx)
   -- resolved after (each group keeps list()'s uri → line order).
   rows[#rows + 1] = { text = "Threads", spans = { { 0, #"Threads", "Title" } } }
   local is_import = require("manicule.review.import").is_import
-  local records = require("manicule").list({
-    _quiet = true,
-    _no_sync = true,
-    uris = session.uri_set,
-    _root = session.root,
-  })
+  local records = require("manicule").list({ uris = session.uri_set }, { sync = false, root = session.root })
   local open, resolved = {}, {}
   local unsent = 0
   for _, record in ipairs(records) do
@@ -310,9 +305,13 @@ local function jump(row)
   pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
 end
 
----S: the `:ManiculeReviewFinish github` path.
+---S: the `:ManiculeReviewFinish github` path. finish() is pure, so
+---this command surface notifies its failures (same as the user command).
 local function send_review()
-  require("manicule.review").finish({ sink = "github" })
+  local ok, err = require("manicule.review").finish({ sink = "github" })
+  if not ok then
+    vim.notify(err, vim.log.levels.WARN)
+  end
 end
 
 ---R: re-run the PR comment import (the `:ManiculeReview pr <n>`

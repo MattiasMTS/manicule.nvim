@@ -57,7 +57,7 @@ describe("manicule headless workflow", function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("review this line", records[1].body)
     assert.are.equal("project", records[1].scope)
@@ -71,7 +71,7 @@ describe("manicule headless workflow", function()
     assert.are.equal(records[1].id, calls[1].comments[1].id)
     assert.are.equal("review this line", calls[1].comments[1].body)
 
-    local remaining = require("manicule").list({ _quiet = true })
+    local remaining = require("manicule").list()
     assert.are.equal(1, #remaining)
     assert.are.equal(records[1].id, remaining[1].id)
 
@@ -85,6 +85,25 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
+  it("list() syncs extmark positions by default; opts.sync = false reads as-is", function()
+    require("manicule").add({
+      body = "tracks its line",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+    local before = require("manicule").list()[1].range.start[1]
+
+    -- Push the commented line down: the anchor extmark follows the text,
+    -- but the record's stored range only catches up through a syncing
+    -- list() (or another mutating path).
+    vim.api.nvim_buf_set_lines(0, 0, 0, false, { "-- inserted above" })
+
+    local stale = require("manicule").list(nil, { sync = false })[1]
+    assert.are.equal(before, stale.range.start[1], "sync = false still moved the record")
+
+    local synced = require("manicule").list()[1]
+    assert.are.equal(before + 1, synced.range.start[1], "default list() did not sync the moved extmark")
+  end)
+
   it("can drive the command path with a fake prompt and consuming sink", function()
     vim.cmd("runtime plugin/manicule.lua")
     local events, stop_capture = H.capture_events({ "ManiculeAdded", "ManiculeSent", "ManiculeDeleted" })
@@ -96,7 +115,7 @@ describe("manicule headless workflow", function()
     end
 
     vim.cmd("ManiculeAdd")
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("from prompt", records[1].body)
 
@@ -107,7 +126,7 @@ describe("manicule headless workflow", function()
     assert.are.equal(1, #calls)
     assert.are.equal(1, #calls[1].comments)
     assert.are.equal("from prompt", calls[1].comments[1].body)
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
 
     assert.are.equal("ManiculeAdded", events[1].pattern)
     assert.are.equal("ManiculeSent", events[2].pattern)
@@ -131,7 +150,7 @@ describe("manicule headless workflow", function()
     vim.cmd("ManiculeEdit 1")
     ui.prompt = original_prompt
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("edited body", records[1].body)
     assert.are.equal(0, #responses)
@@ -194,7 +213,7 @@ describe("manicule headless workflow", function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
 
     local qf_title_before = vim.fn.getqflist({ title = 1 }).title
@@ -290,9 +309,9 @@ describe("manicule headless workflow", function()
     end, 10))
 
     assert.is_true(vim.wait(1000, function()
-      return #require("manicule").list({ _quiet = true }) == 1
+      return #require("manicule").list() == 1
     end, 10))
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("line one\nline two", records[1].body)
   end)
@@ -317,7 +336,7 @@ describe("manicule headless workflow", function()
       return not require("manicule.ui.editor").is_active()
     end, 10))
     assert.are.equal(target_win, vim.api.nvim_get_current_win())
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
   end)
 
   it("keeps insert enter as newline when other plugins map enter", function()
@@ -353,9 +372,9 @@ describe("manicule headless workflow", function()
     vim.cmd.stopinsert()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
     assert.is_true(vim.wait(1000, function()
-      return #require("manicule").list({ _quiet = true }) == 1
+      return #require("manicule").list() == 1
     end, 10))
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal("conflict first\nconflict second", records[1].body)
   end)
 
@@ -397,7 +416,7 @@ describe("manicule headless workflow", function()
     assert.is_true(wait_for_popup_count("delete only this popup", 1))
     assert.is_true(wait_for_popup_count("keep this popup visible", 1))
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local delete_id
     for _, record in ipairs(records) do
       if record.body == "delete only this popup" then
@@ -485,7 +504,7 @@ describe("manicule headless workflow", function()
 
     vim.notify = original_notify
 
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
     assert.are.equal(0, #events)
     assert.are.equal(vim.log.levels.WARN, notifications[1].level)
     assert.is_truthy(notifications[1].msg:find("quickfix buffers don't accept comments", 1, true))
@@ -498,7 +517,7 @@ describe("manicule headless workflow", function()
       body = "keep this body",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
 
     local ui = require("manicule.ui")
@@ -509,7 +528,7 @@ describe("manicule headless workflow", function()
     require("manicule").edit(records[1].id)
     ui.prompt = original_prompt
 
-    local after_cancel = require("manicule").list({ _quiet = true })
+    local after_cancel = require("manicule").list()
     assert.are.equal(1, #after_cancel)
     assert.are.equal("keep this body", after_cancel[1].body)
     assert.are.equal(1, #events)
@@ -540,7 +559,7 @@ describe("manicule headless workflow", function()
     vim.notify = original_notify
 
     assert.are.equal(0, #events)
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
     assert.are.equal(vim.log.levels.ERROR, notifications[1].level)
     assert.is_truthy(notifications[1].msg:find("failed to persist new comment", 1, true))
 
@@ -564,11 +583,11 @@ describe("manicule headless workflow", function()
       body = "must remain",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local before_send = require("manicule").list({ _quiet = true })
+    local before_send = require("manicule").list()
     require("manicule").send("fail-consume")
     vim.notify = original_notify
 
-    local after_send = require("manicule").list({ _quiet = true })
+    local after_send = require("manicule").list()
     assert.are.equal(1, #calls)
     assert.are.equal(1, #after_send)
     assert.are.equal(before_send[1].id, after_send[1].id)
@@ -629,7 +648,7 @@ describe("manicule headless workflow", function()
         range = { start = { i - 1, 0 }, end_ = { i - 1, 0 } },
       })
     end
-    assert.are.equal(3, #manicule.list({ _quiet = true }))
+    assert.are.equal(3, #manicule.list())
 
     -- Drain callbacks already scheduled by the adds (and by earlier
     -- tests in this Neovim instance) so the counter below only sees
@@ -654,7 +673,7 @@ describe("manicule headless workflow", function()
     render.reconcile = original_reconcile
 
     assert.are.equal(1, #calls)
-    assert.are.equal(0, #manicule.list({ _quiet = true }))
+    assert.are.equal(0, #manicule.list())
     -- Event semantics unchanged: one ManiculeDeleted per cleared record.
     assert.are.equal(3, #events)
     -- Repaint batched: ONE refresh sweep after the clear loop, not one
@@ -709,7 +728,7 @@ describe("manicule headless workflow", function()
       body = "send this to the agent",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
 
     local original_notify = vim.notify
     vim.notify = function() end
@@ -721,7 +740,7 @@ describe("manicule headless workflow", function()
     end)
     vim.notify = original_notify
 
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
     local log_lines = vim.fn.readfile(log)
     local log_text = table.concat(log_lines, "\n")
     assert.is_truthy(log_text:find("set%-buffer\tmanicule%-", 1, false))

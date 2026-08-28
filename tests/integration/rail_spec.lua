@@ -175,7 +175,7 @@ describe("manicule rail expansion", function()
       body = "rail body first\nrail body second",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local short = tostring(records[1].id):sub(1, 6)
 
     move_cursor(bufnr, 1)
@@ -396,7 +396,7 @@ describe("manicule rail expansion", function()
     -- Drive the render seam directly (the same call render.lua's
     -- dispatch makes) so the guard is exercised deterministically.
     local rail = require("manicule.ui.rail")
-    local record = require("manicule").list({ _quiet = true })[1]
+    local record = require("manicule").list()[1]
     local opts = {
       bufnr = bufnr,
       winid = code_win,
@@ -434,7 +434,7 @@ describe("manicule rail expansion", function()
     end, 10)
 
     local rail = require("manicule.ui.rail")
-    local record = require("manicule").list({ _quiet = true })[1]
+    local record = require("manicule").list()[1]
     local opts = {
       bufnr = bufnr,
       winid = code_win,
@@ -544,7 +544,7 @@ describe("manicule rail expansion", function()
     move_cursor(bufnr, 1)
     assert.is_truthy(wait_for_rail())
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     require("manicule").delete(records[1].id)
     assert.is_true(vim.wait(1000, function()
       return find_rail_win() == nil
@@ -610,7 +610,7 @@ describe("manicule rail expansion", function()
 
     -- Open the comment editor: focus moves into a manicule float. The
     -- editor focus exception must leave the rail open with its card.
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     require("manicule").edit(records[1].id)
     assert.is_true(vim.wait(1000, function()
       return require("manicule.ui.editor").is_active()

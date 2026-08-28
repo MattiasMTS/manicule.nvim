@@ -93,18 +93,18 @@ local function make_pairs(n)
 end
 
 ---Start a review session shaped like `:ManiculeReview pr 42` (files +
----sink_ctx carrying the PR number). Pass `sink_ctx = false` for a
----plain non-PR session.
+---ctx carrying the PR number). Pass `ctx = false` for a plain non-PR
+---session.
 local function start_pr_review(opts)
   opts = opts or {}
-  local sink_ctx = { pr = 42 }
-  if opts.sink_ctx == false then
-    sink_ctx = nil
+  local review_ctx = { pr = 42 }
+  if opts.ctx == false then
+    review_ctx = nil
   end
   assert.is_true(require("manicule.review").start({
     files = make_pairs(opts.files),
     label = "pr 42",
-    sink_ctx = sink_ctx,
+    ctx = review_ctx,
   }))
 end
 
@@ -238,8 +238,8 @@ describe("manicule github PR panel tab", function()
     assert.is_truthy(winbar():find("PR #42", 1, true), winbar())
   end)
 
-  it("is absent for sessions without a PR in sink_ctx", function()
-    start_pr_review({ sink_ctx = false })
+  it("is absent for sessions without a PR in ctx", function()
+    start_pr_review({ ctx = false })
     assert.is_nil(winbar():find("PR #", 1, true), winbar())
   end)
 

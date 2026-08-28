@@ -36,15 +36,15 @@ describe("manicule undo deletions", function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     local id = records[1].id
 
     require("manicule").delete(id, locator_for(records[1]))
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
 
     require("manicule").undo_delete()
-    local restored = require("manicule").list({ _quiet = true })
+    local restored = require("manicule").list()
     assert.are.equal(1, #restored)
     assert.are.equal(id, restored[1].id)
     assert.are.equal("undo me", restored[1].body)
@@ -60,7 +60,7 @@ describe("manicule undo deletions", function()
       range = { start = { 1, 0 }, end_ = { 1, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(2, #records)
     local by_body = {}
     for _, r in ipairs(records) do
@@ -72,17 +72,17 @@ describe("manicule undo deletions", function()
     -- Delete first, then second (so second is the most recent delete).
     require("manicule").delete(by_body.first.id, locator_for(by_body.first))
     require("manicule").delete(by_body.second.id, locator_for(by_body.second))
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
 
     -- First undo brings back the second deletion (LIFO).
     require("manicule").undo_delete()
-    local after_one = require("manicule").list({ _quiet = true })
+    local after_one = require("manicule").list()
     assert.are.equal(1, #after_one)
     assert.are.equal(by_body.second.id, after_one[1].id)
 
     -- Second undo brings back the first deletion.
     require("manicule").undo_delete()
-    local after_two = require("manicule").list({ _quiet = true })
+    local after_two = require("manicule").list()
     assert.are.equal(2, #after_two)
     local ids = {}
     for _, r in ipairs(after_two) do
@@ -98,7 +98,7 @@ describe("manicule undo deletions", function()
       require("manicule").undo_delete()
     end)
     assert.is_true(ok)
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
   end)
 
   it("redo_delete re-deletes a comment that was undone", function()
@@ -107,17 +107,17 @@ describe("manicule undo deletions", function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     local id = records[1].id
 
     -- delete → undo (back) → redo (gone again).
     require("manicule").delete(id, locator_for(records[1]))
     require("manicule").undo_delete()
-    assert.are.equal(1, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(1, #require("manicule").list())
 
     require("manicule").redo_delete()
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
   end)
 
   it("redo_delete is multi-level and re-applies in LIFO order", function()
@@ -130,7 +130,7 @@ describe("manicule undo deletions", function()
       range = { start = { 1, 0 }, end_ = { 1, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(2, #records)
     local by_body = {}
     for _, r in ipairs(records) do
@@ -142,23 +142,23 @@ describe("manicule undo deletions", function()
     -- Delete both (second is the most recent delete).
     require("manicule").delete(by_body.first.id, locator_for(by_body.first))
     require("manicule").delete(by_body.second.id, locator_for(by_body.second))
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
 
     -- Undo both — undo restores second first (LIFO), then first; the
     -- redo stack now holds [second, first] so redo pops first then second.
     require("manicule").undo_delete()
     require("manicule").undo_delete()
-    assert.are.equal(2, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(2, #require("manicule").list())
 
     -- First redo re-deletes the first deletion (top of the redo stack).
     require("manicule").redo_delete()
-    local after_one = require("manicule").list({ _quiet = true })
+    local after_one = require("manicule").list()
     assert.are.equal(1, #after_one)
     assert.are.equal(by_body.second.id, after_one[1].id)
 
     -- Second redo re-deletes the second deletion; both gone again.
     require("manicule").redo_delete()
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
   end)
 
   it("a fresh deletion clears the redo branch", function()
@@ -171,7 +171,7 @@ describe("manicule undo deletions", function()
       range = { start = { 1, 0 }, end_ = { 1, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(2, #records)
     local by_body = {}
     for _, r in ipairs(records) do
@@ -187,7 +187,7 @@ describe("manicule undo deletions", function()
 
     -- redo_delete is now a no-op: A must NOT be re-deleted.
     require("manicule").redo_delete()
-    local after = require("manicule").list({ _quiet = true })
+    local after = require("manicule").list()
     assert.are.equal(1, #after)
     assert.are.equal(by_body.alpha.id, after[1].id) -- A still present, B deleted.
   end)
@@ -198,7 +198,7 @@ describe("manicule undo deletions", function()
       require("manicule").redo_delete()
     end)
     assert.is_true(ok)
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
   end)
 
   it("a full delete → undo → redo → undo cycle leaves the comment present", function()
@@ -207,7 +207,7 @@ describe("manicule undo deletions", function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     local id = records[1].id
 
@@ -216,7 +216,7 @@ describe("manicule undo deletions", function()
     require("manicule").redo_delete()
     require("manicule").undo_delete()
 
-    local final = require("manicule").list({ _quiet = true })
+    local final = require("manicule").list()
     assert.are.equal(1, #final)
     assert.are.equal(id, final[1].id)
     assert.are.equal("cycle", final[1].body)

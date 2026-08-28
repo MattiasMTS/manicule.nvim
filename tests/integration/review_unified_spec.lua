@@ -195,7 +195,7 @@ describe("manicule review unified mode", function()
     require("manicule").add()
     ui.prompt = original_prompt
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     -- Stored 0-indexed against the worktree file, NOT against a
     -- synthetic diff buffer: row 1 == file line 2.

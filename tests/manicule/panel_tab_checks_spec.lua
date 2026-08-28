@@ -63,14 +63,14 @@ local function make_pairs(n, root)
   return files
 end
 
----Start a review session; `opts.pr` sets sink_ctx.pr, `opts.root`
+---Start a review session; `opts.pr` sets ctx.pr, `opts.root`
 ---relocates the worktree files (branch-upstream tests).
 local function start_review(opts)
   opts = opts or {}
   assert.is_true(require("manicule.review").start({
     files = make_pairs(1, opts.root),
     label = "checks",
-    sink_ctx = opts.pr and { pr = opts.pr } or nil,
+    ctx = opts.pr and { pr = opts.pr } or nil,
   }))
 end
 

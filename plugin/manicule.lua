@@ -17,7 +17,7 @@ vim.g.loaded_manicule = 1
 ---@param action "edit"|"delete"|"resolve"
 ---@param opts table
 local function dispatch_positional(action, opts)
-  local records = require("manicule").list({ _quiet = true })
+  local records = require("manicule").list()
   if opts.args == nil or opts.args == "" then
     require("manicule.ui.picker").pick(action, records)
     return
@@ -73,7 +73,7 @@ end
 ---@return string[]
 local function position_completer(arglead)
   local items = cached("positions:" .. tostring(vim.uv.cwd()), function()
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local out = {}
     for i = 1, #records do
       out[i] = tostring(i)
@@ -91,7 +91,7 @@ end, { range = true })
 -- comments, Comments-only tab). Inside one: focus the review panel's
 -- Comments tab.
 vim.api.nvim_create_user_command("ManiculeList", function()
-  require("manicule.review.panel").list()
+  require("manicule.review.panel").open_comments()
 end, {})
 
 ---Verdict words accepted as the optional second argument of
@@ -202,7 +202,7 @@ vim.keymap.set({ "n", "x" }, "<Plug>(manicule-add)", function()
 end, { silent = true })
 
 vim.keymap.set("n", "<Plug>(manicule-list)", function()
-  require("manicule.review.panel").list()
+  require("manicule.review.panel").open_comments()
 end, { silent = true })
 
 local function jump_next()
@@ -319,8 +319,13 @@ vim.api.nvim_create_user_command("ManiculeReviewPrev", function()
   require("manicule.review").prev()
 end, {})
 
+-- finish()/stop() are pure (ok, err returns); this command layer owns
+-- the user-facing notifications for their pre-flight failures.
 vim.api.nvim_create_user_command("ManiculeReviewFinish", function(opts)
-  require("manicule.review").finish({ sink = opts.args ~= "" and opts.args or nil })
+  local ok, err = require("manicule.review").finish({ sink = opts.args ~= "" and opts.args or nil })
+  if not ok then
+    vim.notify(err, vim.log.levels.WARN)
+  end
 end, {
   nargs = "?",
   complete = function()
@@ -329,7 +334,10 @@ end, {
 })
 
 vim.api.nvim_create_user_command("ManiculeReviewStop", function()
-  require("manicule.review").stop()
+  local ok, err = require("manicule.review").stop()
+  if not ok then
+    vim.notify(err, vim.log.levels.WARN)
+  end
 end, {})
 
 -- `:ManiculeReviewDiffMode` with no argument toggles split <-> unified.

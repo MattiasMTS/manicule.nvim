@@ -184,12 +184,11 @@ end
 ---URI (e.g. diff-pair's `working_uri` reporting) still get *something*
 ---sensible instead of crashing.
 ---
----Exposed on `M` under an underscore-prefixed name so tests and the
----diff-pair branch can share the same resolution without re-deriving
----the logic. Not part of the public surface.
+---Used by the diff-pair branch (`resolve_diff_pair`) to anchor the
+---working side's URI without re-deriving the reverse-map logic.
 ---@param bufnr integer
 ---@return string?
-function M._resolve_uri_for_bufnr(bufnr)
+local function resolve_uri_for_bufnr(bufnr)
   local uri_mod = require("manicule.uri")
   local config = require("manicule.config")
   local codediff = codediff_identity(bufnr, config.current.store.root_markers)
@@ -259,7 +258,7 @@ function M.resolve_diff_pair(bufnr)
     -- configs), its URI still anchors to the real file. Falls back to
     -- the raw URI when reverse-map fails — diff-pair is a secondary
     -- concern, not worth crashing over.
-    local working_uri = M._resolve_uri_for_bufnr(working_bufnr)
+    local working_uri = resolve_uri_for_bufnr(working_bufnr)
     if not working_uri then
       return nil, "working-tree buffer has no URI"
     end

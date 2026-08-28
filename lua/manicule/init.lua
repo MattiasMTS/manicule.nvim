@@ -1204,7 +1204,10 @@ local function find(id, locator)
   return find_session()
 end
 
----Edit an existing comment by id.
+---Edit an existing comment by id, prompting for the new body. Returns
+---nothing: failures NOTIFY instead — an unknown id WARNs, a failed
+---store write ERRORs (and rolls the in-memory record back). An empty
+---prompt answer cancels silently.
 ---@param id string
 ---@param opts? { scope?: "project"|"session", project_root?: string }
 function M.edit(id, opts)
@@ -1329,7 +1332,9 @@ function M.redo_delete()
   emit("ManiculeDeleted", { id = snapshot.id, record = removed or snapshot })
 end
 
----Mark a comment as resolved.
+---Mark a comment as resolved. Returns nothing: failures NOTIFY instead
+---— an unknown id WARNs, a failed store write ERRORs (and rolls the
+---in-memory record back).
 ---@param id string
 ---@param opts? { scope?: "project"|"session", project_root?: string }
 function M.resolve(id, opts)
@@ -1366,28 +1371,38 @@ local function sort_records(records)
   return records
 end
 
----List comments, optionally filtered. A pure query — no UI side
----effects (`:ManiculeList` renders through the review panel's project
----mode instead). Results are always sorted by `uri → start line → id`
----so the ordering seen in `:ManiculeList`, the picker, and the
----positional-number completer is identical. `_quiet` is accepted for
----backward compatibility and ignored.
----@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean, _root?: string, _no_sync?: boolean, _quiet?: boolean}|nil
+---List comments, optionally filtered. Results are always sorted by
+---`uri → start line → id` so the ordering seen in `:ManiculeList`, the
+---picker, and the positional-number completer is identical.
+---
+---`filter` holds record predicates only. `opts` controls how the query
+---runs:
+---
+---  * `sync` (default true) — before reading, walk every loaded buffer
+---    and fold moved anchor extmarks back into the records: positions
+---    are updated in memory and the touched stores are marked dirty for
+---    the debounced flush. It renders nothing, but it is NOT a pure
+---    read. Pass `sync = false` for a read of the records as stored —
+---    read-only surfaces (the review panel) render right after
+---    mutations whose paths already synced, so the editor-wide sweep
+---    (a store probe + root resolution per buffer) is pure overhead
+---    there. Writing paths (send, picker) keep the sync.
+---  * `root` — project root to query instead of resolving one from the
+---    current buffer/cwd. Review surfaces pass the session's cached
+---    root so panel/autoflush calls (whose current buffer may be a
+---    scratch buffer outside the project) still hit the right store.
+---@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean}|nil
+---@param opts {sync?: boolean, root?: string}|nil
 ---@return table[]
-function M.list(filter)
+function M.list(filter, opts)
   filter = filter or {}
+  opts = opts or {}
   -- `exclude_imported` drops records imported from an external review
   -- system (meta.github.imported). Used by review.finish() so GitHub's
   -- own comments are never echoed back; a plain :ManiculeSend still
   -- includes them (explicit user action).
   local is_import = filter.exclude_imported and require("manicule.review.import").is_import or nil
-  -- `_no_sync` skips the editor-wide extmark → record position sync.
-  -- Read-only surfaces (the review panel) render right after mutations,
-  -- whose paths already carry current positions — re-walking every
-  -- loaded buffer (a store sync probe + root resolution per buffer) on
-  -- each render is pure overhead there. Writing paths (send, picker)
-  -- keep the sync.
-  if not filter._no_sync then
+  if opts.sync ~= false then
     sync_all_loaded_positions()
   end
   local store = require("manicule.store")
@@ -1405,7 +1420,7 @@ function M.list(filter)
   -- walking up through `stdpath('run')` to a dead end — raw
   -- `store.root()` here returned nil and left M.list blind to every
   -- record saved via `adapter.identify`'s reverse-map.
-  local root = filter._root or current_project_root()
+  local root = opts.root or current_project_root()
   if root then
     for _, r in ipairs(store.all(root)) do
       table.insert(all, r)
@@ -1461,22 +1476,27 @@ function M.list(filter)
   return results
 end
 
----Dispatch filtered comments to a named sink.
+---Dispatch filtered comments to a named sink. With a nil/"" sink name,
+---prompts through the sink picker first. Dispatch failures notify
+---(ERROR) from the async callback — there is no return value to carry
+---them.
 ---@param sink_name string|nil
----@param filter table|nil
----@param ctx table|nil
-function M.send(sink_name, filter, ctx)
+---@param filter table|nil record predicates (see M.list)
+---@param ctx table|nil sink dispatch context (passed to the sink's send)
+---@param opts {root?: string}|nil list options: `root` scopes the store
+---query the way M.list's `opts.root` does (review sessions pass the
+---session's cached root). The send path always keeps the position sync.
+function M.send(sink_name, filter, ctx, opts)
   if sink_name == nil or sink_name == "" then
     require("manicule.ui").select_sink(function(name)
       if name then
-        M.send(name, filter, ctx)
+        M.send(name, filter, ctx, opts)
       end
     end)
     return
   end
   filter = filter or {}
-  filter._quiet = true
-  local records = M.list(filter)
+  local records = M.list(filter, { root = opts and opts.root or nil })
   -- Fetch the spec up front so we can check `clear_on_success` after
   -- dispatch without a second registry lookup. Unknown sinks still flow
   -- through `dispatch`'s existing `cb(false, "unknown sink")` path below
@@ -1559,20 +1579,13 @@ function M.register_review_tab(spec)
   return require("manicule.review.panel").register_tab(spec)
 end
 
--- Exposed for tests + <Plug> maps; not part of the stable public API.
--- Returns `{ [bufnr] = { [comment_id] = extmark_id, ... }, ... }` by
--- projecting from the render layer's handle table so there is exactly
--- one source of truth for anchor extmarks.
-function M._buffer_marks()
-  local render = require("manicule.ui.render")
-  local out = {}
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    local marks = render.mark_ids_for_buffer(bufnr)
-    if next(marks) then
-      out[bufnr] = marks
-    end
-  end
-  return out
+---Register a review source resolver for `:ManiculeReview`. Delegates to
+---the review sources registry; resolvers are PREPENDED, so a resolver
+---registered here shadows the builtins (dirs/git/pr) for any arguments
+---its `match` accepts.
+---@param resolver {name: string, match: fun(fargs: string[]): boolean, resolve: fun(fargs: string[], opts: table): table|nil, string|nil}
+function M.register_review_source(resolver)
+  return require("manicule.review.sources").register(resolver)
 end
 
 -- Exposed for the review layer (panel reply creation repaints the
@@ -1589,7 +1602,9 @@ function M._pre_rename_uris()
   return pre_rename_uris
 end
 
-function M._stop_sync_timer_for_tests()
+-- Internal: exposed for tests (the `_reset` family) — drop the store
+-- poll timer so a headless run exits cleanly between specs.
+function M._reset_sync_timer()
   if sync_timer then
     sync_timer:stop()
     sync_timer:close()

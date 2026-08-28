@@ -28,8 +28,18 @@ local function make_stage_dir()
   return dir
 end
 
+---Register a review source resolver. Resolvers are PREPENDED: on
+---`:ManiculeReview <args>`, the most recently registered resolver whose
+---`match(fargs)` accepts the arguments wins, so a registered resolver
+---shadows the builtins (dirs/git/pr) — and later registrations shadow
+---earlier ones. `resolve` returns a job for review.start
+---(`{files, label?, sink?, ctx?, stage_dirs?}`) or `nil, err`.
 ---@param resolver {name: string, match: fun(fargs: string[]): boolean, resolve: fun(fargs: string[], opts: table): table|nil, string|nil}
 function M.register(resolver)
+  vim.validate("resolver", resolver, "table")
+  vim.validate("resolver.name", resolver.name, "string")
+  vim.validate("resolver.match", resolver.match, "function")
+  vim.validate("resolver.resolve", resolver.resolve, "function")
   table.insert(registry, 1, resolver)
 end
 
@@ -229,7 +239,7 @@ M.register({
     -- `:ManiculeReviewFinish github` falls back to `gh pr view` on the
     -- CURRENT branch and posts a non-checked-out PR's review to the
     -- wrong PR (or fails confusingly).
-    local sink_ctx = { pr = tonumber(number) }
+    local ctx = { pr = tonumber(number) }
 
     if head == meta.headRefOid then
       -- PR head is checked out: right side = worktree, normal pairs.
@@ -249,7 +259,7 @@ M.register({
       return {
         files = G.stage_baseline(root, base, changed, stage_dir),
         label = label,
-        sink_ctx = sink_ctx,
+        ctx = ctx,
         stage_dirs = stage_dirs,
       }
     end
@@ -301,13 +311,13 @@ M.register({
       end
       table.insert(files, { left = left, right = right, status = entry.status, path = entry.path })
     end
-    return { files = files, label = label, sink_ctx = sink_ctx, stage_dirs = stage_dirs }
+    return { files = files, label = label, ctx = ctx, stage_dirs = stage_dirs }
   end,
 })
 
 ---@param fargs string[]
 ---@param opts? {cwd?: string, stage_dir?: string}
----@return {files: table[], label: string, sink_ctx?: table, stage_dirs?: string[]}|nil, string|nil err
+---@return {files: table[], label: string, ctx?: table, stage_dirs?: string[]}|nil, string|nil err
 function M.resolve(fargs, opts)
   opts = opts or {}
   for _, resolver in ipairs(registry) do

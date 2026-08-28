@@ -107,7 +107,7 @@ describe("manicule render lifecycle", function()
       body = "render note",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = manicule.list({ _quiet = true })
+    local records = manicule.list()
     assert.are.equal(1, #records)
 
     local id = records[1].id
@@ -259,7 +259,7 @@ describe("manicule render lifecycle", function()
     -- window is reused, not recreated). One-time window state — the
     -- orphan-prune tag and the float window options — must still be in
     -- place on the reused window.
-    local records = manicule.list({ _quiet = true })
+    local records = manicule.list()
     render.update_viewport_popups(bufnr, records, records)
     assert.are.equal(winid, floating_windows_containing("reuse options")[1])
     assert.is_true(vim.w[winid].manicule_popup)
@@ -283,7 +283,7 @@ describe("manicule render lifecycle", function()
     assert.is_true(wait_for_popup_count("orphan target", 1))
 
     -- The tracked popup's winid lives on the record's handle.
-    local records = manicule.list({ _quiet = true })
+    local records = manicule.list()
     local tracked_winid = floating_windows_containing("orphan target")[1]
     assert.is_truthy(tracked_winid)
 
@@ -348,7 +348,7 @@ describe("manicule render lifecycle", function()
       body = "open failure note",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = manicule.list({ _quiet = true })
+    local records = manicule.list()
 
     -- Simulate `nvim_open_win` throwing inside `open_or_reconfigure`
     -- (the pcall there returns nil on failure). `render_comment_popup`
@@ -451,7 +451,7 @@ describe("manicule render lifecycle", function()
 
     -- Drive a render against the codediff buffer; before the fix this
     -- pushes the popup count to 2 (one per same-URI buffer).
-    local records = manicule.list({ _quiet = true })
+    local records = manicule.list()
     render.reconcile(cd_buf, records, records)
     render.update_viewport_popups(cd_buf, records, records)
     assert.is_true(wait_for_popup_count("wow nice", 1))
@@ -473,7 +473,7 @@ describe("manicule render lifecycle", function()
     -- Focus-follow: switching back to the working window and refreshing
     -- its viewport keeps exactly one popup.
     vim.cmd("wincmd p")
-    render.update_viewport_popups(work_buf, manicule.list({ _quiet = true }), manicule.list({ _quiet = true }))
+    render.update_viewport_popups(work_buf, manicule.list(), manicule.list())
     assert.is_true(wait_for_popup_count("edited body", 1))
   end)
 end)
@@ -810,7 +810,7 @@ describe("manicule comment card", function()
       body = "excerpt note",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = manicule.list({ _quiet = true })
+    local records = manicule.list()
     assert.are.equal("local value = 1", records[1].meta.excerpt)
 
     -- The anchored line changes: the card keeps quoting the ORIGINAL
@@ -827,7 +827,7 @@ describe("manicule comment card", function()
       body = "span note",
       range = { start = { 0, 0 }, end_ = { 1, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal("local value = 1…", records[1].meta.excerpt)
   end)
 

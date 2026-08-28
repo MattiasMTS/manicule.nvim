@@ -86,7 +86,10 @@ local function cache_key(opts)
   }, "\t")
 end
 
-local function split_lines(text)
+-- Split on CR/LF and drop blank lines — deliberately NOT str.split_lines
+-- (which keeps blanks): cmux tree/ps output is parsed line-by-line and
+-- blank/CR-terminated lines are noise here. Do not fold into manicule.str.
+local function split_nonempty_lines(text)
   local lines = {}
   for line in tostring(text or ""):gmatch("[^\r\n]+") do
     table.insert(lines, line)
@@ -206,7 +209,7 @@ end
 
 ---@param surface string|table
 ---@return string?
-function M.surface_ref(surface)
+local function surface_ref(surface)
   if type(surface) == "string" then
     return surface
   end
@@ -218,12 +221,12 @@ end
 
 ---@param surface table|string
 ---@return string
-function M.surface_label(surface)
+local function surface_label(surface)
   if type(surface) ~= "table" then
     return tostring(surface)
   end
   local title = surface.tab_title or surface.title or surface.name or "cmux surface"
-  local ref = M.surface_ref(surface) or "?"
+  local ref = surface_ref(surface) or "?"
   local agent = surface.agent or surface.type
   local status = surface.status
   if type(surface.detail) == "string" and surface.detail ~= "" then
@@ -325,7 +328,7 @@ local function parse_tree_result(result)
   end
 
   local surfaces = {}
-  for _, line in ipairs(split_lines(result.stdout)) do
+  for _, line in ipairs(split_nonempty_lines(result.stdout)) do
     local surface = parse_tree_surface(line)
     if surface then
       table.insert(surfaces, surface)
@@ -372,7 +375,7 @@ local function merge_tree_rpc_surfaces(tree_surfaces, rpc_surfaces)
 end
 
 ---@return table[]? surfaces, string? err
-function M.list_surfaces(opts)
+local function list_surfaces(opts)
   opts = normalize_opts(opts)
   if not opts.workspace_id or opts.workspace_id == "" then
     return nil, "CMUX_WORKSPACE_ID not set in env"
@@ -404,7 +407,7 @@ end
 local function ttys_by_surface_ref(surfaces)
   local ttys = {}
   for _, surface in ipairs(surfaces) do
-    local ref = M.surface_ref(surface)
+    local ref = surface_ref(surface)
     if ref and surface.tty then
       ttys[ref] = surface.tty
     end
@@ -431,7 +434,7 @@ local function ps_commands_for_tty(tty, cache)
   end
 
   local commands = {}
-  for _, line in ipairs(split_lines(result.stdout)) do
+  for _, line in ipairs(split_nonempty_lines(result.stdout)) do
     local command = line:gsub("^%s+", "")
     if command ~= "" then
       table.insert(commands, command)
@@ -444,7 +447,7 @@ end
 local function read_surface_screens(opts, surfaces)
   local jobs = {}
   for _, surface in ipairs(surfaces) do
-    local ref = M.surface_ref(surface)
+    local ref = surface_ref(surface)
     if ref then
       table.insert(jobs, {
         surface = surface,
@@ -532,7 +535,7 @@ function M.list_agent_surfaces(opts)
     return surfaces, err
   end
 
-  local surfaces, err = M.list_surfaces(opts)
+  local surfaces, err = list_surfaces(opts)
   if not surfaces then
     return finish(nil, err)
   end
@@ -549,7 +552,7 @@ function M.list_agent_surfaces(opts)
     if not metadata then
       return
     end
-    local ref = M.surface_ref(surface)
+    local ref = surface_ref(surface)
     local key_for_surface = ref or surface.id or tostring(surface.index or surface)
     if not metadata.tty and ref then
       metadata.tty = surface.tty
@@ -599,7 +602,7 @@ function M.list_agent_surfaces(opts)
         local tty = surface.tty
         if not tty then
           ttys = ttys or ttys_by_surface_ref(surfaces)
-          tty = ttys[M.surface_ref(surface)]
+          tty = ttys[surface_ref(surface)]
         end
         for _, command in ipairs(ps_commands_for_tty(tty, ps)) do
           local command_agent = detect_agent_from_command(command)
@@ -817,7 +820,7 @@ local function send_chunked(opts, ref, text, chunk_bytes, done)
 end
 
 local function send_text(opts, surface, text, cb)
-  local ref = M.surface_ref(surface)
+  local ref = surface_ref(surface)
   if not ref or ref == "" then
     cb(false, "cmux target has no surface ref")
     return
@@ -878,7 +881,7 @@ local function pick_surface(opts, cb)
   end
   vim.ui.select(surfaces, {
     prompt = opts.picker_prompt,
-    format_item = M.surface_label,
+    format_item = surface_label,
   }, function(surface)
     cb(surface, surface and nil or "cancelled")
   end)
@@ -936,7 +939,7 @@ function M.setup(opts)
         end
         send_text(opts, surface, text, function(ok, send_err)
           if ok then
-            vim.notify("Review sent to " .. M.surface_label(surface), vim.log.levels.INFO)
+            vim.notify("Review sent to " .. surface_label(surface), vim.log.levels.INFO)
           end
           cb(ok, send_err)
         end)

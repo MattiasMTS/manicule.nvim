@@ -96,7 +96,7 @@ end
 ---`store.branch` flag it was computed under so a config toggle between
 ---`setup()` calls recomputes instead of serving a stale name.
 ---
----Why memoize: `store_name` runs on EVERY store read (`M.all` → `M.sync`
+---Why memoize: `store_name` runs on EVERY store read (`M.all` → `sync`
 ---→ `sqlite_db` → `sqlite_path`), and with `store.branch = true` each
 ---un-memoized call forks `git branch --show-current` — once per viewport
 ---refresh. Pinning the resolved name for the session also keeps the
@@ -606,7 +606,7 @@ function M.load(root)
 end
 
 ---Refresh a cache entry from the on-disk SQLite state. Shared by
----`M.load`, `M.sync`, and post-write resync (`M.save`/`M.restore_record`)
+---`M.load`, `sync`, and post-write resync (`M.save`/`M.restore_record`)
 ---so the `records = read; base_by_id = by_id(records); removed = {};
 ---last_seen_event_id = ...; dirty = false` sequence — and the
 ---transient-read-error guard — exist in exactly one place. On a read
@@ -731,6 +731,9 @@ function M.save(root)
   return refresh_cache_entry(entry, db, root)
 end
 
+---Forward declaration: defined right below `M.all`, which calls it.
+local sync
+
 ---Return all cached records for `root` (loads on first access).
 ---@param root string|nil
 ---@return table[]
@@ -741,17 +744,18 @@ function M.all(root)
   if not cache[root] then
     M.load(root)
   else
-    M.sync(root)
+    sync(root)
   end
   return cache[root].records
 end
 
 ---Pull externally-written SQLite events into a clean cache entry. Dirty
 ---entries are left alone so in-flight local edits can save field-level
----patches against their original base snapshot.
+---patches against their original base snapshot. Internal: callers go
+---through `M.all` (per root) or `M.sync_all`.
 ---@param root string|nil
 ---@return boolean changed
-function M.sync(root)
+function sync(root)
   if not root then
     return false
   end
@@ -782,7 +786,7 @@ end
 function M.sync_all()
   local changed = {}
   for root in pairs(cache) do
-    if M.sync(root) then
+    if sync(root) then
       table.insert(changed, root)
     end
   end
@@ -870,11 +874,13 @@ function M.remove(root, id)
   return nil
 end
 
----Return records whose `uri` matches `uri`.
+---Return project records for `root` whose `uri` matches `uri`.
+---Internal: external callers use `M.all_for_uri`, which merges in the
+---session store.
 ---@param root string|nil
 ---@param uri string
 ---@return table[]
-function M.for_uri(root, uri)
+local function for_uri(root, uri)
   local out = {}
   if not uri or uri == "" then
     return out
@@ -1009,13 +1015,21 @@ end
 -- Polymorphic dispatcher
 -- ---------------------------------------------------------------------------
 
----Return all records that match `uri` across both stores. Project
----records are only included if the record's `project_root` matches the
----given project root. When no project root argument is passed, the
----current buffer's root is used for backwards compatibility with older
----callers. Passing nil explicitly means "session records only".
+---Return all records that match `uri` across both stores. Session
+---records always merge in; which project store contributes is decided
+---by `opts`:
+---  * `opts.root`               — read project records from this root.
+---  * `opts.session_only = true`— skip project records entirely.
+---  * no `opts` / neither field — fall back to the current buffer's
+---                                root (`M.root()`).
+---
+---Compat (this wave): the pre-opts positional form is still accepted —
+---`all_for_uri(uri, root)` behaves like `{ root = root }` and an
+---explicit positional nil (`all_for_uri(uri, nil)`) behaves like
+---`{ session_only = true }`. init.lua still calls positionally; wave 2
+---repoints it and drops this shim.
 ---@param uri string
----@param project_root? string|nil Optional explicit root for project records.
+---@param opts? { root?: string, session_only?: boolean }|string|nil
 ---@return table[]
 function M.all_for_uri(uri, ...)
   local out = {}
@@ -1023,13 +1037,22 @@ function M.all_for_uri(uri, ...)
     return out
   end
   local current_root
-  if select("#", ...) > 0 then
-    current_root = select(1, ...)
-  else
+  if select("#", ...) == 0 then
     current_root = M.root()
+  else
+    local arg = select(1, ...)
+    if type(arg) == "table" then
+      if not arg.session_only then
+        current_root = arg.root or M.root()
+      end
+    else
+      -- Positional compat: a string is the root; explicit nil means
+      -- "session records only".
+      current_root = arg
+    end
   end
   if current_root then
-    for _, r in ipairs(M.for_uri(current_root, uri)) do
+    for _, r in ipairs(for_uri(current_root, uri)) do
       table.insert(out, r)
     end
   end
@@ -1099,15 +1122,30 @@ function M.restore_record(record)
   return refresh_cache_entry(entry, db, root)
 end
 
----Dispatch a `remove` by scope. For project-scope, `scope_or_root` may
----be the root path directly (matching the existing API) or the literal
----string "project" — in which case the record's `project_root` is
----looked up via `get` across known caches.
----@param scope_or_root "project"|"session"|string
----@param id string
----@param project_root string? required when scope=="project"
+---Dispatch a `remove` by scope.
+---
+---Preferred form: a single table mirroring a record/snapshot's identity
+---fields — `remove_record({ scope = ..., id = ..., project_root = ... })`.
+---`scope = "session"` removes from the session store; anything else
+---removes from the project store at `project_root`.
+---
+---Compat (this wave): the positional form
+---`remove_record(scope_or_root, id, project_root)` is still accepted —
+---`scope_or_root` may be "project", "session", or a raw root path
+---(pre-dispatcher API). init.lua still calls positionally; wave 2
+---repoints it and drops this shim.
+---@param scope_or_root { scope?: "project"|"session", id: string, project_root?: string }|"project"|"session"|string
+---@param id string? positional form only
+---@param project_root string? positional form only; required when scope=="project"
 ---@return table|nil
 function M.remove_record(scope_or_root, id, project_root)
+  if type(scope_or_root) == "table" then
+    local opts = scope_or_root
+    if opts.scope == "session" then
+      return M.session_remove(opts.id)
+    end
+    return M.remove(opts.project_root, opts.id)
+  end
   if scope_or_root == "session" then
     return M.session_remove(id)
   end
@@ -1153,9 +1191,11 @@ function M.sqlite_info(root)
   return info
 end
 
+---Internal: the decoded event log for `root`, exposed as a test seam
+---(store_spec asserts on event kinds). Not part of the public surface.
 ---@param root string
 ---@return table[]
-function M.events(root)
+function M._events(root)
   if not root then
     return {}
   end

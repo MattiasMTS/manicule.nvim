@@ -277,7 +277,7 @@ describe("manicule M.list adapter-routed project root", function()
     -- staged buffer, walked up to a dead end, and returned 0 records.
     -- With the fix it routes through `adapter.identify` and sees the
     -- project record.
-    local results = manicule.list({ _quiet = true })
+    local results = manicule.list()
     assert.are.equal(1, #results)
     assert.are.equal("routed via adapter", results[1].body)
 

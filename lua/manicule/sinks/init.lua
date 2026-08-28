@@ -71,6 +71,12 @@ local function load_spec(module_name, opts)
 end
 
 ---Register a sink adapter.
+---
+---Errors when a sink with the same name is already registered (mirrors
+---`panel.register_tab`): a user sink can never silently clobber a builtin
+---or another user sink. To replace a builtin, disable it in config first
+---(e.g. `sinks = { github = false }`). `M.setup` re-registers builtins
+---safely because it clears the builtin names before registering them.
 ---@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, pre_text?: string, post_text?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean, hidden?: boolean}
 ---
 ---Spec fields:
@@ -106,6 +112,9 @@ function M.register(spec)
   vim.validate("health", spec.health, "function", true)
   vim.validate("clear_on_success", spec.clear_on_success, "boolean", true)
   vim.validate("hidden", spec.hidden, "boolean", true)
+  if sinks[spec.name] then
+    error(("manicule: sink %q is already registered"):format(spec.name))
+  end
   spec.type = spec.type or "sink"
   sinks[spec.name] = spec
 end
@@ -115,7 +124,12 @@ end
 ---`sinks.clipboard` defaults to true.
 ---`sinks.cmux` defaults to `{ enabled = true }`: register when a cmux
 ---workspace and usable cmux executable are available.
----@param cfg table|nil
+---
+---Idempotent for builtins: every builtin name is cleared before its spec
+---is (re-)registered, so repeated setup() calls (config reload, tests)
+---never trip `register`'s duplicate-name error. User-registered sinks
+---under non-builtin names are left untouched.
+---@param cfg table|nil per-sink config keyed by builtin name; `false` or `{ enabled = false }` disables a builtin
 function M.setup(cfg)
   cfg = cfg or {}
   for name in pairs(builtin_integrations) do
@@ -141,6 +155,9 @@ function M.get(name)
 end
 
 ---Return all registered sink specs keyed by name.
+---
+---The result is a deepcopied snapshot — mutating it never affects the
+---registry. Do not call in hot paths (checkhealth-style consumers only).
 ---@return table<string, table>
 function M.all()
   return vim.deepcopy(sinks)
@@ -166,37 +183,31 @@ function M.list()
 end
 
 ---Dispatch a comment list to a named sink.
+---
+---Every outcome — unknown sink, failed validate, sync throw in send,
+---async failure — is reported through `cb(ok, err)`; `cb` fires exactly
+---once, with `err` set only when `ok` is false. Dispatch never throws for
+---sink-level failures.
 ---@param name string
 ---@param comments table
 ---@param ctx table|nil
----@param cb fun(ok: boolean, err: string?)|nil
+---@param cb fun(ok: boolean, err: string?) required; receives the outcome exactly once
 function M.dispatch(name, comments, ctx, cb)
+  vim.validate("cb", cb, "function")
   local sink = sinks[name]
   if not sink then
-    local err = "manicule: unknown sink: " .. tostring(name)
-    if cb then
-      cb(false, err)
-    else
-      error(err)
-    end
+    cb(false, "manicule: unknown sink: " .. tostring(name))
     return
   end
   ctx = ctx or {}
-  local function fail(err)
-    if cb then
-      cb(false, err)
-    else
-      error(err)
-    end
-  end
   if sink.validate then
     local ok, valid, err = pcall(sink.validate, ctx)
     if not ok then
-      fail("manicule: sink " .. tostring(name) .. " validate failed: " .. tostring(valid))
+      cb(false, "manicule: sink " .. tostring(name) .. " validate failed: " .. tostring(valid))
       return
     end
     if not valid then
-      fail(err)
+      cb(false, err)
       return
     end
   end
@@ -206,27 +217,9 @@ function M.dispatch(name, comments, ctx, cb)
       return
     end
     done = true
-    if cb then
-      cb(ok, err)
-    elseif not ok then
-      error(err)
-    end
+    cb(ok, err)
   end
-  -- When no caller cb is supplied we must still observe async failures: a
-  -- bare no-op only catches sync throws via pcall below, so an async send
-  -- that reports ok == false later (e.g. cmux's vim.ui.select path) would be
-  -- silently dropped. Notify instead so the failure is surfaced.
-  local function finish_no_cb(ok, err)
-    if done then
-      return
-    end
-    done = true
-    if not ok then
-      vim.notify(tostring(err or ("manicule: sink " .. tostring(name) .. " failed")), vim.log.levels.ERROR)
-    end
-  end
-  local sink_cb = cb and finish or finish_no_cb
-  local ok, err = pcall(sink.send, comments, ctx, sink_cb)
+  local ok, err = pcall(sink.send, comments, ctx, finish)
   if not ok then
     finish(false, "manicule: sink " .. tostring(name) .. " send failed: " .. tostring(err))
   end

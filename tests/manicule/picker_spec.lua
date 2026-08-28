@@ -113,7 +113,7 @@ describe("manicule positional picker", function()
     local id3 = add("third", 3, "a.lua")
     vim.cmd("runtime plugin/manicule.lua")
     vim.cmd("ManiculeDelete 2")
-    local remaining = require("manicule").list({ _quiet = true })
+    local remaining = require("manicule").list()
     assert.are.equal(2, #remaining)
     assert.are.equal(id1, remaining[1].id)
     assert.are.equal(id3, remaining[2].id)
@@ -123,7 +123,7 @@ describe("manicule positional picker", function()
     add("short", 1, "README.md")
     add("a much longer body that should be truncated to a fixed maximum width", 10, "src/aaaa/bbbb/cccc/dddd.lua")
     local resolved_id = add("already done", 5, "src/zzz.lua")
-    local records_pre = require("manicule").list({ _quiet = true })
+    local records_pre = require("manicule").list()
     local store = require("manicule.store")
     for _, r in ipairs(records_pre) do
       if r.id == resolved_id then
@@ -144,7 +144,7 @@ describe("manicule positional picker", function()
     vim.ui.select = orig
 
     assert.is_truthy(captured_items)
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(#records, #captured_items)
     for i, item in ipairs(captured_items) do
       assert.are.equal(records[i].id, item.record.id)
@@ -177,7 +177,7 @@ describe("manicule positional picker", function()
     assert.is_truthy(notified)
     assert.are.equal(vim.log.levels.ERROR, notified.level)
     assert.is_truthy(notified.msg:find("no comment at position"))
-    assert.are.equal(3, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(3, #require("manicule").list())
   end)
 
   it("empty list → INFO notify, no picker", function()
@@ -208,7 +208,7 @@ describe("manicule positional picker", function()
     add("a-first", 3, "a.lua")
     -- a.lua records come before b.lua (URI order reflects the
     -- filesystem path order), and within a file lines sort ascending.
-    local ordered = require("manicule").list({ _quiet = true })
+    local ordered = require("manicule").list()
     local function ends_with(uri, suffix)
       return uri:sub(-#suffix) == suffix
     end

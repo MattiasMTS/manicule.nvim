@@ -2,10 +2,20 @@
 --
 -- Integration authors can use these helpers to keep formatting and
 -- command execution consistent with bundled sinks.
+--
+-- Stable sink-author surface (see ARCHITECTURE.md "Sinks"):
+--   relative_path, line_span, location            comment geometry
+--   format_markdown_review, wrap_text, format_line payload formatting
+--   executable, system, system_async               command execution
+-- Everything else in this file is a private implementation detail.
 
 local M = {}
 
-local function split_lines(text)
+-- Split on LF keeping blank lines (comment bodies and pre/post text are
+-- prose; blank lines are content). Kept local so sinks/helpers stays
+-- self-contained for third-party consumers — do not fold into
+-- manicule.str.split_lines.
+local function split_lines_keep_blanks(text)
   text = tostring(text or "")
   local lines = {}
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
@@ -27,7 +37,7 @@ local function append_block(parts, text)
   if not text then
     return
   end
-  for _, line in ipairs(split_lines(text)) do
+  for _, line in ipairs(split_lines_keep_blanks(text)) do
     table.insert(parts, line)
   end
   table.insert(parts, "")
@@ -97,7 +107,7 @@ end
 ---Return an absolute or project-relative path for a comment.
 ---@param comment table
 ---@return string
-function M.display_path(comment)
+local function display_path(comment)
   local rel = M.relative_path(comment)
   if rel then
     return rel
@@ -120,16 +130,18 @@ end
 ---Return a 1-indexed display range for a comment.
 ---@param comment table
 ---@return string
-function M.display_range(comment)
+local function display_range(comment)
   local s, e = M.line_span(comment)
   return e ~= s and (s .. "-" .. e) or tostring(s)
 end
 
----Return `path:range` for a comment.
+---Return `path:range` for a comment (1-indexed, project-relative when
+---resolvable). The primitive `format_line` and the markdown headings are
+---built on; useful for custom `format` implementations.
 ---@param comment table
 ---@return string
 function M.location(comment)
-  return ("%s:%s"):format(M.display_path(comment), M.display_range(comment))
+  return ("%s:%s"):format(display_path(comment), display_range(comment))
 end
 
 ---Format comments as a markdown review payload suitable for agents.
@@ -146,7 +158,7 @@ function M.format_markdown_review(comments, opts)
   append_block(parts, opts.pre_text)
   for index, comment in ipairs(comments) do
     table.insert(parts, ("## M%d %s"):format(index, M.location(comment)))
-    for _, line in ipairs(split_lines(comment.body)) do
+    for _, line in ipairs(split_lines_keep_blanks(comment.body)) do
       table.insert(parts, line)
     end
     table.insert(parts, "")

@@ -30,7 +30,7 @@ function H.setup(opts)
   require("manicule.store")._reset()
   require("manicule.sinks")._reset()
   pcall(function()
-    require("manicule.ui.render")._reset_for_tests()
+    require("manicule.ui.render")._reset()
   end)
   vim.g.loaded_manicule = nil
 
@@ -77,12 +77,12 @@ function H.teardown(ctx)
   -- spec's "manicule never creates a qf list" assertion.
   pcall(vim.fn.setqflist, {}, "f")
   pcall(function()
-    require("manicule")._stop_sync_timer_for_tests()
+    require("manicule")._reset_sync_timer()
   end)
   require("manicule.store")._reset()
   require("manicule.sinks")._reset()
   pcall(function()
-    require("manicule.ui.render")._reset_for_tests()
+    require("manicule.ui.render")._reset()
   end)
   vim.g.loaded_manicule = nil
   if ctx then

@@ -281,7 +281,7 @@ describe("manicule.store session scope", function()
     assert.are.equal("body from stale client", merged.body)
     assert.are.same({ start = { 4, 0 }, end_ = { 5, 0 } }, merged.range)
 
-    local events = fresh.events(tmp_root)
+    local events = fresh._events(tmp_root)
     local kinds = {}
     for _, event in ipairs(events) do
       table.insert(kinds, event.kind)
@@ -369,6 +369,50 @@ describe("manicule.store session scope", function()
     local session_only = store.all_for_uri(uri, nil)
     assert.are.equal(1, #session_only)
     assert.are.equal("s", session_only[1].id)
+
+    -- Preferred opts form: `{ root = ... }` / `{ session_only = true }`
+    -- mirror the two positional cases above.
+    local opts_root = store.all_for_uri(uri, { root = tmp_root })
+    assert.are.equal(2, #opts_root)
+
+    local opts_session = store.all_for_uri(uri, { session_only = true })
+    assert.are.equal(1, #opts_session)
+    assert.are.equal("s", opts_session[1].id)
+  end)
+
+  it("remove_record accepts a single identity table alongside the positional form", function()
+    local store = require("manicule.store")
+    local uri = require("manicule.uri").for_path(tmp_root .. "/remove.lua")
+    local function record(id, scope)
+      return {
+        id = id,
+        uri = uri,
+        scope = scope,
+        project_root = scope == "project" and tmp_root or nil,
+        range = { start = { 0, 0 }, end_ = { 0, 0 } },
+        body = id,
+        author = "",
+        created_at = 0,
+        updated_at = 0,
+        resolved = false,
+        meta = {},
+      }
+    end
+    store.put(tmp_root, record("p1", "project"))
+    store.put(tmp_root, record("p2", "project"))
+    store.session_put(record("s1", "session"))
+
+    -- Table form, both scopes.
+    local removed_project = store.remove_record({ scope = "project", id = "p1", project_root = tmp_root })
+    assert.are.equal("p1", removed_project.id)
+    local removed_session = store.remove_record({ scope = "session", id = "s1" })
+    assert.are.equal("s1", removed_session.id)
+
+    -- Positional compat form still works.
+    local removed_positional = store.remove_record("project", "p2", tmp_root)
+    assert.are.equal("p2", removed_positional.id)
+
+    assert.are.equal(0, #store.all_for_uri(uri, { root = tmp_root }))
   end)
 
   it("session_save keeps ephemeral unnamed-buffer records in memory but off disk", function()

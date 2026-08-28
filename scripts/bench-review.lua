@@ -116,9 +116,9 @@ local ok, err = xpcall(function()
   -- Mirror the session shape review.start builds, including the cached
   -- uris/root the panel reads (review.state() carries them since the
   -- session-cache change; older builds ignore the extra fields).
-  local function pair_path(pair)
-    return pair.status == "D" and pair.left or pair.right
-  end
+  -- pair_path and diffstat come off the REAL review module, captured
+  -- before it is stubbed below.
+  local pair_path = require("manicule.review").pair_path
   local session_uris = {}
   local session_uri_set = {}
   for index, pair in ipairs(resolved.files) do
@@ -128,12 +128,13 @@ local ok, err = xpcall(function()
   end
   -- Diffstat pass: what the FIRST panel render of a session pays — read
   -- both sides of every M pair and vim.diff them (A/D shortcut to one
-  -- side's line count). Measured on the REAL review module before it is
-  -- stubbed; the result feeds the stub below, mirroring the session
-  -- cache, so the row-building numbers stay row-building only.
-  local compute_diffstat = require("manicule.review").compute_diffstat
+  -- side's line count). Measured on the REAL review module (explicit
+  -- files bypass the session cache) before it is stubbed; the result
+  -- feeds the stub below, mirroring the session cache, so the
+  -- row-building numbers stay row-building only.
+  local real_diffstat = require("manicule.review").diffstat
   local panel_diffstat_ms, session_diffstat = elapsed_ms(function()
-    return compute_diffstat(resolved.files)
+    return real_diffstat(resolved.files)
   end)
   assert(#session_diffstat == 2000)
   package.loaded["manicule.review"] = {

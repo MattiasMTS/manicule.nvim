@@ -89,6 +89,7 @@
 local M = {}
 
 local anchor = require("manicule.anchor")
+local color = require("manicule.ui.color")
 local float = require("manicule.ui.float")
 local config = require("manicule.config")
 local icons = require("manicule.ui.icons")
@@ -189,22 +190,10 @@ local function get_highlight(name)
   return {}
 end
 
----Per-channel linear mix of two 24-bit RGB colors: returns `a` moved
----toward `b` by `t` — `t = 0` yields `a` unchanged, `t = 1` yields `b`,
----`0.5` the rounded midpoint. Pure; exported so the palette formulas in
----`setup_comment_highlights` are unit-testable.
----@param a integer 24-bit RGB color (0xRRGGBB)
----@param b integer 24-bit RGB color (0xRRGGBB)
----@param t number Mix fraction in [0, 1]
----@return integer
-function M.blend(a, b, t)
-  local function mix(shift)
-    local ca = math.floor(a / shift) % 0x100
-    local cb = math.floor(b / shift) % 0x100
-    return math.floor(ca + (cb - ca) * t + 0.5)
-  end
-  return mix(0x10000) * 0x10000 + mix(0x100) * 0x100 + mix(1)
-end
+---Re-export of `ui/color.lua`'s `blend` (moved there; implementation
+---unchanged). Kept on the render module for existing callers —
+---`review/panel.lua` and specs — until a later wave repoints them.
+M.blend = color.blend
 
 ---Foreground of the first of `names` that defines one, else nil.
 ---@param names string[]
@@ -495,31 +484,10 @@ end
 ---is no user-facing keymap-hint config.
 local COMMENT_HINT = "edit gca | delete gcd"
 
---- Relative-time label for the card's author line. Pure — `now` is
---- injectable so tests can run against a fixed clock. Boundaries: under
---- a minute (including future timestamps from clock skew) → "just now";
---- under an hour → "Nm ago"; under a day → "Nh ago"; up to 30 days →
---- "Nd ago"; older → the absolute "%b %d %H:%M" date the old footer
---- used.
----@param ts number Epoch seconds of the record's timestamp
----@param now? number Epoch seconds to measure from (default `os.time()`)
----@return string
-function M.relative_time(ts, now)
-  local diff = (now or os.time()) - ts
-  if diff < 60 then
-    return "just now"
-  end
-  if diff < 3600 then
-    return ("%dm ago"):format(math.floor(diff / 60))
-  end
-  if diff < 86400 then
-    return ("%dh ago"):format(math.floor(diff / 3600))
-  end
-  if diff <= 30 * 86400 then
-    return ("%dd ago"):format(math.floor(diff / 86400))
-  end
-  return os.date("%b %d %H:%M", ts) --[[@as string]]
-end
+---Re-export of `ui/color.lua`'s `relative_time` (moved there;
+---implementation unchanged). Kept on the render module for existing
+---callers (specs) until a later wave repoints them.
+M.relative_time = color.relative_time
 
 ---Find any window (in any tab) currently showing `bufnr`.
 ---@param bufnr integer
@@ -900,7 +868,7 @@ end
 -- for the same rendered records against the same counter pool — an
 -- O(P log P) sort of the whole project pool per keystroke. Remember the
 -- last result keyed by buffer + rendered record ids; `M.reconcile` runs
--- on every mutation and clears it (as does `_reset_for_tests`), so a
+-- on every mutation and clears it (as does `_reset`), so a
 -- changed pool can never serve a stale map.
 local display_memo = { key = nil, map = nil }
 
@@ -2192,16 +2160,6 @@ function M.prune_orphan_popups()
   prune_orphan_popups()
 end
 
---- Collapse duplicate *tracked* popup floats so a record id shows at most
---- one popup across all buffers/windows. Used when a file is open in two
---- same-URI buffers (e.g. the working file + a codediff view) so the
---- comment popup doesn't render once per diff side. Keeps the entry in
---- the current buffer (follows focus), else the lowest bufnr; the loser's
---- anchor extmark + line tint are untouched.
-function M.dedup_popups()
-  dedup_popups()
-end
-
 --- Reapply highlights after colorscheme change.
 function M.refresh_highlights()
   setup_comment_highlights()
@@ -2738,7 +2696,10 @@ local function repaint_all_loaded()
         if identity.project_root then
           store.load(identity.project_root)
         end
-        local records = store.all_for_uri(identity.uri, identity.project_root)
+        local records = store.all_for_uri(
+          identity.uri,
+          identity.project_root and { root = identity.project_root } or { session_only = true }
+        )
         local counter_records = identity.project_root and store.all(identity.project_root) or store.session_all()
         M.reconcile(bufnr, records, counter_records)
         M.update_viewport_popups(bufnr, records, counter_records)
@@ -2816,8 +2777,8 @@ function M.set_display_mode(mode)
   return mode
 end
 
---- Internal: reset state. Used by tests.
-function M._reset_for_tests()
+--- Internal: reset state. Used by tests (tests/helpers.lua).
+function M._reset()
   hidden = false
   display_mode = nil
   display_memo.key, display_memo.map = nil, nil

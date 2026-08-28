@@ -121,9 +121,4 @@ function M.git_email()
   return cached_email
 end
 
----Internal: exposed so tests can reset between cases.
-function M._reset_email_cache()
-  cached_email = nil
-end
-
 return M

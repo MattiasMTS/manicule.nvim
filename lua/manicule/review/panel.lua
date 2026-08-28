@@ -406,7 +406,8 @@ end
 -- review.start): list() resolves the store root from the CURRENT
 -- buffer, and the panel's scratch buffer falls back to cwd — which can
 -- miss the reviewed project entirely — so every list() call here
--- passes the cached root as `_root` and filters on the cached uri set.
+-- passes the cached root as `opts.root` and filters on the cached uri
+-- set.
 
 ---@param name string
 ---@return table
@@ -505,11 +506,11 @@ local function pair_row_ctx()
   end
 
   local counts = {}
-  -- `_no_sync`: the panel is a read-only surface rendering right after
-  -- a mutation, whose path already synced extmark positions — skip the
-  -- editor-wide position sweep on every render (all three list() call
-  -- sites here pass it).
-  local records = require("manicule").list({ _quiet = true, _no_sync = true, uris = state.uri_set, _root = state.root })
+  -- `sync = false`: the panel is a read-only surface rendering right
+  -- after a mutation, whose path already synced extmark positions —
+  -- skip the editor-wide position sweep on every render (all the
+  -- session-view list() call sites here pass it).
+  local records = require("manicule").list({ uris = state.uri_set }, { sync = false, root = state.root })
   for _, record in ipairs(records) do
     counts[record.uri] = (counts[record.uri] or 0) + 1
   end
@@ -788,15 +789,14 @@ local function build_comment_rows(records)
   if not records then
     if project_mode then
       -- Project mode lists EVERY project comment. It keeps the
-      -- editor-wide position sync (no `_no_sync`): this is a
-      -- user-invoked view over live buffers, so row line numbers must
-      -- follow moved extmarks — the review views skip the sync only
-      -- because their renders always trail an already-synced mutation.
-      records = require("manicule").list({ _quiet = true, _root = project_root })
+      -- editor-wide position sync (the default): this is a user-invoked
+      -- view over live buffers, so row line numbers must follow moved
+      -- extmarks — the review views pass `sync = false` only because
+      -- their renders always trail an already-synced mutation.
+      records = require("manicule").list(nil, { root = project_root })
     else
       local uris = file_filter and { [file_filter] = true } or (state and state.uri_set or {})
-      records =
-        require("manicule").list({ _quiet = true, _no_sync = true, uris = uris, _root = state and state.root or nil })
+      records = require("manicule").list({ uris = uris }, { sync = false, root = state and state.root or nil })
     end
   end
   local range = require("manicule.range")
@@ -959,13 +959,13 @@ end
 ---@return integer
 local function session_comment_count()
   if project_mode then
-    return #require("manicule").list({ _quiet = true, _root = project_root })
+    return #require("manicule").list(nil, { root = project_root })
   end
   local state = require("manicule.review").state()
   if not state then
     return 0
   end
-  return #require("manicule").list({ _quiet = true, _no_sync = true, uris = state.uri_set, _root = state.root })
+  return #require("manicule").list({ uris = state.uri_set }, { sync = false, root = state.root })
 end
 
 ---Rows for a REGISTERED tab: spec.build(ctx) through the same
@@ -1244,7 +1244,7 @@ end
 
 ---Jump to the comment under the cursor in a comments view: resolve its
 ---uri to the owning session pair, rebuild that pair's diff via
----review.open, then put the cursor on the comment's line in the
+---review.open_pair, then put the cursor on the comment's line in the
 ---commentable window (right side; the single left window for D pairs).
 ---The panel stays open; focus moves to the jump target.
 local function jump_to_comment()
@@ -1262,8 +1262,8 @@ local function jump_to_comment()
     vim.notify("manicule: comment does not match any file in this review", vim.log.levels.WARN)
     return
   end
-  review.open(pair_index)
-  -- review.open leaves focus in the commentable window (right side;
+  review.open_pair(pair_index)
+  -- review.open_pair leaves focus in the commentable window (right side;
   -- the left buffer for D pairs).
   local winid = vim.api.nvim_get_current_win()
   local bufnr = vim.api.nvim_win_get_buf(winid)
@@ -1388,7 +1388,7 @@ local function setup_panel_keymaps(bufnr)
   -- it has any, otherwise opens the pair — IDENTICAL in the flat and
   -- tree layouts (the flat behavior is canonical); a tree directory
   -- row toggles its collapse instead. In comments view it jumps to the
-  -- comment through review.open (never a raw window jump, which could
+  -- comment through review.open_pair (never a raw window jump, which could
   -- stomp a diff window's buffer); in project mode there is no session
   -- to route through, so the jump opens the file in the previous
   -- window. On a REGISTERED tab it routes to the tab's own <CR>
@@ -1420,8 +1420,7 @@ local function setup_panel_keymaps(bufnr)
       local pair = state and state.files[idx]
       if pair then
         local uri = state.uris[idx]
-        local records =
-          require("manicule").list({ _quiet = true, _no_sync = true, uris = { [uri] = true }, _root = state.root })
+        local records = require("manicule").list({ uris = { [uri] = true } }, { sync = false, root = state.root })
         if #records > 0 then
           current_view = "comments"
           file_filter = uri
@@ -1432,7 +1431,7 @@ local function setup_panel_keymaps(bufnr)
           return
         end
       end
-      require("manicule.review").open(idx)
+      require("manicule.review").open_pair(idx)
     else
       jump_to_comment()
     end
@@ -1448,7 +1447,7 @@ local function setup_panel_keymaps(bufnr)
     end
     local idx = pair_index_at_cursor()
     if idx then
-      require("manicule.review").open(idx)
+      require("manicule.review").open_pair(idx)
     end
   end, "Manicule review: open pair (skip drill-down)")
 
@@ -1893,12 +1892,12 @@ function M.open()
   open_window()
 end
 
----`:ManiculeList`. Inside a review session: focus the panel on the
----Comments tab, opening it first when hidden. Outside a session: open
----the panel in PROJECT mode — a single Comments tab listing every
----project comment, refreshed on the same store events and closed with
----`q` in any placement.
-function M.list()
+---Open the panel focused on comments (`:ManiculeList`). Inside a
+---review session: focus the panel on the Comments tab, opening it
+---first when hidden. Outside a session: open the panel in PROJECT mode
+---— a single Comments tab listing every project comment, refreshed on
+---the same store events and closed with `q` in any placement.
+function M.open_comments()
   -- Both branches force the Comments view past set_view: drop any
   -- registered tab's keymaps (its hooks are for user-driven switches).
   clear_tab_keymaps()
@@ -1918,7 +1917,7 @@ function M.list()
     -- any window changes: the fetched records size the panel and feed
     -- its first render, and the captured root keeps later refreshes
     -- rooted even when they run with the panel scratch buffer current.
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     project_root = nil
     for _, record in ipairs(records) do
       if type(record.project_root) == "string" and record.project_root ~= "" then

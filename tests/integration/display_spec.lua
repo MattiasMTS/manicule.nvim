@@ -289,7 +289,7 @@ describe("manicule eol display mode", function()
       body = "first line of the note\nsecond line stays hidden",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local short = tostring(records[1].id):sub(1, 6)
 
     local text = eol_virt_text(bufnr, 0)
@@ -320,7 +320,7 @@ describe("manicule eol display mode", function()
     assert.is_truthy(popup_title(winid):find("1/1", 1, true))
     -- Edit/delete keymaps stay reachable exactly as in float mode: the
     -- cursor hit-test they route through resolves the record here.
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(records[1].id, require("manicule.ui.render").record_at_cursor(bufnr))
 
     -- Cursor off the line: popup closes, collapsed marker stays.
@@ -398,7 +398,7 @@ describe("manicule eol display mode", function()
     -- exception applies in eol mode too, so the popup must not close
     -- mid-edit. (The editor float shows the same body text, so assert
     -- on the popup's winid rather than a window count.)
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     require("manicule").edit(records[1].id)
     assert.is_true(vim.wait(1000, function()
       return require("manicule.ui.editor").is_active()
@@ -498,7 +498,7 @@ describe("manicule eol display mode", function()
       body = "body that cannot fit",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local short = tostring(records[1].id):sub(1, 6)
 
     local text = eol_virt_text(bufnr, 0)
@@ -618,7 +618,7 @@ describe("manicule eol origin badges", function()
       body = "plain local note",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local short = tostring(records[1].id):sub(1, 6)
 
     assert.are.equal("● c" .. short .. " · plain local note", eol_virt_text(bufnr, 0))
@@ -640,7 +640,7 @@ describe("manicule inline display mode", function()
       body = "boxed body first\nboxed body second",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local short = tostring(records[1].id):sub(1, 6)
 
     local lines = inline_virt_lines(bufnr, 0)
@@ -716,7 +716,7 @@ describe("manicule inline display mode", function()
     })
 
     -- Expected order = the shared stack comparator (created_at, then id).
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     table.sort(records, function(a, b)
       local ac = tonumber(a.created_at) or 0
       local bc = tonumber(b.created_at) or 0
@@ -761,7 +761,7 @@ describe("manicule inline display mode", function()
 
     -- The `<Plug>` edit/delete keymaps route through the same cursor
     -- hit-test as float/eol mode and still resolve the record here.
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(records[1].id, require("manicule.ui.render").record_at_cursor(bufnr))
   end)
 

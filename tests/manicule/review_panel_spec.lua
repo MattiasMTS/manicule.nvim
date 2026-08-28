@@ -495,7 +495,7 @@ describe("manicule review panel refresh", function()
     assert.is_true(R.start({ files = files, label = "own-surface" }))
     add_comment(files[1].right, "sweep me")
     local manicule = require("manicule")
-    local record = manicule.list({ _quiet = true, _root = ctx.root })[1]
+    local record = manicule.list(nil, { root = ctx.root })[1]
     local panel_bufnr = assert(panel().bufnr())
     vim.wait(200, function()
       return false
@@ -515,7 +515,7 @@ describe("manicule review panel refresh", function()
     -- list() runs the position-sync sweep. Neither may pay identify /
     -- store work on the panel, which can never hold records.
     manicule.delete(record.id, { scope = record.scope, project_root = record.project_root })
-    manicule.list({ _quiet = true, _root = ctx.root })
+    manicule.list(nil, { root = ctx.root })
     vim.wait(100, function()
       return false
     end, 10)
@@ -532,7 +532,7 @@ describe("manicule review panel refresh", function()
     vim.wait(200)
     assert.is_truthy(panel_lines()[1]:find("1 comments", 1, true))
 
-    require("manicule").delete(require("manicule").list({ _quiet = true, _root = ctx.root })[1].id)
+    require("manicule").delete(require("manicule").list(nil, { root = ctx.root })[1].id)
     vim.wait(200)
     assert.is_truthy(panel_lines()[1]:find("0 comments", 1, true))
 
@@ -957,7 +957,7 @@ describe("manicule review panel tree layout", function()
     press_in_panel(1, "<CR>") -- collapse lua/manicule, hiding pair 2
     assert.are.equal(3, #panel_lines())
 
-    require("manicule.review").open(2)
+    require("manicule.review").open_pair(2)
 
     local lines = panel_lines()
     assert.are.equal(6, #lines, "open pair stayed hidden in a collapsed dir")
@@ -972,7 +972,7 @@ describe("manicule review panel tree layout", function()
     -- Pair 1 (a.lua) is open: its tree row is row 2 (0-indexed 1).
     assert.are.same({ 1 }, current_rows())
 
-    require("manicule.review").open(3)
+    require("manicule.review").open_pair(3)
     assert.are.same({ 5 }, current_rows())
   end)
 

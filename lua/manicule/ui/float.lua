@@ -8,7 +8,7 @@ local M = {}
 
 ---@param border any
 ---@return boolean
-function M.border_is_none(border)
+local function border_is_none(border)
   if border == nil then
     return false
   end
@@ -96,7 +96,7 @@ end
 ---@param footer string?
 ---@param footer_pos string?
 function M.apply_title_footer(win_config, border, title, title_pos, footer, footer_pos)
-  if M.border_is_none(border) then
+  if border_is_none(border) then
     return
   end
   if title then

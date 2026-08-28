@@ -25,10 +25,9 @@ local config = require("manicule.config")
 ---reload, so we treat it as ephemeral.
 local RUN_DIR_PREFIX = vim.fs.normalize(vim.fn.stdpath("run")) .. "/"
 
----Path prefixes we consider ephemeral. Order matters: `RUN_DIR_PREFIX`
----is listed first so reverse-map logic can peel the nvim-runtime
----`nvim.<user>/<run-id>/<N>/` segment before falling back to the plain
----`/var/folders/` case.
+---Path prefixes we consider ephemeral. Consumed only through
+---`M.is_temp_path` (the adapter's reverse-map and diff-pair heuristics
+---go through that predicate rather than reading the list directly).
 local TMP_PREFIXES = {
   RUN_DIR_PREFIX,
   "/tmp/",
@@ -36,13 +35,6 @@ local TMP_PREFIXES = {
   "/var/folders/",
   "/private/var/folders/",
 }
-
----Exposed so the adapter (reverse-map) and any other caller share the
----same list without re-declaring the ordering.
----@return string[]
-function M.tmp_prefixes()
-  return TMP_PREFIXES
-end
 
 ---The normalised absolute path to `stdpath('run')` (trailing slash).
 ---@return string

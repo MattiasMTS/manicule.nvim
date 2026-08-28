@@ -147,6 +147,26 @@ describe("manicule review session", function()
     assert.is_nil(R.diffstat(), "diffstat must be nil without a session")
   end)
 
+  it("diffstat(files) computes explicit pairs, bypassing the session cache", function()
+    local R = require("manicule.review")
+    local files = make_pairs(2)
+    files[2].status = "D"
+
+    -- Works without any session at all.
+    assert.is_nil(R.state())
+    local stats = R.diffstat(files)
+    assert.are.same({ added = 1, removed = 1 }, stats[1])
+    assert.are.same({ added = 0, removed = 1 }, stats[2])
+
+    -- With a session active the explicit form recomputes rather than
+    -- returning (or filling) the cached session table. rawequal: the
+    -- assertion is about table IDENTITY, not contents.
+    assert.is_true(R.start({ files = files, label = "explicit" }))
+    local cached = R.diffstat()
+    assert.is_true(rawequal(cached, R.diffstat()), "argless form lost its session cache")
+    assert.is_false(rawequal(cached, R.diffstat(files)), "explicit form returned the session cache")
+  end)
+
   it("stop() deletes owned stage dirs and wipes buffers pointing into them", function()
     local R = require("manicule.review")
     -- Both sides staged, like a pr-head-not-checked-out session: the
@@ -263,7 +283,7 @@ describe("manicule review session", function()
     require("manicule").add()
     ui.prompt = original_prompt
 
-    R.finish()
+    assert.is_true(R.finish())
     vim.wait(200, function()
       return sent ~= nil
     end)
@@ -272,7 +292,7 @@ describe("manicule review session", function()
     assert.are.equal("session comment", sent[1].body)
   end)
 
-  it("finish() with no comments notifies and does not dispatch", function()
+  it("finish() with no comments returns false and does not dispatch", function()
     local R = require("manicule.review")
     local called = false
     require("manicule").register_sink({
@@ -283,8 +303,37 @@ describe("manicule review session", function()
       end,
     })
     assert.is_true(R.start({ files = make_pairs(1), label = "test", sink = "capture" }))
-    R.finish()
+    local ok, err = R.finish()
+    assert.is_false(ok)
+    assert.is_truthy(err:find("no comments", 1, true))
     assert.is_false(called)
+  end)
+
+  it("finish() and stop() are pure: ok,err returns, notifications live in the command layer", function()
+    local R = require("manicule.review")
+    local notified = {}
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      notified[#notified + 1] = { msg = msg, level = level }
+    end
+
+    -- No session: both fail with an error string instead of notifying.
+    local ok, err = R.finish()
+    assert.is_false(ok)
+    assert.is_truthy(err:find("no active review session", 1, true))
+    local sok, serr = R.stop()
+    assert.is_false(sok)
+    assert.is_truthy(serr:find("no active review session", 1, true))
+    assert.are.equal(0, #notified, "finish/stop notified instead of returning")
+    vim.notify = original_notify
+
+    -- Session without a sink: finish reports the missing sink; stop
+    -- succeeds and reports true.
+    assert.is_true(R.start({ files = make_pairs(1), label = "returns" }))
+    local fok, ferr = R.finish()
+    assert.is_false(fok)
+    assert.is_truthy(ferr:find("no sink", 1, true))
+    assert.is_true(R.stop())
   end)
 
   it("start_from_job wires files, label, and the socket sink", function()
@@ -304,8 +353,11 @@ describe("manicule review session", function()
     local state = R.state()
     assert.are.equal("since-review", state.label)
     assert.are.equal("socket", state.sink)
-    assert.are.equal(ctx.artifact_root .. "/return.sock", state.sink_ctx.socket)
-    assert.are.equal("job-7", state.sink_ctx.job)
+    assert.are.equal(ctx.artifact_root .. "/return.sock", state.ctx.socket)
+    assert.are.equal("job-7", state.ctx.job)
+    -- Deprecated wave-2 alias: session.sink_ctx points at the SAME
+    -- table for out-of-tree readers (review/tabs/checks.lua this wave).
+    assert.are.equal(state.ctx, state.sink_ctx)
   end)
 
   it("start_from_job rejects unreadable or invalid job files", function()
@@ -413,7 +465,7 @@ describe("manicule review session", function()
     require("manicule").add()
     ui.prompt = original_prompt
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("deleted file note", records[1].body)
     -- Scope is session because the staged left file path no longer
@@ -769,7 +821,7 @@ describe("manicule review session", function()
     add_comment_at(files[2].right, 3, "jump target")
     -- add_comment_at edited pair 2's file into pair 1's diff window;
     -- restore the pair 1 layout before exercising the jump.
-    R.open(1)
+    R.open_pair(1)
 
     to_comments_view(1) -- comments view (ALL)
     press_in_panel(1, "<CR>")
@@ -815,7 +867,7 @@ describe("manicule review session", function()
     files[2] = { left = left, right = ctx.root .. "/gone.lua", status = "D", path = "gone.lua" }
     assert.is_true(R.start({ files = files, label = "jump-d" }))
     add_comment_at(left, 1, "note on deleted file")
-    R.open(1)
+    R.open_pair(1)
 
     to_comments_view(1)
     press_in_panel(1, "<CR>")
@@ -832,7 +884,7 @@ describe("manicule review session", function()
     local files = make_pairs(2)
     assert.is_true(R.start({ files = files, label = "jump-warn" }))
     add_comment_at(files[1].right, 1, "orphan-to-be")
-    R.open(1)
+    R.open_pair(1)
 
     to_comments_view(1)
 
@@ -939,7 +991,7 @@ describe("manicule review session", function()
     vim.notify = original_notify
 
     assert.is_truthy(warned, "expected a WARN")
-    assert.are.equal(1, #require("manicule").list({ _quiet = true, _root = ctx.root }))
+    assert.are.equal(1, #require("manicule").list(nil, { root = ctx.root }))
   end)
 
   ---Fake gh on PATH that logs every argv line and answers any call
@@ -1091,7 +1143,7 @@ describe("manicule review session", function()
     local files = make_pairs(2)
     assert.is_true(R.start({ files = files, label = "sync-drill" }))
     add_comment(files[1].right, "drill comment")
-    R.open(1)
+    R.open_pair(1)
 
     press_in_panel(1, "<CR>") -- drill into pair 1's scoped comments view
     assert.are.equal(1, #panel_lines())

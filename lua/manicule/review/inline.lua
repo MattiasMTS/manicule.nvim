@@ -66,8 +66,9 @@ end
 -- ---------------------------------------------------------------------------
 
 ---Default-linked so a colorscheme (or the user) can override them, in
----the same spirit as `ManiculeLineNr` in the renderer.
-function M.setup_highlights()
+---the same spirit as `ManiculeLineNr` in the renderer. Applied on every
+---`M.apply` (idempotent).
+local function setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculeDiffAdd", { link = "DiffAdd", default = true })
   vim.api.nvim_set_hl(0, "ManiculeDiffDelete", { link = "DiffDelete", default = true })
   vim.api.nvim_set_hl(0, "ManiculeDiffDeleteSign", { link = "ManiculeDiffDelete", default = true })
@@ -322,10 +323,11 @@ function M.keep_rows(hunks, line_count, context)
 end
 
 ---`foldexpr` for the review window. Level 0 keeps a line visible, level
----1 folds it into the surrounding unchanged block.
+---1 folds it into the surrounding unchanged block. Reached only through
+---the `_G.__manicule_inline_foldexpr` global armed in `fold_windows`.
 ---@param lnum integer
 ---@return string
-function M.foldexpr(lnum)
+local function foldexpr(lnum)
   local entry = state[vim.api.nvim_get_current_buf()]
   if not entry then
     return "0"
@@ -334,8 +336,9 @@ function M.foldexpr(lnum)
 end
 
 ---Pierre-style fold bar: the count of hidden lines, nothing else.
+---Reached only through the `_G.__manicule_inline_foldtext` global.
 ---@return string
-function M.foldtext()
+local function foldtext()
   local count = vim.v.foldend - vim.v.foldstart + 1
   return ("%d unmodified line%s ▸"):format(count, count == 1 and "" or "s")
 end
@@ -375,8 +378,8 @@ local function fold_windows(bufnr, context)
     return
   end
   -- Arm the eagerly-resolved fold callbacks (see maybe_clear_fold_globals).
-  _G.__manicule_inline_foldexpr = M.foldexpr
-  _G.__manicule_inline_foldtext = M.foldtext
+  _G.__manicule_inline_foldexpr = foldexpr
+  _G.__manicule_inline_foldtext = foldtext
   for _, winid in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
       if not entry.windows[winid] then
@@ -477,6 +480,30 @@ local function unmap_hunk_navigation(bufnr)
   pcall(vim.keymap.del, "n", "[h", { buffer = bufnr })
 end
 
+---Remove the inline diff from `bufnr` and restore the windows showing
+---it. Reached via `M.clear_all` (session teardown / pair switch), the
+---repaint in `M.apply`, and the per-buffer BufWipeout reaper.
+---@param bufnr integer
+local function clear(bufnr)
+  local entry = state[bufnr]
+  state[bufnr] = nil
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    maybe_clear_fold_globals()
+    return
+  end
+  pcall(vim.api.nvim_clear_autocmds, { group = wipe_group, buffer = bufnr })
+  pcall(vim.api.nvim_buf_clear_namespace, bufnr, M.ns, 0, -1)
+  unmap_hunk_navigation(bufnr)
+  if entry then
+    for winid, saved in pairs(entry.windows) do
+      if vim.api.nvim_win_is_valid(winid) then
+        set_window_options(winid, saved)
+      end
+    end
+  end
+  maybe_clear_fold_globals()
+end
+
 -- ---------------------------------------------------------------------------
 -- Public API
 -- ---------------------------------------------------------------------------
@@ -497,8 +524,8 @@ function M.apply(bufnr, left_path, opts)
     return false, err
   end
 
-  M.setup_highlights()
-  M.clear(bufnr)
+  setup_highlights()
+  clear(bufnr)
 
   local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local hunks = M.hunks(baseline, current)
@@ -519,7 +546,7 @@ function M.apply(bufnr, left_path, opts)
     group = wipe_group,
     buffer = bufnr,
     callback = function()
-      M.clear(bufnr)
+      clear(bufnr)
     end,
   })
   -- Folding an identical file would hide the whole buffer behind one
@@ -530,33 +557,11 @@ function M.apply(bufnr, left_path, opts)
   return true
 end
 
----Remove the inline diff from `bufnr` and restore the windows showing it.
----@param bufnr integer
-function M.clear(bufnr)
-  local entry = state[bufnr]
-  state[bufnr] = nil
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    maybe_clear_fold_globals()
-    return
-  end
-  pcall(vim.api.nvim_clear_autocmds, { group = wipe_group, buffer = bufnr })
-  pcall(vim.api.nvim_buf_clear_namespace, bufnr, M.ns, 0, -1)
-  unmap_hunk_navigation(bufnr)
-  if entry then
-    for winid, saved in pairs(entry.windows) do
-      if vim.api.nvim_win_is_valid(winid) then
-        set_window_options(winid, saved)
-      end
-    end
-  end
-  maybe_clear_fold_globals()
-end
-
 ---Clear every buffer this module has painted. Called whenever the review
 ---session moves to another pair or shuts down.
 function M.clear_all()
   for bufnr in pairs(state) do
-    M.clear(bufnr)
+    clear(bufnr)
   end
   state = {}
   maybe_clear_fold_globals()

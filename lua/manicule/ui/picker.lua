@@ -186,11 +186,10 @@ local function body_for(record)
 end
 
 ---Format `records` into display strings, parallel-indexed to `records`.
----Callers can zip into `{ record, display }` tables or map over the
----result directly.
+---`M.pick` zips them into `{ record, display }` tables.
 ---@param records table[]
 ---@return string[]
-function M.format_items(records)
+local function format_items(records)
   local out = {}
   local count = #records
   local idx_width = #tostring(math.max(count, 1))
@@ -213,7 +212,7 @@ function M.pick(action, records)
     vim.notify("manicule: no comments", vim.log.levels.INFO)
     return
   end
-  local formatted = M.format_items(records)
+  local formatted = format_items(records)
   local items = {}
   for i, r in ipairs(records) do
     items[i] = { record = r, display = formatted[i] }

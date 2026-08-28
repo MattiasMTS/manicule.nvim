@@ -439,6 +439,50 @@ describe("manicule sink helpers", function()
     assert.are.equal("Codex", by_ref["surface:3"].agent)
   end)
 
+  it("errors when registering a sink under an already-registered name", function()
+    local sinks = require("manicule.sinks")
+    sinks.register({
+      name = "dup",
+      send = function(_, _, cb)
+        cb(true)
+      end,
+    })
+
+    local ok, err = pcall(sinks.register, {
+      name = "dup",
+      send = function(_, _, cb)
+        cb(true)
+      end,
+    })
+
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("already registered", 1, true))
+  end)
+
+  it("re-registers builtins on repeated setup without duplicate errors", function()
+    local sinks = require("manicule.sinks")
+    sinks._reset()
+    sinks.setup({ github = false, cmux = false })
+    sinks.setup({ github = false, cmux = false })
+
+    assert.are.same({ "clipboard" }, sinks.list())
+  end)
+
+  it("requires a dispatch callback", function()
+    local sinks = require("manicule.sinks")
+    sinks.register({
+      name = "needs-cb",
+      send = function(_, _, cb)
+        cb(true)
+      end,
+    })
+
+    local ok, err = pcall(sinks.dispatch, "needs-cb", {}, {})
+
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("cb", 1, true))
+  end)
+
   it("reports thrown validate and send callbacks as dispatch failures", function()
     local sinks = require("manicule.sinks")
     sinks.register({
