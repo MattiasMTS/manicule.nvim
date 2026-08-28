@@ -2,6 +2,31 @@ local H = require("helpers")
 
 local ctx
 
+---Block until an async `:ManiculeReview` attached its files (the
+---command returns within a frame with a resolving shell; the pairs
+---land from the resolver's callback).
+local function wait_attached()
+  local R = require("manicule.review")
+  vim.wait(10000, function()
+    local s = R.state()
+    return s ~= nil and not s.resolving
+  end, 10)
+  local s = R.state()
+  assert.is_truthy(s, "review session never attached (resolve failed?)")
+  assert.is_nil(s.resolving, "review session still resolving")
+end
+
+---Block until the deferred per-pair diffstat fill landed (kicked at
+---attach; the winbar breadcrumb and panel rows gain their counts on
+---its one refresh).
+local function wait_diffstat()
+  local R = require("manicule.review")
+  vim.wait(2000, function()
+    return R.diffstat() ~= nil
+  end, 5)
+  assert.is_truthy(R.diffstat(), "deferred diffstat fill did not land")
+end
+
 local function make_pairs(n)
   local files = {}
   for i = 1, n do
@@ -126,11 +151,16 @@ describe("manicule review session", function()
     assert.are.equal(ctx.root, state.root)
   end)
 
-  it("diffstat() computes per-pair counts lazily once and caches on the session", function()
+  it("diffstat() fills deferred once per session and caches on it", function()
     local R = require("manicule.review")
     local files = make_pairs(2)
     files[2].status = "D"
     assert.is_true(R.start({ files = files, label = "diffstat" }))
+
+    -- Deferred: start() returns before the fill's scheduled chunks ran,
+    -- so the argless form reports nil (panel rows omit the counts).
+    assert.is_nil(R.diffstat(), "diffstat filled synchronously in start()")
+    wait_diffstat()
 
     local stats = R.diffstat()
     -- make_pairs writes a one-line change; the D pair counts its left side.
@@ -138,7 +168,7 @@ describe("manicule review session", function()
     assert.are.same({ added = 0, removed = 1 }, stats[2])
 
     -- Cached on the session: the same table comes back, and worktree
-    -- edits mid-session do not change it (as-of-first-request by design).
+    -- edits mid-session do not change it (as-of-attach by design).
     vim.fn.writefile({ "return 1", "-- more", "-- lines" }, files[1].right)
     assert.are.equal(stats, R.diffstat())
     assert.are.same({ added = 1, removed = 1 }, R.diffstat()[1])
@@ -162,6 +192,7 @@ describe("manicule review session", function()
     -- returning (or filling) the cached session table. rawequal: the
     -- assertion is about table IDENTITY, not contents.
     assert.is_true(R.start({ files = files, label = "explicit" }))
+    wait_diffstat()
     local cached = R.diffstat()
     assert.is_true(rawequal(cached, R.diffstat()), "argless form lost its session cache")
     assert.is_false(rawequal(cached, R.diffstat(files)), "explicit form returned the session cache")
@@ -218,6 +249,7 @@ describe("manicule review session", function()
     local saved = vim.uv.cwd()
     vim.cmd.cd(root)
     vim.cmd("ManiculeReview HEAD")
+    wait_attached()
     vim.cmd.cd(saved)
 
     local R = require("manicule.review")
@@ -378,6 +410,7 @@ describe("manicule review session", function()
     vim.cmd.cd(root)
 
     vim.cmd("ManiculeReview HEAD")
+    wait_attached()
     local state = require("manicule.review").state()
     vim.cmd.cd(saved)
 
@@ -427,6 +460,11 @@ describe("manicule review session", function()
     end
     local ok, err = pcall(vim.cmd, "ManiculeReview pr")
     vim.ui.select = original_select
+    -- PATH/cwd stay in place until the ASYNC resolve chain (gh pr view,
+    -- staging) has attached — the command only opened the shell.
+    if ok then
+      wait_attached()
+    end
     vim.env.PATH = saved_path
     vim.cmd.cd(saved_cwd)
     assert.is_true(ok, err)
@@ -446,6 +484,7 @@ describe("manicule review session", function()
     vim.cmd.cd(root)
 
     vim.cmd("ManiculeReview HEAD")
+    wait_attached()
     local state = require("manicule.review").state()
     assert.is_truthy(state)
     assert.are.equal(1, #state.files)
@@ -1407,6 +1446,9 @@ describe("manicule review winbar breadcrumb", function()
   it("split mode: breadcrumb on the right window, baseline tag on the left", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(2), label = "winbar-split" }))
+    -- The counts land with the deferred diffstat fill, which repaints
+    -- the OPEN pair's breadcrumb (pair switches recompute their own).
+    wait_diffstat()
 
     local wins = file_wins()
     assert.are.equal("f1.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[wins.right].winbar)
@@ -1423,6 +1465,7 @@ describe("manicule review winbar breadcrumb", function()
     require("manicule.config").get().review.diff_mode = "unified"
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "winbar-unified" }))
+    wait_diffstat()
     assert.are.equal("f1.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[vim.api.nvim_get_current_win()].winbar)
   end)
 
@@ -1433,6 +1476,7 @@ describe("manicule review winbar breadcrumb", function()
     vim.fn.writefile({ "one", "two" }, left)
     local files = { { left = left, right = ctx.root .. "/gone.lua", status = "D", path = "gone.lua" } }
     assert.is_true(R.start({ files = files, label = "winbar-d" }))
+    wait_diffstat()
     -- D pair: one window (the baseline), removed count only.
     assert.are.equal("gone.lua \u{00B7} D \u{00B7} \u{2212}2", vim.wo[vim.api.nvim_get_current_win()].winbar)
   end)
@@ -1446,6 +1490,7 @@ describe("manicule review winbar breadcrumb", function()
     vim.fn.writefile({ "return 1 -- new" }, right)
     local files = { { left = left, right = right, status = "M", path = "we%rd.lua" } }
     assert.is_true(R.start({ files = files, label = "winbar-escape" }))
+    wait_diffstat()
 
     local wins = file_wins()
     assert.are.equal("we%%rd.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[wins.right].winbar)

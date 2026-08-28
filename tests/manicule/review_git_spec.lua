@@ -293,3 +293,148 @@ describe("manicule review git plumbing", function()
     assert.are.equal(main, mb)
   end)
 end)
+
+describe("manicule review git async plumbing", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  ---Drive an async plumbing call from a spec: returns a `wait()` that
+  ---blocks until the callback landed and returns its arguments.
+  local function settled()
+    local done = false
+    local args
+    return function(...)
+      args = { ... }
+      done = true
+    end, function()
+      vim.wait(10000, function()
+        return done
+      end, 5)
+      assert.is_true(done, "async callback never fired")
+      return unpack(args, 1, 2)
+    end
+  end
+
+  it("changed_files_async matches the sync result, untracked dirs included", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, { ["mod.lua"] = { "return 1" }, ["del.lua"] = { "gone" } })
+    vim.fn.writefile({ "return 2" }, root .. "/mod.lua")
+    vim.fn.delete(root .. "/del.lua")
+    vim.fn.mkdir(root .. "/newdir/sub", "p")
+    vim.fn.writefile({ "one" }, root .. "/newdir/one.lua")
+    vim.fn.writefile({ "two" }, root .. "/newdir/sub/two.lua")
+
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local sync = assert(G.changed_files(root, base))
+    local cb, wait = settled()
+    G.changed_files_async(root, base, cb)
+    local entries, err = wait()
+    assert.is_nil(err)
+    assert.are.same(sync, entries)
+  end)
+
+  it("materialize_async stages the same tree as the sync pass and self-heals bogus paths", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, {
+      ["src/a.lua"] = { "base a" },
+      ["src/sub/b.lua"] = { "base b" },
+    })
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local dir = ctx.artifact_root .. "/async-materialized"
+
+    local cb, wait = settled()
+    G.materialize_async(root, base, { "src/a.lua", "src/sub/b.lua", "src/bogus.lua" }, dir, cb)
+    local err = wait()
+    assert.is_nil(err)
+    assert.are.equal("base a", table.concat(vim.fn.readfile(dir .. "/src/a.lua"), "\n"))
+    assert.are.equal("base b", table.concat(vim.fn.readfile(dir .. "/src/sub/b.lua"), "\n"))
+    -- Absent at the ref: self-heal stages an empty regular file.
+    assert.are.equal(0, vim.fn.getfsize(dir .. "/src/bogus.lua"))
+  end)
+
+  it("materialize_async fans out chunked archives and serializes extraction", function()
+    local G = require("manicule.review.git")
+    local root, git = H.git_repo(ctx)
+    local paths = {}
+    -- 201 identical-content paths force two archive chunks (the sync
+    -- fan-out spec's fixture shape).
+    for i = 1, 201 do
+      local rel = ("f%03d.txt"):format(i)
+      vim.fn.writefile({ "shared content" }, root .. "/" .. rel)
+      paths[i] = rel
+    end
+    git("add", ".")
+    git("commit", "-qm", "fanout files")
+    local base = assert(G.rev_parse(root, "HEAD"))
+
+    -- Observe subprocess traffic through the async seam. Archives may
+    -- COMPLETE in any order, but both must spawn before any tar does,
+    -- and the two tars must never overlap.
+    local original_run_async = G.run_async
+    local order = {}
+    local tars_running = 0
+    G.run_async = function(argv, opts, cb)
+      local is_tar = argv[1] == "tar"
+      table.insert(order, is_tar and "tar" or "git")
+      if is_tar then
+        tars_running = tars_running + 1
+        assert.are.equal(1, tars_running, "concurrent tar extractions into one tree")
+      end
+      return original_run_async(argv, opts, function(result, spawn_err)
+        if is_tar then
+          tars_running = tars_running - 1
+        end
+        cb(result, spawn_err)
+      end)
+    end
+    local cb, wait = settled()
+    G.materialize_async(root, base, paths, ctx.artifact_root .. "/async-fanout", cb)
+    local err = wait()
+    G.run_async = original_run_async
+
+    assert.is_nil(err)
+    assert.are.same({ "git", "git" }, { order[1], order[2] }, "archives did not fan out first")
+    assert.are.equal(4, #order, "expected 2 archives + 2 tars, got: " .. table.concat(order, ","))
+    local dir = ctx.artifact_root .. "/async-fanout"
+    assert.are.equal("shared content", table.concat(vim.fn.readfile(dir .. "/f001.txt"), "\n"))
+    assert.are.equal("shared content", table.concat(vim.fn.readfile(dir .. "/f201.txt"), "\n"))
+  end)
+
+  it("stage_baseline_async builds the same pairs as the sync variant", function()
+    local G = require("manicule.review.git")
+    local root = H.git_repo(ctx, {
+      ["src/modified.lua"] = { "return 1" },
+      ["src/deleted.lua"] = { "return 0" },
+    })
+    vim.fn.writefile({ "return 2" }, root .. "/src/modified.lua")
+    vim.fn.delete(root .. "/src/deleted.lua")
+    vim.fn.writefile({ "return 3" }, root .. "/src/added.lua")
+    local base = assert(G.rev_parse(root, "HEAD"))
+    local entries = {
+      { path = "src/added.lua", status = "A" },
+      { path = "src/deleted.lua", status = "D" },
+      { path = "src/modified.lua", status = "M" },
+    }
+
+    local sync = G.stage_baseline(root, base, entries, ctx.artifact_root .. "/sync-staged")
+    local cb, wait = settled()
+    G.stage_baseline_async(root, base, entries, ctx.artifact_root .. "/async-staged", cb)
+    local files, err = wait()
+    assert.is_nil(err)
+    assert.are.equal(#sync, #files)
+    for i, pair in ipairs(files) do
+      assert.are.equal(sync[i].path, pair.path)
+      assert.are.equal(sync[i].status, pair.status)
+      assert.are.equal(sync[i].right, pair.right)
+      assert.are.same(
+        vim.fn.filereadable(sync[i].left) == 1 and vim.fn.readfile(sync[i].left) or "missing",
+        vim.fn.filereadable(pair.left) == 1 and vim.fn.readfile(pair.left) or "missing"
+      )
+    end
+  end)
+end)

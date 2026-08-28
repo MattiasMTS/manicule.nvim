@@ -1,7 +1,10 @@
 -- manicule.nvim: git plumbing for review mode.
 --
--- Thin, synchronous wrappers around `git` used to resolve baselines and
--- stage baseline file versions for diff pairs. No global state.
+-- Thin wrappers around `git` used to resolve baselines and stage
+-- baseline file versions for diff pairs. No global state. Every
+-- blocking primitive has an `_async` twin whose callback fires on the
+-- main loop, so the resolvers can run as spawn+callback continuations
+-- (`:ManiculeReview` returns within a frame; see sources.resolve_async).
 
 local M = {}
 
@@ -45,6 +48,35 @@ function M.wait(handle)
   }
 end
 
+---Run `argv` asynchronously; `cb` receives the `M.run`-normalized
+---result on the main loop (vim.system's on_exit fires in a fast-event
+---context, so the callback is rescheduled). A spawn failure (missing
+---executable) does NOT throw like `M.run` — an async chain has no
+---caller stack to throw into — it reports `code = -1` plus the error
+---text as `spawn_err`, so callers can stay loud about hard failures.
+---The module-function seam mirrors `M.run`/`M.spawn`: tests observe
+---async subprocess traffic by stubbing it.
+---@param argv string[]
+---@param opts? {cwd?: string}
+---@param cb fun(result: {code: integer, stdout: string, stderr: string}, spawn_err?: string)
+function M.run_async(argv, opts, cb)
+  opts = opts or {}
+  local ok, err = pcall(vim.system, argv, { text = true, cwd = opts.cwd }, function(result)
+    vim.schedule(function()
+      cb({
+        code = result.code or -1,
+        stdout = result.stdout or "",
+        stderr = result.stderr or "",
+      })
+    end)
+  end)
+  if not ok then
+    vim.schedule(function()
+      cb({ code = -1, stdout = "", stderr = tostring(err) }, tostring(err))
+    end)
+  end
+end
+
 local function git(root, ...)
   return M.run({ "git", "-C", root, ... })
 end
@@ -63,6 +95,15 @@ function M.root(dir)
   return trim(result.stdout)
 end
 
+---Async `M.root`; `cb(root|nil)` fires on the main loop.
+---@param dir string
+---@param cb fun(root: string|nil)
+function M.root_async(dir, cb)
+  M.run_async({ "git", "-C", dir, "rev-parse", "--show-toplevel" }, nil, function(result)
+    cb(result.code == 0 and trim(result.stdout) or nil)
+  end)
+end
+
 ---@param root string
 ---@param ref string
 ---@return string|nil sha, string|nil err
@@ -72,6 +113,20 @@ function M.rev_parse(root, ref)
     return nil, ("manicule: cannot resolve ref %q: %s"):format(ref, trim(result.stderr))
   end
   return trim(result.stdout), nil
+end
+
+---Async `M.rev_parse`; `cb(sha|nil, err|nil)` fires on the main loop.
+---@param root string
+---@param ref string
+---@param cb fun(sha: string|nil, err: string|nil)
+function M.rev_parse_async(root, ref, cb)
+  M.run_async({ "git", "-C", root, "rev-parse", "--verify", ref .. "^{commit}" }, nil, function(result)
+    if result.code ~= 0 then
+      cb(nil, ("manicule: cannot resolve ref %q: %s"):format(ref, trim(result.stderr)))
+      return
+    end
+    cb(trim(result.stdout), nil)
+  end)
 end
 
 ---@param root string
@@ -86,16 +141,30 @@ function M.merge_base(root, a, b)
   return trim(result.stdout), nil
 end
 
+---Async `M.merge_base`; `cb(sha|nil, err|nil)` fires on the main loop.
+---@param root string
+---@param a string
+---@param b string
+---@param cb fun(sha: string|nil, err: string|nil)
+function M.merge_base_async(root, a, b, cb)
+  M.run_async({ "git", "-C", root, "merge-base", a, b }, nil, function(result)
+    if result.code ~= 0 then
+      cb(nil, ("manicule: merge-base %s %s failed: %s"):format(a, b, trim(result.stderr)))
+      return
+    end
+    cb(trim(result.stdout), nil)
+  end)
+end
+
 ---Untracked paths from NUL-separated `git status --porcelain=v1 -z`
 ---output. Preferred over `ls-files --others`: status uses the untracked
 ---cache and fsmonitor, ls-files always walks the worktree (~3x slower on
 ---large repos). Status collapses fully-untracked directories to `dir/`;
 ---those are expanded with a *scoped* ls-files, which is cheap because it
 ---only walks the collapsed directory.
----@param root string
 ---@param stdout string
----@return string[] paths
-local function untracked_from_status(root, stdout)
+---@return string[] paths, string[] collapsed
+local function parse_untracked(stdout)
   local paths = {}
   local collapsed = {}
   for record in stdout:gmatch("[^%z]+") do
@@ -108,17 +177,40 @@ local function untracked_from_status(root, stdout)
       end
     end
   end
-  -- Expand ALL collapsed directories with one scoped ls-files call; the
-  -- walk only descends into those directories, and one subprocess stays
-  -- cheap regardless of how many directories collapsed.
+  return paths, collapsed
+end
+
+---Append the ls-files expansion of collapsed directories to `paths`.
+---@param paths string[]
+---@param stdout string scoped `ls-files --others` output
+local function append_expanded(paths, stdout)
+  for sub in stdout:gmatch("[^\n]+") do
+    table.insert(paths, sub)
+  end
+end
+
+---Scoped `ls-files --others` argv expanding `collapsed` directories.
+---One subprocess stays cheap regardless of how many directories
+---collapsed: the walk only descends into those directories.
+---@param root string
+---@param collapsed string[]
+---@return string[]
+local function expand_argv(root, collapsed)
+  local argv = { "git", "-C", root, "ls-files", "--others", "--exclude-standard", "--" }
+  vim.list_extend(argv, collapsed)
+  return argv
+end
+
+---@param root string
+---@param stdout string
+---@return string[] paths
+local function untracked_from_status(root, stdout)
+  local paths, collapsed = parse_untracked(stdout)
+  -- Expand ALL collapsed directories with one scoped ls-files call.
   if #collapsed > 0 then
-    local argv = { "ls-files", "--others", "--exclude-standard", "--" }
-    vim.list_extend(argv, collapsed)
-    local expanded = git(root, unpack(argv))
+    local expanded = M.run(expand_argv(root, collapsed))
     if expanded.code == 0 then
-      for sub in expanded.stdout:gmatch("[^\n]+") do
-        table.insert(paths, sub)
-      end
+      append_expanded(paths, expanded.stdout)
     end
   end
   return paths
@@ -158,6 +250,40 @@ function M.parse_name_status(stdout)
   return entries
 end
 
+---Merge diff entries with untracked "A" paths, deduped and sorted —
+---the tail shared by the sync and async changed_files variants.
+---@param diff_stdout string
+---@param untracked string[]
+---@return {path: string, status: "M"|"A"|"D"}[]
+local function assemble_entries(diff_stdout, untracked)
+  local entries = {}
+  local seen = {}
+  for _, entry in ipairs(M.parse_name_status(diff_stdout)) do
+    if not seen[entry.path] then
+      seen[entry.path] = true
+      table.insert(entries, entry)
+    end
+  end
+  for _, path in ipairs(untracked) do
+    if not seen[path] then
+      seen[path] = true
+      table.insert(entries, { path = path, status = "A" })
+    end
+  end
+  table.sort(entries, function(x, y)
+    return x.path < y.path
+  end)
+  return entries
+end
+
+local function diff_argv(root, base)
+  return { "git", "-C", root, "diff", "--name-status", "--no-renames", "-z", base }
+end
+
+local function status_argv(root)
+  return { "git", "-C", root, "status", "--porcelain=v1", "-z", "--no-renames" }
+end
+
 ---Changed files vs `base`, including untracked files as "A".
 ---@param root string
 ---@param base string
@@ -165,39 +291,58 @@ end
 function M.changed_files(root, base)
   -- Run diff and status concurrently; each costs ~100ms on large repos
   -- and they are independent.
-  local diff_job = vim.system(
-    { "git", "-C", root, "diff", "--name-status", "--no-renames", "-z", base },
-    { text = true }
-  )
-  local status_job = vim.system(
-    { "git", "-C", root, "status", "--porcelain=v1", "-z", "--no-renames" },
-    { text = true }
-  )
+  local diff_job = vim.system(diff_argv(root, base), { text = true })
+  local status_job = vim.system(status_argv(root), { text = true })
   local result = diff_job:wait()
   local untracked = status_job:wait()
   if result.code ~= 0 then
     return nil, ("manicule: git diff failed: %s"):format(trim(result.stderr or ""))
   end
-  local entries = {}
-  local seen = {}
-  for _, entry in ipairs(M.parse_name_status(result.stdout)) do
-    if not seen[entry.path] then
-      seen[entry.path] = true
-      table.insert(entries, entry)
+  local paths = untracked.code == 0 and untracked_from_status(root, untracked.stdout or "") or {}
+  return assemble_entries(result.stdout or "", paths), nil
+end
+
+---Async `M.changed_files`: diff and status still fan out concurrently,
+---joined by callback; any collapsed-directory expansion runs as one
+---more async subprocess. `cb(entries|nil, err|nil)` on the main loop.
+---@param root string
+---@param base string
+---@param cb fun(entries: {path: string, status: "M"|"A"|"D"}[]|nil, err: string|nil)
+function M.changed_files_async(root, base, cb)
+  local diff_result, status_result
+  local pending = 2
+  local function join()
+    pending = pending - 1
+    if pending > 0 then
+      return
     end
-  end
-  if untracked.code == 0 then
-    for _, path in ipairs(untracked_from_status(root, untracked.stdout or "")) do
-      if not seen[path] then
-        seen[path] = true
-        table.insert(entries, { path = path, status = "A" })
+    if diff_result.code ~= 0 then
+      cb(nil, ("manicule: git diff failed: %s"):format(trim(diff_result.stderr or "")))
+      return
+    end
+    local paths, collapsed = {}, {}
+    if status_result.code == 0 then
+      paths, collapsed = parse_untracked(status_result.stdout or "")
+    end
+    if #collapsed == 0 then
+      cb(assemble_entries(diff_result.stdout or "", paths), nil)
+      return
+    end
+    M.run_async(expand_argv(root, collapsed), nil, function(expanded)
+      if expanded.code == 0 then
+        append_expanded(paths, expanded.stdout)
       end
-    end
+      cb(assemble_entries(diff_result.stdout or "", paths), nil)
+    end)
   end
-  table.sort(entries, function(x, y)
-    return x.path < y.path
+  M.run_async(diff_argv(root, base), nil, function(result)
+    diff_result = result
+    join()
   end)
-  return entries, nil
+  M.run_async(status_argv(root), nil, function(result)
+    status_result = result
+    join()
+  end)
 end
 
 ---@param root string
@@ -268,14 +413,18 @@ end
 ---@param ref string
 ---@param paths string[]
 ---@param dir string
-function M.materialize(root, ref, paths, dir)
-  local known_dirs = {}
-  mkdir_p(dir, known_dirs)
-
-  -- `git archive` has no pathspec-from-file support (including Git 2.55),
-  -- so keep each argv comfortably below platform ARG_MAX instead. Bound
-  -- path count too: archive's pathspec matching slows sharply with a huge
-  -- flat argv even below ARG_MAX (200-path chunks benchmark faster).
+---Split `paths` into `git archive` pathspec chunks.
+---
+---`git archive` has no pathspec-from-file support (including Git 2.55),
+---so keep each argv comfortably below platform ARG_MAX instead. Bound
+---path count too: archive's pathspec matching slows sharply with a huge
+---flat argv even below ARG_MAX (200-path chunks benchmark faster).
+---@param root string
+---@param ref string
+---@param dir string
+---@param paths string[]
+---@return string[][]
+local function archive_chunks(root, ref, dir, paths)
   local max_argv_bytes = 64 * 1024
   local max_paths_per_chunk = 200
   local base_bytes = #root + #ref + #dir + 1024
@@ -296,6 +445,45 @@ function M.materialize(root, ref, paths, dir)
   if #chunk > 0 then
     chunks[#chunks + 1] = chunk
   end
+  return chunks
+end
+
+---@param root string
+---@param ref string
+---@param archive_path string
+---@param chunk_paths string[]
+---@return string[]
+local function archive_argv(root, ref, archive_path, chunk_paths)
+  local argv = { "git", "-C", root, "--literal-pathspecs", "archive", "-o", archive_path, ref, "--" }
+  vim.list_extend(argv, chunk_paths)
+  return argv
+end
+
+---The per-file recovery pass closing out a materialize: anything a
+---failed chunk covered — or that extraction left missing or as a
+---non-regular file (symlink blobs) — is staged via `git show`, with
+---paths absent at `ref` becoming empty regular files.
+---@param root string
+---@param ref string
+---@param paths string[]
+---@param dir string
+---@param failed_paths table<string, true>
+---@param known_dirs table<string, boolean>
+local function self_heal(root, ref, paths, dir, failed_paths, known_dirs)
+  for _, path in ipairs(paths) do
+    local staged = dir .. "/" .. path
+    local stat = uv.fs_lstat(staged)
+    if failed_paths[path] or not stat or stat.type ~= "file" then
+      write_regular(staged, M.show_file(root, ref, path) or "", known_dirs)
+    end
+  end
+end
+
+function M.materialize(root, ref, paths, dir)
+  local known_dirs = {}
+  mkdir_p(dir, known_dirs)
+
+  local chunks = archive_chunks(root, ref, dir, paths)
 
   -- Chunks are independent (distinct pathspecs, distinct archive
   -- tempfiles, one shared output dir): fan out ALL `git archive`
@@ -308,19 +496,11 @@ function M.materialize(root, ref, paths, dir)
   local jobs = {}
   for i, chunk_paths in ipairs(chunks) do
     local archive_path = vim.fn.tempname() .. ".tar"
-    local archive_argv = {
-      "git",
-      "-C",
-      root,
-      "--literal-pathspecs",
-      "archive",
-      "-o",
-      archive_path,
-      ref,
-      "--",
+    jobs[i] = {
+      paths = chunk_paths,
+      archive = archive_path,
+      handle = M.spawn(archive_argv(root, ref, archive_path, chunk_paths)),
     }
-    vim.list_extend(archive_argv, chunk_paths)
-    jobs[i] = { paths = chunk_paths, archive = archive_path, handle = M.spawn(archive_argv) }
   end
   for _, job in ipairs(jobs) do
     local archive_result = M.wait(job.handle)
@@ -334,18 +514,130 @@ function M.materialize(root, ref, paths, dir)
     end
   end
 
-  for _, path in ipairs(paths) do
-    local staged = dir .. "/" .. path
-    local stat = uv.fs_lstat(staged)
-    if failed_paths[path] or not stat or stat.type ~= "file" then
-      write_regular(staged, M.show_file(root, ref, path) or "", known_dirs)
+  self_heal(root, ref, paths, dir, failed_paths, known_dirs)
+end
+
+---Async `M.materialize`: every `git archive` chunk fans out
+---immediately; each chunk's tar runs from its archive's completion
+---callback, with extractions still serialized (concurrent tars into
+---one tree race on shared parent directories) while later archives
+---keep running. The self-heal pass runs once every chunk has settled,
+---then `cb(err)` fires on the main loop — `err` is non-nil only for a
+---hard failure (tar unavailable, staging dir unwritable), keeping the
+---sync version's loud tar failure, now surfaced through the chain
+---instead of a throw.
+---@param root string
+---@param ref string
+---@param paths string[]
+---@param dir string
+---@param cb fun(err: string|nil)
+function M.materialize_async(root, ref, paths, dir, cb)
+  local known_dirs = {}
+  local ok_mkdir, mkdir_err = pcall(mkdir_p, dir, known_dirs)
+  if not ok_mkdir then
+    vim.schedule(function()
+      cb(tostring(mkdir_err))
+    end)
+    return
+  end
+
+  local chunks = archive_chunks(root, ref, dir, paths)
+  local failed_paths = {}
+  local settled = 0
+  local hard_err = nil
+  local queue = {}
+  local extracting = false
+
+  local function finish_if_done()
+    if settled < #chunks or extracting or #queue > 0 then
+      return
     end
+    if hard_err then
+      cb(hard_err)
+      return
+    end
+    local ok, err = pcall(self_heal, root, ref, paths, dir, failed_paths, known_dirs)
+    if ok then
+      cb(nil)
+    else
+      cb(tostring(err))
+    end
+  end
+
+  local function pump()
+    if extracting then
+      return
+    end
+    local job = table.remove(queue, 1)
+    if not job then
+      finish_if_done()
+      return
+    end
+    extracting = true
+    local function settle(tar_code, spawn_err)
+      pcall(uv.fs_unlink, job.archive)
+      if job.code ~= 0 or tar_code ~= 0 then
+        for _, path in ipairs(job.paths) do
+          failed_paths[path] = true
+        end
+      end
+      if spawn_err then
+        hard_err = hard_err or ("manicule: cannot extract staged baselines: %s"):format(spawn_err)
+      end
+      settled = settled + 1
+      extracting = false
+      pump()
+    end
+    if job.code ~= 0 then
+      settle(0) -- the archive itself failed: nothing to extract, self-heal covers it
+      return
+    end
+    M.run_async({ "tar", "-xf", job.archive, "-C", dir }, nil, function(result, spawn_err)
+      settle(result.code, spawn_err)
+    end)
+  end
+
+  if #chunks == 0 then
+    vim.schedule(finish_if_done)
+    return
+  end
+  for _, chunk_paths in ipairs(chunks) do
+    local archive_path = vim.fn.tempname() .. ".tar"
+    M.run_async(archive_argv(root, ref, archive_path, chunk_paths), nil, function(result)
+      queue[#queue + 1] = { paths = chunk_paths, archive = archive_path, code = result.code }
+      pump()
+    end)
   end
 end
 
 ---Write baseline versions of `entries` under `dir`, mirroring relative
 ---paths. Returns diff pairs; `right` always names the worktree path even
 ---when the file was deleted (callers branch on `status == "D"`).
+---The post-materialize tail shared by both stage_baseline variants:
+---stage an empty left for every "A" entry (so the diff shows
+---all-added) and build the diff pairs.
+---@param root string
+---@param entries {path: string, status: string}[]
+---@param dir string
+---@return {left: string, right: string, status: string, path: string}[]
+local function baseline_pairs(root, entries, dir)
+  local known_dirs = {}
+  local files = {}
+  for _, entry in ipairs(entries) do
+    local left = dir .. "/" .. entry.path
+    if entry.status == "A" then
+      write_regular(left, "", known_dirs)
+    end
+    table.insert(files, {
+      left = left,
+      right = root .. "/" .. entry.path,
+      status = entry.status,
+      path = entry.path,
+    })
+  end
+  return files
+end
+
 ---@param root string
 ---@param base string
 ---@param entries {path: string, status: string}[]
@@ -359,23 +651,34 @@ function M.stage_baseline(root, base, entries, dir)
     end
   end
   M.materialize(root, base, tracked, dir)
+  return baseline_pairs(root, entries, dir)
+end
 
-  local known_dirs = {}
-  local files = {}
+---Async `M.stage_baseline`; `cb(files|nil, err|nil)` on the main loop.
+---@param root string
+---@param base string
+---@param entries {path: string, status: string}[]
+---@param dir string
+---@param cb fun(files: {left: string, right: string, status: string, path: string}[]|nil, err: string|nil)
+function M.stage_baseline_async(root, base, entries, dir, cb)
+  local tracked = {}
   for _, entry in ipairs(entries) do
-    local left = dir .. "/" .. entry.path
-    if entry.status == "A" then
-      -- Added: stage an empty left so the diff shows all-added.
-      write_regular(left, "", known_dirs)
+    if entry.status ~= "A" then
+      table.insert(tracked, entry.path)
     end
-    table.insert(files, {
-      left = left,
-      right = root .. "/" .. entry.path,
-      status = entry.status,
-      path = entry.path,
-    })
   end
-  return files
+  M.materialize_async(root, base, tracked, dir, function(err)
+    if err then
+      cb(nil, err)
+      return
+    end
+    local ok, files = pcall(baseline_pairs, root, entries, dir)
+    if ok then
+      cb(files, nil)
+    else
+      cb(nil, tostring(files))
+    end
+  end)
 end
 
 return M

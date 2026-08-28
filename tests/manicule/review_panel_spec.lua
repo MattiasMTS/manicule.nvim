@@ -54,6 +54,19 @@ local function span_marks(row, hl)
   return found
 end
 
+---Start a session and block until the DEFERRED diffstat fill lands
+---(start() schedules it in chunked event-loop steps and refreshes the
+---panel once at the end): these specs assert full rows — `+A −R`
+---included — and stable renders, both of which need the counts present.
+local function start_review(opts)
+  local R = require("manicule.review")
+  assert.is_true(R.start(opts))
+  vim.wait(2000, function()
+    return R.diffstat() ~= nil
+  end, 5)
+  assert.is_truthy(R.diffstat(), "deferred diffstat fill did not land")
+end
+
 local function add_comment(path, body, line)
   vim.cmd.edit(vim.fn.fnameescape(path))
   vim.api.nvim_win_set_cursor(0, { line or 1, 0 })
@@ -81,7 +94,7 @@ describe("manicule review panel substrate", function()
   it("renders into an owned scratch buffer, not the quickfix list", function()
     local R = require("manicule.review")
     local qf_size_before = #vim.fn.getqflist()
-    assert.is_true(R.start({ files = make_pairs(2), label = "substrate" }))
+    start_review({ files = make_pairs(2), label = "substrate" })
 
     local winid = assert(panel().winid(), "panel window not open")
     local bufnr = vim.api.nvim_win_get_buf(winid)
@@ -110,7 +123,7 @@ describe("manicule review panel substrate", function()
 
   it("caps the panel height at 12 rows for large reviews", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(15), label = "tall" }))
+    start_review({ files = make_pairs(15), label = "tall" })
     local winid = assert(panel().winid(), "panel window not open")
     assert.are.equal(12, vim.api.nvim_win_get_height(winid))
   end)
@@ -125,7 +138,7 @@ describe("manicule review panel substrate", function()
     vim.cmd.wincmd("p")
     vim.fn.setloclist(0, { { filename = files[1].right, lnum = 1 } })
 
-    assert.is_true(R.start({ files = files, label = "qf-free" }))
+    start_review({ files = files, label = "qf-free" })
     local p = panel()
     assert.is_true(p.toggle()) -- hide
     assert.is_true(p.toggle()) -- reopen
@@ -139,7 +152,7 @@ describe("manicule review panel substrate", function()
 
   it("sets buffer-local keymaps with descriptions on the panel only", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "maps" }))
+    start_review({ files = make_pairs(1), label = "maps" })
     local bufnr = assert(panel().bufnr())
 
     local by_lhs = {}
@@ -168,7 +181,7 @@ describe("manicule review panel files view", function()
 
   it("renders one `[S] path  +A \u{2212}R  · N comments` line per pair", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(2), label = "rows" }))
+    start_review({ files = make_pairs(2), label = "rows" })
     local lines = panel_lines()
     assert.are.equal(2, #lines)
     -- make_pairs writes a one-line change per pair: +1 −1.
@@ -181,7 +194,7 @@ describe("manicule review panel files view", function()
     local files = make_pairs(3)
     files[2].status = "A"
     files[3].status = "D"
-    assert.is_true(R.start({ files = files, label = "status" }))
+    start_review({ files = files, label = "status" })
 
     assert.are.equal(0, #span_marks(0, "ManiculePanelStatusA") + #span_marks(0, "ManiculePanelStatusD"))
     assert.are.equal(1, #span_marks(1, "ManiculePanelStatusA"))
@@ -193,7 +206,7 @@ describe("manicule review panel files view", function()
 
   it("dims the comment count tail", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "counts" }))
+    start_review({ files = make_pairs(1), label = "counts" })
     local mark = span_marks(0, "ManiculePanelCount")[1]
     assert.is_truthy(mark, "count span missing")
     local line = panel_lines()[1]
@@ -227,11 +240,27 @@ describe("manicule review panel diffstat", function()
     return { left = left, right = right, status = status, path = name }
   end
 
+  it("first render omits the counts; the deferred fill's refresh adds them", function()
+    local R = require("manicule.review")
+    local files = { pair_of("d.lua", "M", { "a", "b", "c" }, { "a", "B", "c", "d" }) }
+    assert.is_true(R.start({ files = files, label = "stat-deferred" }))
+
+    -- start() rendered synchronously but only SCHEDULED the fill: the
+    -- row has no `+A −R` yet and the cache reports nil.
+    assert.is_nil(R.diffstat())
+    assert.are.equal("  [M] d.lua  \u{00B7} 0 comments", panel_lines()[1])
+
+    vim.wait(2000, function()
+      return R.diffstat() ~= nil
+    end, 5)
+    assert.are.equal("  [M] d.lua  +2 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
+  end)
+
   it("sums added and removed lines across hunks for M pairs", function()
     local R = require("manicule.review")
     -- One changed line + one appended line: +2 −1.
     local files = { pair_of("m.lua", "M", { "a", "b", "c" }, { "a", "B", "c", "d" }) }
-    assert.is_true(R.start({ files = files, label = "stat-m" }))
+    start_review({ files = files, label = "stat-m" })
     assert.are.equal("  [M] m.lua  +2 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 
@@ -242,7 +271,7 @@ describe("manicule review panel diffstat", function()
       pair_of("a.lua", "A", nil, { "one", "two", "three" }),
       pair_of("d.lua", "D", { "one", "two" }, nil),
     }
-    assert.is_true(R.start({ files = files, label = "stat-ad" }))
+    start_review({ files = files, label = "stat-ad" })
     local lines = panel_lines()
     assert.are.equal("  [A] a.lua  +3  \u{00B7} 0 comments", lines[1])
     assert.are.equal("  [D] d.lua  \u{2212}2  \u{00B7} 0 comments", lines[2])
@@ -255,7 +284,7 @@ describe("manicule review panel diffstat", function()
       -- Left never written: job-staged files may vanish; render, no error.
       pair_of("gone.lua", "M", nil, { "return 2" }),
     }
-    assert.is_true(R.start({ files = files, label = "stat-none" }))
+    start_review({ files = files, label = "stat-none" })
     local lines = panel_lines()
     assert.are.equal("  [M] same.lua  \u{00B7} 0 comments", lines[1])
     assert.are.equal("  [M] gone.lua  \u{00B7} 0 comments", lines[2])
@@ -264,7 +293,7 @@ describe("manicule review panel diffstat", function()
   it("highlights the counts via Added/Removed-linked span groups", function()
     local R = require("manicule.review")
     local files = { pair_of("m.lua", "M", { "a", "b", "c" }, { "a", "B", "c", "d" }) }
-    assert.is_true(R.start({ files = files, label = "stat-hl" }))
+    start_review({ files = files, label = "stat-hl" })
 
     local line = panel_lines()[1]
     local added = span_marks(0, "ManiculePanelAdded")
@@ -282,7 +311,7 @@ describe("manicule review panel diffstat", function()
   it("computes the stat once per session: later renders keep the first counts", function()
     local R = require("manicule.review")
     local files = { pair_of("m.lua", "M", { "a" }, { "b" }) }
-    assert.is_true(R.start({ files = files, label = "stat-cache" }))
+    start_review({ files = files, label = "stat-cache" })
     assert.are.equal("  [M] m.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
 
     -- The worktree side changes mid-session; the panel refresh must NOT
@@ -310,7 +339,7 @@ describe("manicule review panel current-pair highlight", function()
 
   it("marks exactly one line and follows next()/prev()", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(3), label = "current" }))
+    start_review({ files = make_pairs(3), label = "current" })
     assert.are.same({ 0 }, current_rows())
 
     R.next()
@@ -323,7 +352,7 @@ describe("manicule review panel current-pair highlight", function()
 
   it("overlays the ▸ marker and bolds the open pair's filename", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(2), label = "marker" }))
+    start_review({ files = make_pairs(2), label = "marker" })
     R.next()
 
     local overlay, bold
@@ -343,7 +372,7 @@ describe("manicule review panel current-pair highlight", function()
   it("derives the current-line background from Normal via blend", function()
     vim.api.nvim_set_hl(0, "Normal", { fg = 0xCDD6F4, bg = 0x1E1E2E })
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "blend" }))
+    start_review({ files = make_pairs(1), label = "blend" })
 
     local expected = require("manicule.ui.color").blend(0x1E1E2E, 0xCDD6F4, 0.08)
     assert.are.equal(expected, vim.api.nvim_get_hl(0, { name = "ManiculePanelCurrent" }).bg)
@@ -358,7 +387,7 @@ describe("manicule review panel current-pair highlight", function()
   it("falls back to CursorLine on transparent themes", function()
     vim.api.nvim_set_hl(0, "Normal", { fg = 0xCDD6F4 })
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "transparent" }))
+    start_review({ files = make_pairs(1), label = "transparent" })
     assert.are.equal("CursorLine", vim.api.nvim_get_hl(0, { name = "ManiculePanelCurrent" }).link)
   end)
 end)
@@ -378,7 +407,7 @@ describe("manicule review panel refresh", function()
   it("preserves the panel cursor across a live refresh", function()
     local R = require("manicule.review")
     local files = make_pairs(3)
-    assert.is_true(R.start({ files = files, label = "cursor" }))
+    start_review({ files = files, label = "cursor" })
     local winid = assert(panel().winid())
     vim.api.nvim_win_set_cursor(winid, { 3, 0 })
 
@@ -391,7 +420,7 @@ describe("manicule review panel refresh", function()
 
   it("coalesces a synchronous burst of mutation events into one render", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(2), label = "burst" }))
+    start_review({ files = make_pairs(2), label = "burst" })
 
     -- Drain callbacks already scheduled by start so the spy below only
     -- sees renders caused by the burst fired here.
@@ -429,7 +458,7 @@ describe("manicule review panel refresh", function()
   it("skips the buffer rewrite when a refresh produces identical rows", function()
     local R = require("manicule.review")
     local files = make_pairs(2)
-    assert.is_true(R.start({ files = files, label = "nowrite" }))
+    start_review({ files = files, label = "nowrite" })
     local bufnr = assert(panel().bufnr())
 
     local writes = 0
@@ -462,7 +491,7 @@ describe("manicule review panel refresh", function()
   it("panel renders skip the editor-wide position sync", function()
     local R = require("manicule.review")
     local files = make_pairs(1)
-    assert.is_true(R.start({ files = files, label = "nosync" }))
+    start_review({ files = files, label = "nosync" })
     add_comment(files[1].right, "synced by the mutating path")
     -- Drain the add's own scheduled refresh before installing the spy.
     vim.wait(200, function()
@@ -492,7 +521,7 @@ describe("manicule review panel refresh", function()
   it("editor-wide sweeps skip manicule's own panel buffer", function()
     local R = require("manicule.review")
     local files = make_pairs(1)
-    assert.is_true(R.start({ files = files, label = "own-surface" }))
+    start_review({ files = files, label = "own-surface" })
     add_comment(files[1].right, "sweep me")
     local manicule = require("manicule")
     local record = manicule.list(nil, { root = ctx.root })[1]
@@ -527,7 +556,7 @@ describe("manicule review panel refresh", function()
   it("refreshes on ManiculeRestored so panel-local undo shows the comment again", function()
     local R = require("manicule.review")
     local files = make_pairs(1)
-    assert.is_true(R.start({ files = files, label = "undo" }))
+    start_review({ files = files, label = "undo" })
     add_comment(files[1].right, "restore me")
     vim.wait(200)
     assert.is_truthy(panel_lines()[1]:find("1 comments", 1, true))
@@ -556,7 +585,7 @@ describe("manicule review panel lifecycle", function()
 
   it("tears down when the user :quits the panel window and toggle reopens", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "winclosed" }))
+    start_review({ files = make_pairs(1), label = "winclosed" })
     local p = panel()
     local winid = assert(p.winid())
 
@@ -575,7 +604,7 @@ describe("manicule review panel lifecycle", function()
 
   it("close() is idempotent and stop() leaves no panel state behind", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "close" }))
+    start_review({ files = make_pairs(1), label = "close" })
     local p = panel()
     p.close()
     p.close()
@@ -585,7 +614,7 @@ describe("manicule review panel lifecycle", function()
     R.stop()
     -- A fresh session starts clean in files view.
     local files = make_pairs(2)
-    assert.is_true(R.start({ files = files, label = "fresh" }))
+    start_review({ files = files, label = "fresh" })
     assert.are.equal(2, #panel_lines())
     assert.is_truthy(panel_lines()[1]:find("f1.lua", 1, true))
   end)
@@ -630,7 +659,7 @@ describe("manicule review panel file icons", function()
   it("prepends the filetype icon with its highlight when icons are enabled", function()
     -- ui.icons defaults to "auto"; the stubbed provider makes it live.
     stub_mini_icons("@", "MiniIconsAzure")
-    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "panel-icons" }))
+    start_review({ files = make_pairs(2), label = "panel-icons" })
     local lines = panel_lines()
     assert.are.equal(2, #lines)
     for i, line in ipairs(lines) do
@@ -650,12 +679,12 @@ describe("manicule review panel file icons", function()
   it("omits the icon when ui.icons = false", function()
     stub_mini_icons("@")
     require("manicule.config").get().ui.icons = false
-    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-off" }))
+    start_review({ files = make_pairs(1), label = "panel-icons-off" })
     assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 
   it("omits the icon when no provider is loadable (auto)", function()
-    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-auto-none" }))
+    start_review({ files = make_pairs(1), label = "panel-icons-auto-none" })
     assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
 
@@ -667,7 +696,7 @@ describe("manicule review panel file icons", function()
         end,
       }
     end
-    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-erroring" }))
+    start_review({ files = make_pairs(1), label = "panel-icons-erroring" })
     -- Provider loadable (icons enabled) but erroring: a blank cell
     -- keeps the column so mixed successes/failures still line up.
     assert.are.equal("    [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
@@ -697,7 +726,7 @@ describe("manicule review panel viewed tracking", function()
 
   it("v toggles the row's viewed state: \u{2713} lead, dim, progress", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(2), label = "viewed" }))
+    start_review({ files = make_pairs(2), label = "viewed" })
     local winid = assert(panel().winid())
     assert.is_truthy(vim.wo[winid].winbar:find("0/2 viewed", 1, true))
 
@@ -720,7 +749,7 @@ describe("manicule review panel viewed tracking", function()
 
   it("dims the whole viewed row EXCEPT the diffstat spans", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "viewed-dim" }))
+    start_review({ files = make_pairs(1), label = "viewed-dim" })
     R.set_viewed(1, true)
 
     -- The +/− spans stay colored (Pierre keeps them visible).
@@ -751,7 +780,7 @@ describe("manicule review panel viewed tracking", function()
 
   it("next() auto-marks the pair it leaves and the panel shows it", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(2), label = "viewed-auto" }))
+    start_review({ files = make_pairs(2), label = "viewed-auto" })
     R.next()
     assert.is_true(R.state().viewed[1])
     assert.are.equal("\u{2713} [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
@@ -809,7 +838,7 @@ describe("manicule review panel tree layout", function()
   ---  6      [M] c.lua …
   local function start_tree()
     local files = make_nested_pairs({ "lua/manicule/a.lua", "lua/manicule/review/b.lua", "tests/c.lua" })
-    assert.is_true(require("manicule.review").start({ files = files, label = "tree" }))
+    start_review({ files = files, label = "tree" })
     press_in_panel(1, "t")
     return files
   end
@@ -830,7 +859,7 @@ describe("manicule review panel tree layout", function()
 
   it("t toggles the Files tab between the flat and tree layouts", function()
     local files = make_nested_pairs({ "lua/manicule/a.lua", "tests/c.lua" })
-    assert.is_true(require("manicule.review").start({ files = files, label = "layout" }))
+    start_review({ files = files, label = "layout" })
     -- Flat by default: full paths, no directory rows.
     assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "did not start flat")
 
@@ -875,7 +904,7 @@ describe("manicule review panel tree layout", function()
 
     require("manicule.review").stop()
     local files = make_nested_pairs({ "lua/manicule/a.lua" })
-    assert.is_true(require("manicule.review").start({ files = files, label = "fresh-layout" }))
+    start_review({ files = files, label = "fresh-layout" })
     assert.is_truthy(panel_lines()[1]:find("lua/manicule/a.lua", 1, true), "tree layout leaked into the new session")
   end)
 
@@ -883,7 +912,7 @@ describe("manicule review panel tree layout", function()
     H.teardown(ctx)
     ctx = H.setup({ review = { panel = { layout = "tree" } } })
     local files = make_nested_pairs({ "lua/manicule/a.lua", "tests/c.lua" })
-    assert.is_true(require("manicule.review").start({ files = files, label = "cfg-tree" }))
+    start_review({ files = files, label = "cfg-tree" })
 
     assert.is_truthy(panel_lines()[1]:find("\u{25BE} lua/manicule", 1, true), "config default did not start tree")
     -- t still toggles back to flat.
@@ -1066,7 +1095,7 @@ describe("manicule review panel tab bar", function()
 
   it("renders the two Files/Comments tabs with counts and the active tab emphasized", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(2), label = "tabs" }))
+    start_review({ files = make_pairs(2), label = "tabs" })
 
     -- Files active with the pair count; Comments with the live session
     -- comment count; no Tree tab; progress right-aligned via %=.
@@ -1082,7 +1111,7 @@ describe("manicule review panel tab bar", function()
 
   it("moves the active emphasis with the view", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "tabs-active" }))
+    start_review({ files = make_pairs(1), label = "tabs-active" })
 
     press_in_panel(1, "L") -- comments
     assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Comments 0", 1, true), winbar())
@@ -1095,7 +1124,7 @@ describe("manicule review panel tab bar", function()
   it("updates the Comments tab count live", function()
     local R = require("manicule.review")
     local files = make_pairs(1)
-    assert.is_true(R.start({ files = files, label = "tabs-count" }))
+    start_review({ files = files, label = "tabs-count" })
     assert.is_truthy(winbar():find("Comments 0", 1, true), winbar())
 
     add_comment(files[1].right, "count me")
@@ -1109,14 +1138,14 @@ describe("manicule review panel tab bar", function()
 
   it("links the tab groups to Comment (inactive) and Title (active) by default", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "tabs-hl" }))
+    start_review({ files = make_pairs(1), label = "tabs-hl" })
     assert.are.equal("Comment", vim.api.nvim_get_hl(0, { name = "ManiculePanelTab" }).link)
     assert.are.equal("Title", vim.api.nvim_get_hl(0, { name = "ManiculePanelTabActive" }).link)
   end)
 
   it("L and H wrap around the Files → Comments order", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "tabs-wrap" }))
+    start_review({ files = make_pairs(1), label = "tabs-wrap" })
 
     press_in_panel(1, "L") -- files forward to comments
     assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Comments", 1, true), winbar())
@@ -1130,7 +1159,7 @@ describe("manicule review panel tab bar", function()
 
   it("no longer maps <Tab>/<S-Tab> in the panel buffer", function()
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "tabs-unmap" }))
+    start_review({ files = make_pairs(1), label = "tabs-unmap" })
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(assert(panel().bufnr()), "n")) do
       local lhs = map.lhs:lower()
       assert.are_not.equal("<tab>", lhs, "<Tab> still mapped in the panel")
@@ -1166,7 +1195,7 @@ describe("manicule review panel registered tabs", function()
       end,
     })
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "reg-tabs" }))
+    start_review({ files = make_pairs(1), label = "reg-tabs" })
 
     -- Winbar order: Files, Comments, then the registered tab.
     local bar = winbar()
@@ -1205,7 +1234,7 @@ describe("manicule review panel placement", function()
 
   it("left: full-height side split at the far left", function()
     ctx = H.setup({ review = { panel = { position = "left" } } })
-    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "left" }))
+    start_review({ files = make_pairs(2), label = "left" })
     local winid = assert(panel().winid())
     assert.are.equal(0, vim.api.nvim_win_get_position(winid)[2])
     assert.are.equal(side_width(), vim.api.nvim_win_get_width(winid))
@@ -1219,7 +1248,7 @@ describe("manicule review panel placement", function()
 
   it("right: full-height side split placed OUTERMOST", function()
     ctx = H.setup({ review = { panel = { position = "right" } } })
-    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "right" }))
+    start_review({ files = make_pairs(2), label = "right" })
     local winid = assert(panel().winid())
     local col = vim.api.nvim_win_get_position(winid)[2]
     assert.are.equal(vim.o.columns, col + vim.api.nvim_win_get_width(winid))
@@ -1229,7 +1258,7 @@ describe("manicule review panel placement", function()
 
   it("size overrides the per-position default", function()
     ctx = H.setup({ review = { panel = { position = "bottom", size = 5 } } })
-    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "sized" }))
+    start_review({ files = make_pairs(1), label = "sized" })
     local winid = assert(panel().winid())
     assert.are.equal(5, vim.api.nvim_win_get_height(winid))
 
@@ -1237,14 +1266,14 @@ describe("manicule review panel placement", function()
     -- Runtime mutation (same pattern as ui.icons above): the panel
     -- reads placement at open time.
     require("manicule.config").get().review.panel = { position = "right", size = 40 }
-    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "sized-right" }))
+    start_review({ files = make_pairs(1), label = "sized-right" })
     winid = assert(panel().winid())
     assert.are.equal(40, vim.api.nvim_win_get_width(winid))
   end)
 
   it("float: centered editor-relative window that takes focus", function()
     ctx = H.setup({ review = { panel = { position = "float" } } })
-    assert.is_true(require("manicule.review").start({ files = make_pairs(2), label = "float" }))
+    start_review({ files = make_pairs(2), label = "float" })
     local winid = assert(panel().winid())
     local cfg = vim.api.nvim_win_get_config(winid)
     assert.are.equal("editor", cfg.relative)
@@ -1262,7 +1291,7 @@ describe("manicule review panel placement", function()
   it("float: q closes the panel and keeps the session", function()
     ctx = H.setup({ review = { panel = { position = "float" } } })
     local R = require("manicule.review")
-    assert.is_true(R.start({ files = make_pairs(1), label = "float-q" }))
+    start_review({ files = make_pairs(1), label = "float-q" })
     press_in_panel(1, "q")
     assert.is_nil(panel().winid(), "q did not close the float panel")
     assert.is_truthy(R.state(), "q killed the session")
@@ -1273,7 +1302,7 @@ describe("manicule review panel placement", function()
 
   it("q is not mapped for split positions", function()
     ctx = H.setup()
-    assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "no-q" }))
+    start_review({ files = make_pairs(1), label = "no-q" })
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(assert(panel().bufnr()), "n")) do
       assert.are_not.equal("q", map.lhs, "q leaked into a split-position panel")
     end

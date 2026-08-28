@@ -917,8 +917,14 @@ local function update_winbar(comment_count)
   if not project_mode and not state then
     return
   end
+  -- While a resolve is in flight the Files tab is the busy one: its
+  -- count is unknown, so the title carries the spinner frame instead
+  -- (the same busy convention registered tabs get).
+  local resolving = state ~= nil and state.resolving == true
   local labels = {
-    files = state and ("Files %d"):format(#state.files) or "Files",
+    files = state and (resolving and ("Files %s"):format(SPINNER_FRAMES[spinner_index]) or ("Files %d"):format(
+      #state.files
+    )) or "Files",
     comments = ("Comments %d"):format(comment_count or 0),
   }
   local parts = {}
@@ -942,11 +948,16 @@ local function update_winbar(comment_count)
     vim.wo[panel_winid].winbar = bar .. "%#ManiculePanelTab# \u{00B7} project"
     return
   end
-  local viewed = 0
-  for _ in pairs(state.viewed or {}) do
-    viewed = viewed + 1
+  local progress
+  if resolving then
+    progress = "resolving\u{2026}"
+  else
+    local viewed = 0
+    for _ in pairs(state.viewed or {}) do
+      viewed = viewed + 1
+    end
+    progress = ("%d/%d viewed"):format(viewed, #state.files)
   end
-  local progress = ("%d/%d viewed"):format(viewed, #state.files)
   -- `%*` after `%=` resets to the plain WinBar highlight for the
   -- right-aligned progress.
   vim.wo[panel_winid].winbar = bar .. "%=%*" .. winbar_escape(progress)
@@ -1013,6 +1024,8 @@ local function render(comment_records)
     current_view = project_mode and "comments" or "files"
     custom = nil
   end
+  local state = require("manicule.review").state()
+  local resolving = state ~= nil and state.resolving == true
   local rows, comment_count
   local view_key = current_view
   if custom then
@@ -1021,7 +1034,13 @@ local function render(comment_records)
     comment_count = session_comment_count()
   elseif current_view == "files" then
     view_key = "files:" .. current_layout()
-    if current_layout() == "tree" then
+    if resolving then
+      -- The resolve is still staging (review shell open, no pairs
+      -- yet): one placeholder row, animated by the shared ticker.
+      local text = ("%s resolving %s\u{2026}"):format(SPINNER_FRAMES[spinner_index], state.label)
+      rows = { { text = text, spans = { { 0, #text, "ManiculePanelCount" } }, data = { kind = "resolving" } } }
+      comment_count = 0
+    elseif current_layout() == "tree" then
       rows, comment_count = build_tree_rows()
     else
       rows, comment_count = build_file_rows()
@@ -1099,14 +1118,27 @@ local function stop_spinner()
   end
 end
 
+---Is the review session mid-resolve (shell open, resolver staging)?
+---The panel is that state's surface: the Files tab shows the animated
+---placeholder row and the winbar the busy Files title.
+---@return boolean
+local function session_resolving()
+  local state = require("manicule.review").state()
+  return state ~= nil and state.resolving == true
+end
+
 ---Does anything need frames right now? True while the panel window is
----up and some available registered tab reports busy(), or the CURRENT
----tab reports animated(). This is the ticker's run condition — checked
----per tick, so the timer stops itself the moment everything settles.
+---up and the session is resolving, some available registered tab
+---reports busy(), or the CURRENT tab reports animated(). This is the
+---ticker's run condition — checked per tick, so the timer stops itself
+---the moment everything settles.
 ---@return boolean
 local function spinner_needed()
   if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return false
+  end
+  if session_resolving() then
+    return true
   end
   for _, tab in ipairs(registered_tabs) do
     if tab_available(tab) and (tab_busy(tab) or (tab.name == current_view and tab_animated(tab))) then
@@ -1123,9 +1155,10 @@ local function spinner_tick()
   end
   spinner_index = spinner_index % #SPINNER_FRAMES + 1
   local tab = tab_by_name(current_view)
-  if tab and tab_animated(tab) then
+  if (tab and tab_animated(tab)) or (session_resolving() and current_view == "files") then
     -- Animated rows: a full refresh so build() draws the fresh frame
-    -- and recomputes anything time-derived (elapsed counters).
+    -- and recomputes anything time-derived (elapsed counters). The
+    -- resolving placeholder is a single animated row, same deal.
     refresh()
   else
     -- Busy titles only: resetting the winbar is cheap and never
@@ -1871,9 +1904,14 @@ function M.prefetch()
 end
 
 ---Open the panel (files view) for the active session. Re-renders in
----place when the window already exists. No-op without a session.
+---place when the window already exists — re-fitting a bottom split's
+---height to the session's file count, because review.begin opens the
+---panel BEFORE the resolver knows how many pairs exist (0 files → the
+---2-row minimum) and the attach re-open must grow it to the real
+---count. No-op without a session.
 function M.open()
-  if not require("manicule.review").state() then
+  local state = require("manicule.review").state()
+  if not state then
     return
   end
   -- Always start in files view; a session panel is never project mode.
@@ -1885,6 +1923,15 @@ function M.open()
   current_view = "files"
   file_filter = nil
   if panel_winid and vim.api.nvim_win_is_valid(panel_winid) then
+    local cfg = panel_config()
+    if cfg.position == "bottom" then
+      pcall(vim.api.nvim_win_set_height, panel_winid, cfg.size or math.min(12, #state.files + 2))
+    elseif cfg.position == "float" then
+      -- Modal-ish like open_window's enter=true: the attach re-open
+      -- lands after open_pair focused a file window, and the float
+      -- must end up focused exactly as a from-scratch open would.
+      pcall(vim.api.nvim_set_current_win, panel_winid)
+    end
     render()
     return
   end

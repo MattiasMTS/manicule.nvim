@@ -270,40 +270,26 @@ if vim.g.manicule_no_default_keymaps ~= 1 then
   })
 end
 
--- Review mode commands
+-- Review mode commands. `:ManiculeReview` returns within one frame:
+-- review.start_async opens the shell (tab + panel with a resolving
+-- spinner) immediately and the resolver runs as async continuations —
+-- see review.start_async / sources.resolve_async. Errors resolve late
+-- and always notify from a scheduled callback, safely outside the
+-- command context (an ERROR notify inside nvim_cmd — the lazy-loading
+-- stub re-invocation path — behaves like :echoerr and is rethrown as
+-- a "Vim:" traceback).
 vim.api.nvim_create_user_command("ManiculeReview", function(opts)
-  -- Schedule error notifies: on lazy-loading stubs the command is re-invoked
-  -- via nvim_cmd, where an ERROR notify behaves like :echoerr and is
-  -- rethrown as a "Vim:" traceback. Deferring past the command context
-  -- keeps it a plain red message.
-  local function notify_error(msg)
-    vim.schedule(function()
-      vim.notify(msg, vim.log.levels.ERROR)
-    end)
-  end
-  local function resolve_and_start(fargs)
-    local sources = require("manicule.review.sources")
-    local job, err = sources.resolve(fargs, {})
-    if not job then
-      notify_error(err or "manicule: cannot resolve review")
-      return
-    end
-    local ok, start_err = require("manicule.review").start(job)
-    if not ok then
-      notify_error(start_err)
-    end
-  end
   -- Bare `pr`: pick an open PR via vim.ui.select, then proceed as if
   -- `:ManiculeReview pr <n>` was typed. Intercepted BEFORE resolve —
-  -- resolve is synchronous, the picker is async, and the git resolver
-  -- would otherwise try (and fail) to treat "pr" as a ref.
+  -- the git resolver would otherwise try (and fail) to treat "pr" as
+  -- a ref.
   if #opts.fargs == 1 and opts.fargs[1] == "pr" then
     require("manicule.review.pr_picker").pick(function(number)
-      resolve_and_start({ "pr", number })
+      require("manicule.review").start_async({ "pr", number })
     end)
     return
   end
-  resolve_and_start(opts.fargs)
+  require("manicule.review").start_async(opts.fargs)
 end, {
   nargs = "*",
   complete = function(arglead, cmdline)

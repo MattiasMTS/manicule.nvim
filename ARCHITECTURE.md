@@ -457,6 +457,19 @@ worktree right). One active session at a time, in its own tab page.
   (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI).
 - `register(resolver)` prepends to registry → user resolvers shadow builtins.
 - All resolvers return `{files: [{left, right, status, path}], label}`.
+- Two entry points share the registry. `resolve(fargs, opts)` blocks until
+  the job is staged (tests, external callers). `resolve_async(fargs, opts,
+  cb)` — the `:ManiculeReview` path — returns immediately and fires `cb(job,
+  err)` on the main loop: the builtin git/pr resolvers run as spawn+callback
+  continuations, and a resolver registered without its optional
+  `resolve_async` runs its sync `resolve` inside one scheduled step. The
+  command layer pairs it with `review.start_async`, which opens the review
+  shell (tab + panel spinner) within a frame, attaches the pairs from the
+  callback, and guards against stale resolves with a session generation
+  counter (`:ManiculeReviewStop`/a superseding `:ManiculeReview` mid-resolve
+  tears down cleanly; the late callback only deletes its ownerless stage
+  dirs). Per-pair panel diffstat fills after attach in deferred chunks
+  (`review.diffstat()` returns nil until the fill's single refresh).
 - Resolver authors get the git plumbing as a library
   (`require("manicule.review.git")`): `root(dir)` (repo toplevel),
   `rev_parse(root, ref)` / `merge_base(root, a, b)` (both return
@@ -464,13 +477,20 @@ worktree right). One active session at a time, in its own tab page.
   untracked as "A"), `stage_baseline(root, base, entries, dir)` (write
   baseline copies under `dir` and return ready `{left, right, status,
   path}` pairs), and `materialize(root, ref, paths, dir)` (batch-extract
-  arbitrary blobs). Custom resolvers compose these instead of shelling
-  out to git themselves.
+  arbitrary blobs). Each has an `_async` twin (`run_async`, `root_async`,
+  `rev_parse_async`, `merge_base_async`, `changed_files_async`,
+  `stage_baseline_async`, `materialize_async`) whose callback fires on the
+  main loop. Custom resolvers compose these instead of shelling out to git
+  themselves.
 - `pr <n>` with the head checked out also imports existing PR review comments
   (`lua/manicule/review/import.lua`): `gh api .../pulls/<n>/comments --paginate`
   → project records with `meta.github = {id, url, imported = true}`. Best-effort
   (failure → WARN, review still opens), deduped on `meta.github.id`, skipped
-  entirely on the both-sides-staged path. Imported records are excluded from
+  entirely on the both-sides-staged path. On the async path the import runs
+  AFTER the session is on screen (`import.github_pr_async`, kicked by
+  `review.start_async` via the job's `github_import` marker; one panel
+  refresh reconciles the counts when it lands); the sync `sources.resolve`
+  still imports before returning. Imported records are excluded from
   `finish()` (`M.list`'s `exclude_imported` filter) and skipped by the github
   sink so GitHub's own comments are never echoed back.
 

@@ -17,10 +17,12 @@ local M = {}
 local uv = vim.uv
 
 ---@class manicule.ReviewSession
----@field files {left: string, right: string, status: string, path: string}[]
+---@field files {left: string, right: string, status: string, path: string}[] empty while `resolving`
 ---@field label string
 ---@field sink string|nil
 ---@field ctx table|nil sink dispatch context (finish() passes it to the sink)
+---@field resolving boolean|nil true between begin() and attach(): the shell is open, the resolver is still staging
+---@field generation integer monotonic session counter; a stale resolve callback whose generation no longer matches must not attach
 ---@field index integer
 ---@field tab integer
 ---@field root string|nil project root the worktree files live under (cached by start)
@@ -32,9 +34,19 @@ local uv = vim.uv
 ---@field diffstat {added: integer, removed: integer}[]|nil per-pair line counts, filled lazily by M.diffstat()
 ---@field viewed table<integer, true> pair index -> viewed; auto-marked by next/prev, toggled by the panel's `v`
 ---@field winbar_wins table<integer, true> windows whose winbar the session set (cleared on pair switch and stop)
+---@field breadcrumb_win integer|nil window carrying the OPEN pair's breadcrumb, so the deferred diffstat fill can repaint it with the counts
 
 ---@type manicule.ReviewSession|nil
 local session = nil
+
+---Bumped by every begin(); stamped onto the session. The async resolve
+---callback compares its captured value against the LIVE session so a
+---resolve outliving its session (stopped, or superseded by a newer
+---`:ManiculeReview`) can never attach — outstanding subprocess handles
+---are simply orphaned (vim.system offers no cross-callback kill here
+---worth the plumbing) and their staged output is deleted when the
+---stale callback finally lands.
+local generation = 0
 
 local function protect_left(bufnr)
   vim.bo[bufnr].modifiable = false
@@ -106,6 +118,17 @@ local function clear_winbars(winbar_wins)
   end
 end
 
+---Set the OPEN pair's breadcrumb winbar, remembering the window so the
+---deferred diffstat fill (fill_diffstat) can repaint the counts onto a
+---breadcrumb that rendered before they existed.
+---@param winid integer
+---@param pair {path: string, status: string}
+---@param stat {added: integer, removed: integer}|nil
+local function set_breadcrumb(winid, pair, stat)
+  set_winbar(winid, breadcrumb(pair, stat))
+  session.breadcrumb_win = winid
+end
+
 local function close_session_windows()
   -- Reduce the session tab windows to diff windows only (preserve the
   -- panel and any user quickfix). Unified paint is buffer-scoped, so it
@@ -173,7 +196,9 @@ end
 ---No-op without a session.
 ---@param index integer
 function M.open_pair(index)
-  if not session then
+  -- No pairs yet while a resolve is in flight (begin() opened only the
+  -- shell): nothing to show, and the wrap math below needs #files >= 1.
+  if not session or #session.files == 0 then
     return
   end
   if index < 1 then
@@ -207,7 +232,7 @@ function M.open_pair(index)
     vim.cmd.edit(vim.fn.fnameescape(pair.left))
     protect_left(vim.api.nvim_get_current_buf())
     map_navigation(vim.api.nvim_get_current_buf())
-    set_winbar(vim.api.nvim_get_current_win(), breadcrumb(pair, stat))
+    set_breadcrumb(vim.api.nvim_get_current_win(), pair, stat)
     vim.notify(("manicule: %s was deleted; comments here are file-level notes"):format(pair.path), vim.log.levels.INFO)
     require("manicule.review.panel").sync_index(index)
     return
@@ -229,7 +254,7 @@ function M.open_pair(index)
       vim.notify(err or "manicule: cannot render inline diff", vim.log.levels.WARN)
     end
     map_navigation(buf)
-    set_winbar(vim.api.nvim_get_current_win(), breadcrumb(pair, stat))
+    set_breadcrumb(vim.api.nvim_get_current_win(), pair, stat)
     require("manicule.review.panel").sync_index(index)
     return
   end
@@ -244,7 +269,7 @@ function M.open_pair(index)
   protect_left(vim.api.nvim_get_current_buf())
   map_navigation(vim.api.nvim_get_current_buf())
   map_navigation(right_buf)
-  set_winbar(right_win, breadcrumb(pair, stat))
+  set_breadcrumb(right_win, pair, stat)
   set_winbar(left_win, winbar_escape(pair.path .. " \u{00B7} baseline"))
   vim.cmd.wincmd("p") -- focus back on the right / worktree side
   if cfg.fold_unchanged == false then
@@ -386,14 +411,17 @@ end
 ---form.
 ---
 ---Without arguments, the ACTIVE session's diffstat, index-aligned with
----`state().files`. Computed ONCE, lazily on the first call (the first
----panel render), and cached on the session — pairs are immutable, so
----there is nothing to invalidate. The worktree side CAN change under a
----live session; the stat deliberately stays as-of-first-request rather
----than re-reading every pair per render (the next :ManiculeReview
+---`state().files` — or nil until the DEFERRED fill completes. The fill
+---(kicked when the session's files attach, see fill_diffstat) computes
+---the stat ONCE per session in chunked event-loop steps so the first
+---panel render never pays 2×N file reads; rows simply omit the counts
+---until the fill's one refresh. Pairs are immutable, so there is
+---nothing to invalidate. The worktree side CAN change under a live
+---session; the stat deliberately stays as-of-attach rather than
+---re-reading every pair per render (the next :ManiculeReview
 ---recomputes).
 ---@param files? {left: string, right: string, status: string}[] explicit pairs (bypasses the session cache)
----@return {added: integer, removed: integer}[]|nil stats nil only for the argless form without a session
+---@return {added: integer, removed: integer}[]|nil stats nil for the argless form without a session or before the deferred fill lands
 function M.diffstat(files)
   if files then
     local stats = {}
@@ -405,10 +433,46 @@ function M.diffstat(files)
   if not session then
     return nil
   end
-  if not session.diffstat then
-    session.diffstat = M.diffstat(session.files)
-  end
   return session.diffstat
+end
+
+---Pairs computed per deferred diffstat step: ~200 keeps one step under
+---~10ms on the 2000-file benchmark repo (the whole sync pass is ~75ms).
+local DIFFSTAT_CHUNK = 200
+
+---Fill `s.diffstat` in chunked vim.schedule steps, then refresh the
+---panel ONCE so the rows gain their `+A −R` counts. The cache lands
+---atomically (M.diffstat() returns nil until every pair is computed).
+---Guarded by session identity: a stopped or superseded session's loop
+---halts on its next step.
+---@param s manicule.ReviewSession
+local function fill_diffstat(s)
+  local stats = {}
+  local index = 1
+  local function step()
+    if session ~= s then
+      return
+    end
+    local last = math.min(index + DIFFSTAT_CHUNK - 1, #s.files)
+    for i = index, last do
+      stats[i] = pair_diffstat(s.files[i])
+    end
+    index = last + 1
+    if index <= #s.files then
+      vim.schedule(step)
+      return
+    end
+    s.diffstat = stats
+    require("manicule.review.panel").refresh()
+    -- The open pair's breadcrumb rendered before the counts existed:
+    -- repaint it now that they do (pair switches recompute it anyway).
+    local win = s.breadcrumb_win
+    local pair = s.files[s.index]
+    if win and pair and vim.api.nvim_win_is_valid(win) then
+      vim.wo[win].winbar = breadcrumb(pair, stats[s.index])
+    end
+  end
+  vim.schedule(step)
 end
 
 ---Switch the diff rendering used by review sessions. With no argument,
@@ -478,33 +542,52 @@ local function build_session_cache(s)
   end
 end
 
----Start a review session over explicit file pairs. `stage_dirs` lists
----staging directories the session OWNS: stop() deletes them (and wipes
----any buffer still pointing into them). Resolvers report only dirs they
----created themselves. Pure: returns instead of notifying (the command
----layer notifies).
----@param opts {files: table[], label?: string, sink?: string, ctx?: table, stage_dirs?: string[]}
----@return boolean ok, string|nil err
-function M.start(opts)
-  opts = opts or {}
-  if type(opts.files) ~= "table" or #opts.files == 0 then
-    return false, "manicule: review has no files to show"
-  end
+---Open the review SHELL: a fresh tab plus the panel showing a
+---resolving placeholder — no file pairs yet. The other half of
+---start(): attach() below lands the resolved files into this session.
+---Split out so `M.start_async` can put a surface on screen within one
+---frame while its resolver still runs.
+---@param label string
+---@return integer generation
+local function begin(label)
   if session then
     M.stop()
   end
+  generation = generation + 1
   vim.cmd.tabnew()
   session = {
-    files = opts.files,
-    label = opts.label or "review",
-    sink = opts.sink,
-    ctx = opts.ctx,
-    stage_dirs = opts.stage_dirs,
-    index = 1,
+    files = {},
+    label = label or "review",
+    resolving = true,
+    generation = generation,
+    index = 0,
     tab = vim.api.nvim_get_current_tabpage(),
+    uris = {},
+    uri_set = {},
+    uri_index = {},
     viewed = {},
     winbar_wins = {},
   }
+  -- The panel is an owned scratch-buffer split (files/comments views);
+  -- review mode never touches the quickfix stack. While resolving it
+  -- renders the spinner placeholder row + busy winbar.
+  require("manicule.review.panel").open()
+  return generation
+end
+
+---Land a resolved job's files into the begin()-opened session: build
+---the session cache, open the first pair, re-render the panel, kick
+---the prefetch-enabled tabs, the deferred diffstat fill, and (for pr
+---jobs) the post-open GitHub comment import.
+---@param job {files: table[], label?: string, sink?: string, ctx?: table, stage_dirs?: string[], github_import?: {root: string, number: string|integer}}
+local function attach(job)
+  session.files = job.files
+  session.label = job.label or session.label
+  session.sink = job.sink
+  session.ctx = job.ctx
+  session.stage_dirs = job.stage_dirs
+  session.resolving = nil
+  session.index = 1
   build_session_cache(session)
   -- Word-level diff emphasis in split mode: upgrade the stock
   -- `inline:simple` to `inline:word` for the session. A user who chose
@@ -516,14 +599,51 @@ function M.start(opts)
     vim.o.diffopt = diffopt:gsub("inline:simple", "inline:word")
   end
   M.open_pair(1)
-  -- The panel is an owned scratch-buffer split (files/comments views);
-  -- review mode never touches the quickfix stack.
+  -- Re-render the (already open) panel now that the rows exist.
   require("manicule.review.panel").open()
   -- Session and panel both exist now: eagerly kick off the fetches of
   -- prefetch-enabled panel tabs (PR header, CI checks) so their first
   -- show renders data instead of a loading row. Gated by
   -- `review.panel.prefetch`; the fetches are async and never block start.
   require("manicule.review.panel").prefetch()
+  -- Per-pair diffstat: deferred chunks + one refresh (see M.diffstat).
+  fill_diffstat(session)
+  -- PR comment import used to block the resolver; it runs AFTER the
+  -- session is on screen now. The records land through the store, and
+  -- the completion refresh reconciles the panel's counts/rows (the
+  -- import notifies its own summary).
+  local import_spec = job.github_import
+  if import_spec then
+    local s = session
+    vim.schedule(function()
+      if session ~= s then
+        return
+      end
+      require("manicule.review.import").github_pr_async(import_spec.root, import_spec.number, function()
+        if session == s then
+          require("manicule.review.panel").refresh()
+        end
+      end)
+    end)
+  end
+end
+
+---Start a review session over explicit file pairs. `stage_dirs` lists
+---staging directories the session OWNS: stop() deletes them (and wipes
+---any buffer still pointing into them). Resolvers report only dirs they
+---created themselves. Pure: returns instead of notifying (the command
+---layer notifies). SYNCHRONOUS by contract — external drivers
+---(start_from_job) and tests hand it pre-staged files; `:ManiculeReview`
+---goes through M.start_async instead.
+---@param opts {files: table[], label?: string, sink?: string, ctx?: table, stage_dirs?: string[]}
+---@return boolean ok, string|nil err
+function M.start(opts)
+  opts = opts or {}
+  if type(opts.files) ~= "table" or #opts.files == 0 then
+    return false, "manicule: review has no files to show"
+  end
+  begin(opts.label)
+  attach(opts)
   return true
 end
 
@@ -615,6 +735,46 @@ function M.stop()
   -- accepted trade (in-session stop/restart is what must not leak).
   cleanup_stage_dirs(stage_dirs)
   return true
+end
+
+---Start a review by resolving `fargs` ASYNCHRONOUSLY — the
+---`:ManiculeReview` path. Returns within the caller's frame: the shell
+---(tab + panel with a resolving spinner) opens immediately, and the
+---resolver's callback attaches the file pairs when staging completes.
+---
+---Cancellation: `:ManiculeReviewStop` (or a second `:ManiculeReview`,
+---which supersedes) during the resolve tears the shell down normally;
+---the resolve keeps running unobserved and its late callback finds the
+---generation stale, deletes the job's now-ownerless staging dirs, and
+---does nothing else. A late resolver FAILURE on the live generation
+---notifies ERROR and closes the shell (the stop() path).
+---@param fargs string[] `:ManiculeReview` arguments
+---@param opts? {cwd?: string, stage_dir?: string} resolver options (tests)
+function M.start_async(fargs, opts)
+  fargs = fargs or {}
+  -- Placeholder label for the resolving shell; attach() replaces it
+  -- with the resolver's real label (e.g. `pr 42: <title>`).
+  local label = #fargs > 0 and table.concat(fargs, " ") or "HEAD"
+  local gen = begin(label)
+  require("manicule.review.sources").resolve_async(fargs, opts or {}, function(job, err)
+    local live = session ~= nil and session.resolving == true and session.generation == gen
+    if not live then
+      -- Stale resolve: the session was stopped or superseded while we
+      -- staged. Nothing owns the job's staging dirs anymore — delete
+      -- them instead of leaking (a caller-provided stage_dir is not in
+      -- stage_dirs and stays the caller's, as always).
+      if job then
+        cleanup_stage_dirs(job.stage_dirs)
+      end
+      return
+    end
+    if not job then
+      M.stop()
+      vim.notify(err or "manicule: cannot resolve review", vim.log.levels.ERROR)
+      return
+    end
+    attach(job)
+  end)
 end
 
 ---Count the session's pending comments without side effects. Records
