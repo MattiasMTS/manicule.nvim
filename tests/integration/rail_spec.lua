@@ -3,7 +3,7 @@ local H = require("helpers")
 local ctx
 
 local function setup_env(opts)
-  ctx = H.setup(vim.tbl_deep_extend("force", { ui = { expand = "rail" } }, opts or {}))
+  ctx = H.setup(vim.tbl_deep_extend("force", { ui = { eol_expand = "rail" } }, opts or {}))
   H.edit_project_file(ctx, "src/rail.lua", {
     "local value = 1",
     "value = value + 1",
@@ -635,7 +635,7 @@ end)
 
 describe("manicule rail review coexistence", function()
   before_each(function()
-    ctx = H.setup({ ui = { expand = "rail" } })
+    ctx = H.setup({ ui = { eol_expand = "rail" } })
   end)
   after_each(teardown_env)
 
@@ -706,12 +706,12 @@ describe("manicule rail review coexistence", function()
   end)
 end)
 
--- Regression pin: with ui.expand = "float" (the shipped default) the eol
+-- Regression pin: with ui.eol_expand = "float" (the shipped default) the eol
 -- expansion behaves exactly as before the rail existed — float popups on
 -- the cursor line, no rail window ever.
 describe("manicule eol float expansion regression", function()
   before_each(function()
-    setup_env({ ui = { expand = "float" } })
+    setup_env({ ui = { eol_expand = "float" } })
   end)
   after_each(teardown_env)
 
@@ -722,7 +722,7 @@ describe("manicule eol float expansion regression", function()
   end
 
   it("keeps the float expansion byte-identical and never opens a rail", function()
-    assert.are.equal("float", require("manicule.config").get().ui.expand)
+    assert.are.equal("float", require("manicule.config").get().ui.eol_expand)
     local bufnr = vim.api.nvim_get_current_buf()
     move_cursor(bufnr, 3)
     require("manicule").add({

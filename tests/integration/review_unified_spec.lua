@@ -57,7 +57,7 @@ end
 describe("manicule review unified mode", function()
   before_each(function()
     -- fold_unchanged defaults to false; the fold tests below opt in.
-    ctx = H.setup({ review = { mode = "unified", fold_unchanged = true } })
+    ctx = H.setup({ review = { diff_mode = "unified", fold_unchanged = true } })
   end)
   after_each(function()
     pcall(function()
@@ -218,7 +218,7 @@ describe("manicule review unified mode", function()
   it("renders the fold line as an unmodified-lines bar", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "unified", fold_unchanged = true, context = 0 },
+      review = { diff_mode = "unified", fold_unchanged = true, context = 0 },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "unified" }))
@@ -252,7 +252,7 @@ describe("manicule review unified mode", function()
   it("does not fold when review.context is disabled by fold_unchanged", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "unified", fold_unchanged = false },
+      review = { diff_mode = "unified", fold_unchanged = false },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "unified" }))
@@ -265,7 +265,7 @@ describe("manicule review unified mode", function()
   it("does not fold by default (fold_unchanged defaults to false)", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "unified" },
+      review = { diff_mode = "unified" },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "unified" }))
@@ -278,7 +278,7 @@ describe("manicule review unified mode", function()
   it("split mode drops the native diff folds by default", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "split" },
+      review = { diff_mode = "split" },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "split" }))
@@ -298,7 +298,7 @@ describe("manicule review unified mode", function()
     vim.o.diffopt = saved:gsub("inline:%w+", "inline:simple")
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "split" },
+      review = { diff_mode = "split" },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "split" }))
@@ -313,7 +313,7 @@ describe("manicule review unified mode", function()
     vim.o.diffopt = saved:gsub("inline:%w+", "inline:char")
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "split" },
+      review = { diff_mode = "split" },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "split" }))
@@ -325,7 +325,7 @@ describe("manicule review unified mode", function()
   it("split mode keeps native diff folds when fold_unchanged is on", function()
     require("manicule").setup({
       store = { dir = ctx.state .. "/", format = "json", canonicalize_symlinks = false, poll_interval_ms = 0 },
-      review = { mode = "split", fold_unchanged = true },
+      review = { diff_mode = "split", fold_unchanged = true },
     })
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pair(), label = "split" }))
@@ -418,6 +418,6 @@ describe("manicule review unified mode", function()
     local mode, err = R.set_diff_mode("sideways")
     assert.is_nil(mode)
     assert.is_truthy(err:find("split", 1, true))
-    assert.are.equal("unified", require("manicule.config").get().review.mode)
+    assert.are.equal("unified", require("manicule.config").get().review.diff_mode)
   end)
 end)

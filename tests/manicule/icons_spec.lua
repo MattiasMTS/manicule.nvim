@@ -38,7 +38,7 @@ end
 ---Set ui.icons on the live merged config (H.setup already ran a full
 ---manicule setup; tests only need to vary this one knob per case).
 local function set_icons_config(value)
-  require("manicule.config").current.ui.icons = value
+  require("manicule.config").get().ui.icons = value
 end
 
 describe("manicule ui icons", function()

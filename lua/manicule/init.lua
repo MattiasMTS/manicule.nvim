@@ -158,7 +158,7 @@ end
 ---and the counter set (whole project / session, no resolved-filter)
 ---from those shared reads.
 ---
----`store.all_for_uri(uri, root)` internally re-reads `store.all(root)`
+---`store.all_for_uri(uri, { root = root })` internally re-reads `store.all(root)`
 ---via `for_uri`, and deriving the counter set separately would read
 ---`store.all(root)` again — two `store.all` calls per render, each
 ---running `M.sync` (`SELECT COALESCE(MAX(id))`) on a cache hit, plus
@@ -288,7 +288,7 @@ local function paint_buffer(bufnr, sticky)
   end
   if sticky == nil then
     local cfg = require("manicule.config").get()
-    sticky = (cfg.ui or {}).sticky
+    sticky = (cfg.ui or {}).always_show_popups
   end
   local render = require("manicule.ui.render")
   local records, counter_records = render_inputs(bufnr)
@@ -318,7 +318,7 @@ end
 ---buffer now resolves its inputs once instead of ~4×.
 local function refresh_all_loaded()
   local cfg = require("manicule.config").get()
-  local sticky = (cfg.ui or {}).sticky
+  local sticky = (cfg.ui or {}).always_show_popups
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
       paint_buffer(bufnr, sticky)
@@ -351,7 +351,7 @@ local function hide_popups_on_leave(bufnr)
       -- so route through `attach_buffer` (reconcile re-schedules the
       -- sticky popups). `attach_buffer` covers both modes.
       local cfg = require("manicule.config").get()
-      if (cfg.ui or {}).sticky then
+      if (cfg.ui or {}).always_show_popups then
         attach_buffer(bufnr)
       else
         refresh_viewport(bufnr)
@@ -419,8 +419,9 @@ function refresh_viewport(bufnr)
   -- Sticky suppresses the viewport pass only for float-style popups
   -- (reconcile already scheduled them all). The "eol" display mode
   -- drives its cursor-line popup expansion through this pass, so it
-  -- keeps receiving CursorMoved-fed updates regardless of `ui.sticky`.
-  if (cfg.ui or {}).sticky and require("manicule.ui.render").display_mode() ~= "eol" then
+  -- keeps receiving CursorMoved-fed updates regardless of
+  -- `ui.always_show_popups`.
+  if (cfg.ui or {}).always_show_popups and require("manicule.ui.render").display_mode() ~= "eol" then
     return
   end
   -- Single-pass: one identify + one store read derives both result sets,
@@ -457,7 +458,10 @@ local function sync_positions_for_buffer(bufnr)
   end
   store.session_load()
 
-  local records = store.all_for_uri(identity.uri, identity.project_root)
+  local records = store.all_for_uri(
+    identity.uri,
+    identity.project_root and { root = identity.project_root } or { session_only = true }
+  )
   if #records == 0 then
     return touched
   end
@@ -728,7 +732,7 @@ function M.setup(opts)
     group = group,
     callback = function()
       local cfg = require("manicule.config").get()
-      if not (cfg.ui or {}).sticky then
+      if not (cfg.ui or {}).always_show_popups then
         return
       end
       -- The window is still in the layout inside the WinClosed callback, so
@@ -818,7 +822,7 @@ function M.setup(opts)
       -- overwrite-by-rename). Drop the URI module's realpath memo
       -- BEFORE the deferred rewrite recomputes the new URI, so the
       -- rename path can never be served a stale resolution.
-      require("manicule.uri")._invalidate_realpath_cache()
+      require("manicule.uri").invalidate_realpath_cache()
       vim.schedule(function()
         on_bufname_changed(ev.buf)
       end)
@@ -1189,11 +1193,11 @@ local function find(id, locator)
   end
 
   -- Panel and picker paths may carry a root, but fall back to every
-  -- loaded project cache so ids remain actionable after the current window
-  -- moved to a panel/help/scratch buffer. This does not load arbitrary
-  -- store files from disk; it only searches roots already touched this
-  -- session.
-  for cached_root in pairs(store._cache()) do
+  -- loaded project store so ids remain actionable after the current window
+  -- moved to a panel/help/scratch buffer. `store.loaded_roots()` does not
+  -- load arbitrary store files from disk; it only lists roots already
+  -- touched this session.
+  for _, cached_root in ipairs(store.loaded_roots()) do
     local record, save, remove = find_project(cached_root)
     if record then
       return record, save, remove
@@ -1312,7 +1316,8 @@ function M.redo_delete()
   -- resolves to — that path could fail to surface the record and drop
   -- the snapshot from the redo stack permanently.
   local store = require("manicule.store")
-  local removed = store.remove_record(snapshot.scope, snapshot.id, snapshot.project_root)
+  local removed =
+    store.remove_record({ scope = snapshot.scope, id = snapshot.id, project_root = snapshot.project_root })
   local ok, err
   if snapshot.scope == "session" then
     ok, err = store.session_save()

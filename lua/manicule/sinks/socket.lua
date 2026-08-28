@@ -61,7 +61,7 @@ function M.setup(opts)
     description = "send structured comments to a local unix socket",
     -- Only a review job supplies ctx.socket, so an interactive pick can
     -- never validate. Register (a review dispatches to "socket" by name
-    -- with sink_ctx) but keep the sink out of pickers, single-sink
+    -- with its session ctx) but keep the sink out of pickers, single-sink
     -- auto-dispatch, and completion. `is_available` would unregister it
     -- entirely and break the review-driven dispatch, hence `hidden`.
     hidden = true,

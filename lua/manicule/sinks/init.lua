@@ -166,7 +166,7 @@ end
 ---List sink names offered for interactive selection.
 ---
 ---Hidden sinks (`spec.hidden`) stay registered — `get`/`dispatch` by name
----keep working, e.g. a review job dispatching to "socket" with sink_ctx —
+---keep working, e.g. a review job dispatching to "socket" with a session ctx —
 ---but are excluded here so pickers, single-sink auto-dispatch, and cmdline
 ---completion never offer a sink that cannot validate without a
 ---caller-supplied ctx.

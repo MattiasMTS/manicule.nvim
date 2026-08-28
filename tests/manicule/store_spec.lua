@@ -363,24 +363,21 @@ describe("manicule.store session scope", function()
 
     vim.cmd.enew()
 
-    local explicit = store.all_for_uri(uri, tmp_root)
-    assert.are.equal(2, #explicit)
-
-    local session_only = store.all_for_uri(uri, nil)
-    assert.are.equal(1, #session_only)
-    assert.are.equal("s", session_only[1].id)
-
-    -- Preferred opts form: `{ root = ... }` / `{ session_only = true }`
-    -- mirror the two positional cases above.
     local opts_root = store.all_for_uri(uri, { root = tmp_root })
     assert.are.equal(2, #opts_root)
 
     local opts_session = store.all_for_uri(uri, { session_only = true })
     assert.are.equal(1, #opts_session)
     assert.are.equal("s", opts_session[1].id)
+
+    -- The pre-opts positional form (a raw root / explicit nil as the
+    -- second argument) is gone: only nil or an opts table is accepted.
+    local ok, err = pcall(store.all_for_uri, uri, tmp_root)
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("opts must be a table", 1, true))
   end)
 
-  it("remove_record accepts a single identity table alongside the positional form", function()
+  it("remove_record dispatches by scope from a single identity table", function()
     local store = require("manicule.store")
     local uri = require("manicule.uri").for_path(tmp_root .. "/remove.lua")
     local function record(id, scope)
@@ -408,9 +405,13 @@ describe("manicule.store session scope", function()
     local removed_session = store.remove_record({ scope = "session", id = "s1" })
     assert.are.equal("s1", removed_session.id)
 
-    -- Positional compat form still works.
-    local removed_positional = store.remove_record("project", "p2", tmp_root)
-    assert.are.equal("p2", removed_positional.id)
+    -- The positional form (scope, id, project_root) is gone.
+    local ok, err = pcall(store.remove_record, "project", "p2", tmp_root)
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("opts must be a table", 1, true))
+
+    local removed_p2 = store.remove_record({ scope = "project", id = "p2", project_root = tmp_root })
+    assert.are.equal("p2", removed_p2.id)
 
     assert.are.equal(0, #store.all_for_uri(uri, { root = tmp_root }))
   end)
@@ -489,10 +490,11 @@ describe("manicule.store session scope", function()
   end)
 
   it("memoizes the branch-scoped store name until _reset", function()
-    -- `store_name` runs on every store read; with `store.branch = true`
-    -- the un-memoized version forked `git branch --show-current` per
-    -- call. The memo pins the load-time name for the whole session
-    -- (keeping cache[root]/sqlite_dbs coherent) and `_reset` drops it.
+    -- `store_name` runs on every store read; with
+    -- `store.scope_by_branch = true` the un-memoized version forked
+    -- `git branch --show-current` per call. The memo pins the load-time
+    -- name for the whole session (keeping cache[root]/sqlite_dbs
+    -- coherent) and `_reset` drops it.
     vim.fn.system({ "git", "init", "-q", tmp_root })
     vim.fn.system({ "git", "-C", tmp_root, "checkout", "-q", "-b", "feature-a" })
     require("manicule").setup({
@@ -501,7 +503,7 @@ describe("manicule.store session scope", function()
         format = "json",
         canonicalize_symlinks = false,
         poll_interval_ms = 0,
-        branch = true,
+        scope_by_branch = true,
       },
     })
     local store = require("manicule.store")

@@ -9,8 +9,9 @@
 -- `ui/render.lua` via `ui/float.lua`. The editor also reuses the render
 -- layer's `winhighlight` so popups and the editor look identical.
 --
--- Submit/cancel keys, initial mode, size, and opacity all come from
--- `manicule.config.get().ui` (see `config.lua`).
+-- Submit/cancel keys, start mode, and size come from
+-- `manicule.config.get().ui.editor`; opacity from `ui.opacity`
+-- (see `config.lua`).
 
 local M = {}
 
@@ -65,24 +66,24 @@ local function first_key(keys, fallback)
   return type(keys) == "table" and keys[1] or fallback
 end
 
----@param cfg manicule.UIConfig
+---@param ecfg manicule.UIEditorConfig
 ---@return string
-local function footer_text(cfg)
-  local submit_hint = first_key(cfg.submit_keys, "<CR>")
-  local cancel_hint = first_key(cfg.cancel_keys, "<Esc>")
-  if cfg.editor_mode == "insert" and is_enter_key(submit_hint) then
+local function footer_text(ecfg)
+  local submit_hint = first_key(ecfg.submit_keys, "<CR>")
+  local cancel_hint = first_key(ecfg.cancel_keys, "<Esc>")
+  if ecfg.start_mode == "insert" and is_enter_key(submit_hint) then
     return string.format("enter newline | normal %s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
   end
   return string.format("%s submit | %s close", key_label(submit_hint), key_label(cancel_hint))
 end
 
----@param cfg manicule.UIConfig
+---@param ecfg manicule.UIEditorConfig
 ---@param anchor_winid integer
 ---@return { width: integer, height: integer }
-local function get_editor_layout(cfg, anchor_winid)
+local function get_editor_layout(ecfg, anchor_winid)
   return {
-    width = math.min(cfg.width, math.max(1, vim.api.nvim_win_get_width(anchor_winid) - 2)),
-    height = math.min(cfg.height, math.max(1, vim.api.nvim_win_get_height(anchor_winid) - 2)),
+    width = math.min(ecfg.width, math.max(1, vim.api.nvim_win_get_width(anchor_winid) - 2)),
+    height = math.min(ecfg.height, math.max(1, vim.api.nvim_win_get_height(anchor_winid) - 2)),
   }
 end
 
@@ -213,10 +214,12 @@ end
 
 --- Open a floating comment editor popup.
 ---
---- `opts.cfg` must be the `manicule.config.get().ui` table. When
---- `opts.default` is non-empty the cursor is placed at end-of-text; this
---- matches the normal edit flow. On submit the concatenated buffer text
---- is trimmed and passed to `cb`; empty after trim is treated as cancel.
+--- `opts.cfg` must be the `manicule.config.get().ui` table (the editor
+--- reads its size/keys/start mode from `cfg.editor` and the
+--- transparency from `cfg.opacity`). When `opts.default` is non-empty
+--- the cursor is placed at end-of-text; this matches the normal edit
+--- flow. On submit the concatenated buffer text is trimmed and passed
+--- to `cb`; empty after trim is treated as cancel.
 ---
 ---@param opts { title?: string, default?: string, anchor_winid?: integer, anchor_pos?: { [1]: integer, [2]: integer }, cfg: manicule.UIConfig }
 ---@param cb fun(body: string|nil)
@@ -229,14 +232,15 @@ function M.open(opts, cb)
   M.close_active()
 
   local cfg = opts.cfg
+  local ecfg = cfg.editor or {}
   local anchor_winid = opts.anchor_winid or vim.api.nvim_get_current_win()
   if not vim.api.nvim_win_is_valid(anchor_winid) then
     anchor_winid = vim.api.nvim_get_current_win()
   end
-  local layout = get_editor_layout(cfg, anchor_winid)
+  local layout = get_editor_layout(ecfg, anchor_winid)
 
   local title = string.format(" %s ", opts.title or "Comment")
-  local footer = footer_text(cfg)
+  local footer = footer_text(ecfg)
 
   local previous_win = vim.api.nvim_get_current_win()
   local bufnr = float.create_scratch_buf({ filetype = "markdown" })
@@ -394,7 +398,7 @@ function M.open(opts, cb)
   end
 
   local function install_keymaps()
-    apply_editor_keymaps(bufnr, cfg.submit_keys, cfg.cancel_keys, submit_comment, close_editor)
+    apply_editor_keymaps(bufnr, ecfg.submit_keys, ecfg.cancel_keys, submit_comment, close_editor)
   end
 
   active_editor = {
@@ -430,9 +434,9 @@ function M.open(opts, cb)
     end,
   })
 
-  if cfg.editor_mode == "insert" and not has_default then
+  if ecfg.start_mode == "insert" and not has_default then
     vim.cmd("startinsert")
-  elseif cfg.editor_mode == "insert" and has_default then
+  elseif ecfg.start_mode == "insert" and has_default then
     -- When editing a pre-filled body, start in insert at EOL so the user
     -- can keep typing without an extra 'A'.
     vim.cmd("startinsert")

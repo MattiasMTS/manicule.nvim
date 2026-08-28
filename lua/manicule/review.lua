@@ -4,10 +4,10 @@
 -- a time. Whichever mode is active, the buffer the user comments in is
 -- the real worktree file, so comments anchor natively.
 --
---   * `review.mode = "split"` (default) — plain `:diffsplit`: read-only
---     staged baseline on the left, worktree file on the right.
---   * `review.mode = "unified"` — a single window showing the worktree
---     file with the diff painted onto it (see `review/inline.lua`).
+--   * `review.diff_mode = "split"` (default) — plain `:diffsplit`:
+--     read-only staged baseline on the left, worktree file on the right.
+--   * `review.diff_mode = "unified"` — a single window showing the
+--     worktree file with the diff painted onto it (see `review/inline.lua`).
 --
 -- `:ManiculeReviewDiffMode` flips between them, re-rendering the pair
 -- that is currently open.
@@ -21,7 +21,6 @@ local uv = vim.uv
 ---@field label string
 ---@field sink string|nil
 ---@field ctx table|nil sink dispatch context (finish() passes it to the sink)
----@field sink_ctx table|nil DEPRECATED alias of `ctx` (the same table) kept one wave for out-of-tree readers; remove in wave 2
 ---@field index integer
 ---@field tab integer
 ---@field root string|nil project root the worktree files live under (cached by start)
@@ -169,7 +168,7 @@ local function unmap_navigation(mapped_bufs)
 end
 
 ---Open the pair at `index` in the session tab: rebuild the diff layout
----(split or unified per `review.mode`), set the winbar breadcrumbs, and
+---(split or unified per `review.diff_mode`), set the winbar breadcrumbs, and
 ---point the panel's files view at the pair. Out-of-range indexes wrap.
 ---No-op without a session.
 ---@param index integer
@@ -216,7 +215,7 @@ function M.open_pair(index)
 
   local cfg = review_config()
 
-  if cfg.mode == "unified" then
+  if cfg.diff_mode == "unified" then
     -- One window, the worktree file itself, with the baseline painted on
     -- as virtual lines. No second buffer means nothing to protect and no
     -- coordinate translation anywhere in the comment path.
@@ -415,21 +414,23 @@ end
 ---Switch the diff rendering used by review sessions. With no argument,
 ---flips between "split" and "unified". The setting lives on the merged
 ---config, so it also becomes the default for later sessions in this
----Neovim instance; put `review.mode` in `setup()` to make it permanent.
+---Neovim instance; put `review.diff_mode` in `setup()` to make it permanent.
 ---@param mode? "split"|"unified"|"" nil/"" toggles
 ---@return string|nil mode, string|nil err
 function M.set_diff_mode(mode)
   local cfg = require("manicule.config").get()
   cfg.review = cfg.review or {}
   if mode == nil or mode == "" then
-    mode = cfg.review.mode == "unified" and "split" or "unified"
+    mode = cfg.review.diff_mode == "unified" and "split" or "unified"
   end
   if mode ~= "split" and mode ~= "unified" then
     local err = ('manicule: review mode must be "split" or "unified", got %q'):format(tostring(mode))
     vim.notify(err, vim.log.levels.ERROR)
     return nil, err
   end
-  cfg.review.mode = mode
+  -- The runtime-override channel: `config.get()` returns the live merged
+  -- table, so writing here changes the default for later sessions too.
+  cfg.review.diff_mode = mode
   if session then
     -- Re-render the pair on screen so the switch is visible immediately
     -- rather than at the next file.
@@ -467,7 +468,7 @@ local function build_session_cache(s)
       s.uri_index[uri] = idx
     end
   end
-  local markers = require("manicule.config").current.store.root_markers
+  local markers = require("manicule.config").get().store.root_markers
   for _, pair in ipairs(s.files) do
     local root = vim.fs.root(M.pair_path(pair), markers)
     if root then
@@ -498,9 +499,6 @@ function M.start(opts)
     label = opts.label or "review",
     sink = opts.sink,
     ctx = opts.ctx,
-    -- DEPRECATED wave-2 alias: the SAME table under the old field name,
-    -- for readers outside this wave's rename (review/tabs/checks.lua).
-    sink_ctx = opts.ctx,
     stage_dirs = opts.stage_dirs,
     index = 1,
     tab = vim.api.nvim_get_current_tabpage(),
@@ -524,7 +522,7 @@ function M.start(opts)
   -- Session and panel both exist now: eagerly kick off the fetches of
   -- prefetch-enabled panel tabs (PR header, CI checks) so their first
   -- show renders data instead of a loading row. Gated by
-  -- `review.prefetch`; the fetches are async and never block start.
+  -- `review.panel.prefetch`; the fetches are async and never block start.
   require("manicule.review.panel").prefetch()
   return true
 end

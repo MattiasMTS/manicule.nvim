@@ -172,7 +172,7 @@ local ok, err = xpcall(function()
       end,
     }
   end
-  require("manicule.config").current.ui.icons = true
+  require("manicule.config").get().ui.icons = true
   require("manicule.ui.icons")._reset()
   local panel_icons_ms, icon_items = elapsed_ms(build_file_rows)
   assert(#icon_items == 2000)

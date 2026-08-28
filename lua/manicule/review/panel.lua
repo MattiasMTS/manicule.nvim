@@ -200,7 +200,7 @@ local sync_spinner
 ---@field keymaps? table<string, fun(row: table|nil, ctx: manicule.PanelTabCtx)> buffer-local maps active only while the tab is current
 ---@field on_show? fun(ctx: manicule.PanelTabCtx) called when the tab becomes current via H/L (lazy fetch hook)
 ---@field on_hide? fun(ctx: manicule.PanelTabCtx) called when H/L or <Esc> leaves the tab
----@field prefetch? boolean run on_show once at review-session open (gated by `review.prefetch`), so the tab's data loads before its first show
+---@field prefetch? boolean run on_show once at review-session open (gated by `review.panel.prefetch`), so the tab's data loads before its first show
 ---@field busy? fun(ctx: manicule.PanelTabCtx): boolean report in-flight work: the winbar renders `<title> <frame>` while true
 ---@field animated? fun(ctx: manicule.PanelTabCtx): boolean report animated rows: while the tab is CURRENT and this is true, the ticker re-renders its rows each tick so build() can draw fresh frames/elapsed
 
@@ -421,7 +421,7 @@ end
 
 ---Define the panel's highlight groups. The current-line surface is a
 ---ManiculeCardBg-style tint — Normal bg nudged 8% toward Normal fg via
----`render.blend` — recomputed here on every panel open and on
+---`ui/color.lua`'s `blend` — recomputed here on every panel open and on
 ---ColorScheme (the panel augroup re-runs this; render.lua's own
 ---ColorScheme wiring only covers the card palette). Transparent themes
 ---(no Normal bg) have nothing to blend from and borrow CursorLine so
@@ -431,7 +431,7 @@ local function setup_highlights()
   local normal = get_highlight("Normal")
   if type(normal.bg) == "number" then
     local toward = type(normal.fg) == "number" and normal.fg or normal.bg
-    local bg = require("manicule.ui.render").blend(normal.bg, toward, 0.08)
+    local bg = require("manicule.ui.color").blend(normal.bg, toward, 0.08)
     vim.api.nvim_set_hl(0, "ManiculePanelCurrent", { bg = bg })
   else
     vim.api.nvim_set_hl(0, "ManiculePanelCurrent", { link = "CursorLine" })
@@ -1850,11 +1850,11 @@ end
 ---first switches to it. The hook gets the same ctx an on_show gets,
 ---WITHOUT the tab becoming current: ctx.refresh re-renders only the
 ---current view, so a prefetching tab repainting from its async
----callback is harmless. Gated by `review.prefetch` (default true);
----no-op while the panel is closed.
+---callback is harmless. Gated by `review.panel.prefetch` (default
+---true); no-op while the panel is closed.
 function M.prefetch()
   local review_cfg = require("manicule.config").get().review or {}
-  if review_cfg.prefetch == false then
+  if (review_cfg.panel or {}).prefetch == false then
     return
   end
   if not (panel_bufnr and vim.api.nvim_buf_is_valid(panel_bufnr)) then

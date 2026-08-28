@@ -105,7 +105,7 @@ function M.candidates(arglead, cmdline)
   return out
 end
 
-function M._reset_for_tests()
+function M._reset()
   cache = {}
 end
 

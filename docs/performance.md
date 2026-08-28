@@ -17,6 +17,6 @@ The icons row measures `build_file_rows` with a stubbed icon provider and `ui.ic
 
 The bench stubs the comment store (`package.loaded["manicule"]`) by design: source resolution, baseline staging, and panel row building are the targets, not SQLite I/O — the panel numbers are therefore a floor for a session with a live store.
 
-Rail expansion renders (`ui.expand = "rail"`) are guarded by a same-state key over the covering records, anchor, and rail width: column-only cursor moves and insert-mode keystrokes no longer rewrite the rail buffer or re-add its extmarks, and repeated clears on uncommented lines are no-ops. Scroll re-alignment still happens — the alignment padding is re-probed (one `screenpos` call) on every dispatch.
+Rail expansion renders (`ui.eol_expand = "rail"`) are guarded by a same-state key over the covering records, anchor, and rail width: column-only cursor moves and insert-mode keystrokes no longer rewrite the rail buffer or re-add its extmarks, and repeated clears on uncommented lines are no-ops. Scroll re-alignment still happens — the alignment padding is re-probed (one `screenpos` call) on every dispatch.
 
 Review baseline staging requires the `tar` executable at runtime.

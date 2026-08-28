@@ -4,8 +4,8 @@ local ctx
 
 local function setup_env()
   -- Several workflows assert on float popups; the shipped default is
-  -- `ui.display = "eol"`, so opt into float mode explicitly.
-  ctx = H.setup({ ui = { display = "float" } })
+  -- `ui.display_mode = "eol"`, so opt into float mode explicitly.
+  ctx = H.setup({ ui = { display_mode = "float" } })
   H.edit_project_file(ctx, "src/example.lua", {
     "local value = 1",
     "return value",

@@ -26,12 +26,12 @@ describe("manicule review completion", function()
     ctx = H.setup()
     saved_cwd = vim.uv.cwd()
     saved_path = vim.env.PATH
-    require("manicule.review.complete")._reset_for_tests()
+    require("manicule.review.complete")._reset()
   end)
   after_each(function()
     vim.cmd.cd(saved_cwd)
     vim.env.PATH = saved_path
-    require("manicule.review.complete")._reset_for_tests()
+    require("manicule.review.complete")._reset()
     H.teardown(ctx)
     ctx = nil
   end)

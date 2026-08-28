@@ -151,7 +151,7 @@ local function reverse_map_temp_path(abs)
     end
   end
 
-  local cfg = (config.current or {}).store or {}
+  local cfg = config.get().store or {}
   push(vim.fs.root(0, cfg.root_markers or { ".git", ".hg", "package.json" }))
   push(vim.fn.getcwd())
   -- HOME fallback: only engage when the suffix looks like a dotfile /
@@ -191,7 +191,7 @@ end
 local function resolve_uri_for_bufnr(bufnr)
   local uri_mod = require("manicule.uri")
   local config = require("manicule.config")
-  local codediff = codediff_identity(bufnr, config.current.store.root_markers)
+  local codediff = codediff_identity(bufnr, config.get().store.root_markers)
   if codediff then
     return codediff.uri
   end
@@ -415,7 +415,7 @@ function M.identify(bufnr)
     }
   end
 
-  local codediff = codediff_identity(bufnr, config.current.store.root_markers)
+  local codediff = codediff_identity(bufnr, config.get().store.root_markers)
   if codediff then
     return {
       uri = codediff.uri,
@@ -434,7 +434,7 @@ function M.identify(bufnr)
     local pair = M.resolve_diff_pair(bufnr)
     if pair then
       if bufnr == pair.working_bufnr then
-        local root = root_for_bufnr(bufnr, config.current.store.root_markers)
+        local root = root_for_bufnr(bufnr, config.get().store.root_markers)
         return {
           uri = uri,
           scope = root and "project" or "session",
@@ -461,7 +461,7 @@ function M.identify(bufnr)
         -- reference side still routes records to the right project.
         local root
         if pair.working_bufnr and vim.api.nvim_buf_is_valid(pair.working_bufnr) then
-          root = root_for_bufnr(pair.working_bufnr, config.current.store.root_markers)
+          root = root_for_bufnr(pair.working_bufnr, config.get().store.root_markers)
         end
         return {
           uri = pair.working_uri,
@@ -486,9 +486,9 @@ function M.identify(bufnr)
     -- record into session scope instead of the real project store.
     local root
     if reverse_mapped_path then
-      root = vim.fs.root(reverse_mapped_path, config.current.store.root_markers)
+      root = vim.fs.root(reverse_mapped_path, config.get().store.root_markers)
     else
-      root = root_for_bufnr(bufnr, config.current.store.root_markers)
+      root = root_for_bufnr(bufnr, config.get().store.root_markers)
     end
     if root then
       return {
@@ -501,7 +501,7 @@ function M.identify(bufnr)
       }
     end
     -- Unrooted plain file buffer: route to session if the user allows.
-    if config.current.store.persist_unrooted then
+    if config.get().store.persist_unrooted then
       return {
         uri = uri,
         scope = "session",

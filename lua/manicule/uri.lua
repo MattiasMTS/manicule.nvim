@@ -161,7 +161,7 @@ end
 ---  * Only SUCCESSFUL resolutions are cached — a path that doesn't
 ---    exist yet (unsaved new file) re-resolves once it lands on disk.
 ---  * The cache is cleared WHOLESALE on every buffer rename
----    (`BufFilePost` in init.lua calls `M._invalidate_realpath_cache`),
+---    (`BufFilePost` in init.lua calls `M.invalidate_realpath_cache`),
 ---    so a rename can never be served a stale resolution.
 ---  * A size cap bounds pathological path churn.
 local realpath_cache = {}
@@ -170,7 +170,7 @@ local REALPATH_CACHE_MAX = 512
 
 ---Drop every memoized realpath. Called from init.lua's BufFilePost
 ---handling (renames can retarget what a path resolves to).
-function M._invalidate_realpath_cache()
+function M.invalidate_realpath_cache()
   realpath_cache = {}
   realpath_cache_size = 0
 end
@@ -185,7 +185,7 @@ local function memoized_realpath(abs)
   local real = uv.fs_realpath(abs)
   if real then
     if realpath_cache_size >= REALPATH_CACHE_MAX then
-      M._invalidate_realpath_cache()
+      M.invalidate_realpath_cache()
     end
     realpath_cache[abs] = real
     realpath_cache_size = realpath_cache_size + 1

@@ -4,7 +4,7 @@
 -- Registers through panel.register_tab (see review/tabs/init.lua, whose
 -- `done` guard keeps the per-open setup() call idempotent; tests
 -- re-register after panel._reset_tabs()). PR sessions
--- (session.sink_ctx.pr) list the PR's checks via `gh pr checks`; other
+-- (session.ctx.pr) list the PR's checks via `gh pr checks`; other
 -- sessions fall back to `gh run list --branch <current branch>` when
 -- the session root's branch has an upstream. Both shapes normalize to
 -- {name, state pass|fail|running|skipped, url, elapsed} and render
@@ -12,7 +12,7 @@
 --
 -- The fetch runs asynchronously (sinks helpers' system_async), kicked
 -- off eagerly at session open (spec.prefetch, gated by the
--- `review.prefetch` config) and again on entering the tab, cached per
+-- `review.panel.prefetch` config) and again on entering the tab, cached per
 -- session with a `fetching` guard; `R` drops the cache and refetches,
 -- `<CR>`/`gl` open the row's page in the browser.
 --
@@ -72,8 +72,8 @@ end
 ---@param session table
 ---@return integer|nil
 local function session_pr(session)
-  local sink_ctx = type(session.sink_ctx) == "table" and session.sink_ctx or nil
-  return sink_ctx and tonumber(sink_ctx.pr) or nil
+  local ctx = type(session.ctx) == "table" and session.ctx or nil
+  return ctx and tonumber(ctx.pr) or nil
 end
 
 -- ------------------------------------------------------------------

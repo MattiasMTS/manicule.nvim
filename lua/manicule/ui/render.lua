@@ -10,13 +10,13 @@
 -- buffer's canonical URI (see `manicule.uri.for_bufnr`) equals
 -- `record.uri`.
 --
--- Sticky vs non-sticky is driven by `config.get().ui.sticky`:
+-- Sticky vs non-sticky is driven by `config.get().ui.always_show_popups`:
 --   * sticky  = true  -> popups are always shown for every record in
 --                        the buffer (reconcile renders them)
 --   * sticky  = false -> popups are only shown for records whose line
 --                        is in the current viewport (update_viewport_popups)
 --
--- Display modes (`config.get().ui.display` is the startup default; the
+-- Display modes (`config.get().ui.display_mode` is the startup default; the
 -- live mode is module state, switched via `M.set_display_mode` /
 -- `:ManiculeDisplay`):
 --   * "float"  -> anchored popups (the sticky/viewport gating above
@@ -50,7 +50,7 @@
 --                 per-buffer pending flag already coalesces the burst.
 --                 Sticky is a float-mode concern: eol renders markers
 --                 for every record regardless (extmarks are cheap).
---                 WHERE the expansion renders is `config.ui.expand`:
+--                 WHERE the expansion renders is `config.ui.eol_expand`:
 --                 "float" (default) opens the anchored popups above;
 --                 "rail" routes the same cards into `ui/rail.lua`'s
 --                 side window instead — a real split, so code can never
@@ -129,7 +129,7 @@ for _, mode in ipairs(DISPLAY_MODES) do
   VALID_DISPLAY_MODES[mode] = true
 end
 
--- Live display mode. `config.get().ui.display` is only the startup
+-- Live display mode. `config.get().ui.display_mode` is only the startup
 -- default; runtime switches (`M.set_display_mode` / :ManiculeDisplay)
 -- land here. In-memory only, like `hidden` — resets on nvim restart.
 ---@type string?
@@ -143,7 +143,7 @@ local function current_display_mode()
     return display_mode
   end
   local cfg = config.get() or {}
-  local configured = (cfg.ui or {}).display
+  local configured = (cfg.ui or {}).display_mode
   if VALID_DISPLAY_MODES[configured] then
     return configured
   end
@@ -158,7 +158,7 @@ end
 ---@return "float"|"rail"
 local function current_expand_mode()
   local cfg = config.get() or {}
-  if (cfg.ui or {}).expand == "rail" then
+  if (cfg.ui or {}).eol_expand == "rail" then
     return "rail"
   end
   return "float"
@@ -189,11 +189,6 @@ local function get_highlight(name)
   end
   return {}
 end
-
----Re-export of `ui/color.lua`'s `blend` (moved there; implementation
----unchanged). Kept on the render module for existing callers —
----`review/panel.lua` and specs — until a later wave repoints them.
-M.blend = color.blend
 
 ---Foreground of the first of `names` that defines one, else nil.
 ---@param names string[]
@@ -258,7 +253,7 @@ local function setup_comment_highlights()
   -- but no Normal fg (rare) keeps the plain bg — blend toward itself.
   local card_bg
   if normal_bg then
-    card_bg = M.blend(normal_bg, normal_fg or normal_bg, 0.06)
+    card_bg = color.blend(normal_bg, normal_fg or normal_bg, 0.06)
   end
 
   ---The group with the card surface added (no-op when the theme has none).
@@ -269,7 +264,7 @@ local function setup_comment_highlights()
     return hl
   end
 
-  local frame_fg = normal_bg and M.blend(border_fg, normal_bg, 0.45) or border_fg
+  local frame_fg = normal_bg and color.blend(border_fg, normal_bg, 0.45) or border_fg
   local accent_fg = first_defined_fg({ "DiagnosticSignInfo" })
   local github_fg = first_defined_fg({ "Special" })
   local local_fg = first_defined_fg({ "@string", "Identifier", "DiagnosticSignInfo" })
@@ -484,11 +479,6 @@ end
 ---is no user-facing keymap-hint config.
 local COMMENT_HINT = "edit gca | delete gcd"
 
----Re-export of `ui/color.lua`'s `relative_time` (moved there;
----implementation unchanged). Kept on the render module for existing
----callers (specs) until a later wave repoints them.
-M.relative_time = color.relative_time
-
 ---Find any window (in any tab) currently showing `bufnr`.
 ---@param bufnr integer
 ---@return integer?
@@ -666,7 +656,7 @@ end
 ---name is the record's stored value (what `M.add` persisted — an email
 ---keeps only its local part for display; GitHub imports store the
 ---GitHub login), falling back to $USER, then "you", under the "author"
----kind (bold Normal fg); the time tail is `M.relative_time` of the
+---kind (bold Normal fg); the time tail is `color.relative_time` of the
 ---record's timestamp (updated_at preferred, matching the old footer)
 ---and keeps the dim "meta" kind. No time tail when the record carries
 ---no timestamp.
@@ -687,7 +677,7 @@ local function author_line_chunks(record, ctx)
   table.insert(chunks, { author, "author" })
   local ts = record and (record.updated_at or record.created_at)
   if type(ts) == "number" then
-    table.insert(chunks, { " · " .. M.relative_time(ts, ctx.now), "meta" })
+    table.insert(chunks, { " · " .. color.relative_time(ts, ctx.now), "meta" })
   end
   return chunks
 end
@@ -1669,7 +1659,7 @@ local function schedule_popup_sweeps()
 end
 
 -- ---------------------------------------------------------------------------
--- Rail expansion dispatch ("eol" display mode with ui.expand = "rail")
+-- Rail expansion dispatch ("eol" display mode with ui.eol_expand = "rail")
 -- ---------------------------------------------------------------------------
 
 ---Route the "eol" cursor expansion into the rail window instead of
@@ -1766,7 +1756,7 @@ end
 local function is_sticky()
   local cfg = config.get() or {}
   local ui_opts = cfg.ui or {}
-  return ui_opts.sticky == true
+  return ui_opts.always_show_popups == true
 end
 
 -- ---------------------------------------------------------------------------
@@ -2034,7 +2024,7 @@ end
 ---it threads straight into the card builders.
 ---@class manicule.ui.render.PassCtx : manicule.ui.render.CardCtx
 ---@field mode "float"|"eol"|"inline"|"hidden" Live display mode
----@field sticky boolean `mode == "float"` and config `ui.sticky`
+---@field sticky boolean `mode == "float"` and config `ui.always_show_popups`
 ---@field opacity number Config `ui.opacity` (float mode only, else 0)
 ---@field stacks table<string, table[]> uri+line → sorted same-line stack
 ---@field line_count integer Buffer line count (buffer text is stable across the pass)
@@ -2185,7 +2175,7 @@ end
 ---@param display_total integer
 ---@param bufnr integer? Source buffer the record renders in (quote fallback)
 ---@return table[] rows Each row is one rendered line as a `[text, hl][]` chunk array
-function M._rail_card_rows(record, rail_width, display_index, display_total, bufnr)
+function M.rail_card_rows(record, rail_width, display_index, display_total, bufnr)
   local max_width = math.max(8, rail_width - INLINE_FRAME_CELLS)
   local rows = {}
   append_inline_box(
@@ -2272,8 +2262,9 @@ end
 --- already show the full comment and are owned by reconcile, not this
 --- pass). "float" keeps the viewport behavior.
 ---
---- Gated on `M.is_hidden()` — returns immediately so scroll / resize
---- autocmds that fire while visuals are suppressed don't re-paint.
+--- Gated on visibility (`M.is_visible()`) — returns immediately while
+--- hidden so scroll / resize autocmds that fire while visuals are
+--- suppressed don't re-paint.
 ---@param bufnr integer
 ---@param records table[]
 ---@param counter_records? table[]
@@ -2335,10 +2326,10 @@ function M.update_viewport_popups(bufnr, records, counter_records)
     end
   end
 
-  -- "eol" with ui.expand = "rail": the cursor expansion renders into
+  -- "eol" with ui.eol_expand = "rail": the cursor expansion renders into
   -- the rail window instead of float popups. Everything below (the
   -- float layout + render loop) stays byte-identical when the default
-  -- expand = "float" is configured — this branch is simply never taken.
+  -- eol_expand = "float" is configured — this branch is simply never taken.
   if mode == "eol" and current_expand_mode() == "rail" then
     -- No float ever expands on this path; drop any popup left over from
     -- a float-expansion pass (e.g. the expand mode changed) and sweep —
@@ -2652,12 +2643,13 @@ function M.clear_all()
   handles = {}
 end
 
---- Return the current visibility flag. `true` means all visuals are
---- suppressed; popups are gone and decoration extmarks have been
---- cleared. Anchor extmarks remain (orphan detection keeps working).
+--- Return the current visibility flag. `false` means all visuals are
+--- suppressed (`M.hide`); popups are gone and decoration extmarks have
+--- been cleared. Anchor extmarks remain (orphan detection keeps
+--- working).
 ---@return boolean
-function M.is_hidden()
-  return hidden
+function M.is_visible()
+  return not hidden
 end
 
 --- Suppress every manicule visual (popup + line-number tint) across
@@ -2735,7 +2727,7 @@ function M.toggle()
 end
 
 --- Return the live display mode (see the header for what each mode
---- renders). Falls back to `config.get().ui.display` until the first
+--- renders). Falls back to `config.get().ui.display_mode` until the first
 --- runtime switch.
 ---@return "float"|"eol"|"inline"|"hidden"
 function M.display_mode()

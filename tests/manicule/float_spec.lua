@@ -155,8 +155,10 @@ describe("manicule float transparency", function()
   it("renders the editor footer from configured keys", function()
     local editor = require("manicule.ui.editor")
     local cfg = vim.tbl_deep_extend("force", vim.deepcopy(require("manicule.config").get().ui), {
-      submit_keys = { "<C-g>" },
-      cancel_keys = { "<Esc>" },
+      editor = {
+        submit_keys = { "<C-g>" },
+        cancel_keys = { "<Esc>" },
+      },
     })
 
     assert.is_true(editor.open({
@@ -197,10 +199,11 @@ describe("manicule float transparency", function()
     -- Card surface: Normal bg nudged 6% toward Normal fg; the border fg
     -- recedes 45% toward the bg (render_spec's palette suite covers the
     -- full derivation).
-    local surface = render.blend(0x111111, 0xeeeeee, 0.06)
+    local blend = require("manicule.ui.color").blend
+    local surface = blend(0x111111, 0xeeeeee, 0.06)
     assert.are.equal(surface, border_hl.bg)
     assert.are.equal(surface, meta_hl.bg)
-    assert.are.equal(render.blend(0xaaaaaa, 0x111111, 0.45), border_hl.fg)
+    assert.are.equal(blend(0xaaaaaa, 0x111111, 0.45), border_hl.fg)
     assert.are.equal(0x999999, meta_hl.fg)
   end)
 end)

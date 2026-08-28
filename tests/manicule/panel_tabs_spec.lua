@@ -467,8 +467,8 @@ describe("manicule panel tab prefetch", function()
     assert.are.equal(0, shown)
   end)
 
-  it("review.prefetch = false disables all eager fetching", function()
-    require("manicule.config").get().review.prefetch = false
+  it("review.panel.prefetch = false disables all eager fetching", function()
+    require("manicule.config").get().review.panel.prefetch = false
     local shown = 0
     panel().register_tab(tab_spec({
       prefetch = true,

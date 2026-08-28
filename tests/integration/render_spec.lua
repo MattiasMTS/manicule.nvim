@@ -4,8 +4,8 @@ local ctx
 
 local function setup_env()
   -- These specs exercise float-popup behavior; the shipped default is
-  -- `ui.display = "eol"`, so opt into float mode explicitly.
-  ctx = H.setup({ ui = { display = "float" } })
+  -- `ui.display_mode = "eol"`, so opt into float mode explicitly.
+  ctx = H.setup({ ui = { display_mode = "float" } })
   H.edit_project_file(ctx, "src/render.lua", {
     "local value = 1",
     "value = value + 1",
@@ -123,12 +123,12 @@ describe("manicule render lifecycle", function()
     assert.is_true(wait_for_popup_count("render note", 1))
 
     render.hide()
-    assert.is_true(render.is_hidden())
+    assert.is_false(render.is_visible())
     assert.is_true(wait_for_popup_count("render note", 0))
     assert.is_truthy(render.mark_ids_for_buffer(bufnr)[id])
 
     render.show()
-    assert.is_false(render.is_hidden())
+    assert.is_true(render.is_visible())
     assert.is_true(wait_for_popup_count("render note", 1))
 
     render.clear_buffer(bufnr)
@@ -175,11 +175,11 @@ describe("manicule render lifecycle", function()
     assert.is_true(wait_for_popup_count("toggle note", 1))
 
     vim.cmd("ManiculeToggle")
-    assert.is_true(require("manicule.ui.render").is_hidden())
+    assert.is_false(require("manicule.ui.render").is_visible())
     assert.is_true(wait_for_popup_count("toggle note", 0))
 
     vim.cmd("ManiculeToggle")
-    assert.is_false(require("manicule.ui.render").is_hidden())
+    assert.is_true(require("manicule.ui.render").is_visible())
     assert.is_true(wait_for_popup_count("toggle note", 1))
 
     assert.are.equal(2, #events)
@@ -490,7 +490,7 @@ describe("manicule float placement", function()
   local LONG_LINE = "-- " .. string.rep("x", 200)
 
   before_each(function()
-    ctx = H.setup({ ui = { display = "float" } })
+    ctx = H.setup({ ui = { display_mode = "float" } })
   end)
   after_each(teardown_env)
 
@@ -614,7 +614,7 @@ end)
 
 -- Sticky-mode regressions (#5, #6). Dedicated describe so the sticky
 -- config doesn't bleed into the non-sticky specs above. `H.setup`
--- deep-merges the opts into the base config, so `ui = { sticky = true }`
+-- deep-merges the opts into the base config, so `ui = { always_show_popups = true }`
 -- flips the renderer into "always show a popup for every record" mode;
 -- teardown resets render state + reloads the default config on the next
 -- `H.setup`.
@@ -622,7 +622,7 @@ describe("manicule sticky render", function()
   before_each(function()
     -- Sticky is a float-mode concern; pin the display mode like the
     -- non-sticky describe above.
-    ctx = H.setup({ ui = { sticky = true, display = "float" } })
+    ctx = H.setup({ ui = { always_show_popups = true, display_mode = "float" } })
     H.edit_project_file(ctx, "src/sticky.lua", {
       "local value = 1",
       "value = value + 1",
@@ -761,7 +761,7 @@ describe("manicule comment card", function()
   end
 
   it("formats relative time against a fixed clock", function()
-    local rt = require("manicule.ui.render").relative_time
+    local rt = require("manicule.ui.color").relative_time
     local now = os.time({ year = 2026, month = 8, day = 25, hour = 12, min = 0, sec = 0 })
     assert.are.equal("just now", rt(now, now))
     assert.are.equal("just now", rt(now - 59, now))
@@ -937,7 +937,7 @@ describe("manicule card origin badges", function()
         end,
       }
     end
-    require("manicule.config").current.ui.icons = "auto"
+    require("manicule.config").get().ui.icons = "auto"
     require("manicule.ui.icons")._reset()
   end
 
@@ -969,13 +969,13 @@ describe("manicule card origin badges", function()
   end
 
   it("prefixes the github author line with [gh] in ASCII mode", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     local lines = card_lines(make_record({ meta = { github = { id = 7, imported = true } } }))
     assert.are.equal("[gh] octocat · just now", lines[2])
   end)
 
   it("keeps the local author line bare in ASCII mode", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     local lines = card_lines(make_record({}))
     assert.are.equal("octocat · just now", lines[2])
   end)
@@ -994,7 +994,7 @@ describe("manicule card origin badges", function()
   end)
 
   it("counts the badge into the card width", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     -- The author line is the card's widest line (hint is 21 cells,
     -- quote 19), so the popup width must equal it INCLUDING the badge.
     local author = "review-bot-nine"
@@ -1010,7 +1010,7 @@ describe("manicule card origin badges", function()
   end)
 
   it("keeps the origin badge on resolved records — resolution is not a card badge", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     local gh_lines = card_lines(make_record({
       id = "badge-resolved-gh",
       body = "resolved github body",
@@ -1093,7 +1093,7 @@ describe("manicule card palette", function()
   end
 
   it("blend mixes per channel: t=0 keeps a, t=1 yields b, 0.5 the midpoint", function()
-    local blend = require("manicule.ui.render").blend
+    local blend = require("manicule.ui.color").blend
     assert.are.equal(0x000000, blend(0x000000, 0xFFFFFF, 0.0))
     assert.are.equal(0xFFFFFF, blend(0x000000, 0xFFFFFF, 1.0))
     assert.are.equal(0x808080, blend(0x000000, 0xFFFFFF, 0.5))
@@ -1106,7 +1106,7 @@ describe("manicule card palette", function()
   end)
 
   it("derives every card group from the stubbed colorscheme", function()
-    local blend = require("manicule.ui.render").blend
+    local blend = require("manicule.ui.color").blend
     stub_colorscheme()
     local surface = blend(0x1E1E2E, 0xCDD6F4, 0.06)
 
@@ -1194,7 +1194,7 @@ describe("manicule card palette", function()
   end)
 
   it("recomputes the palette when ColorScheme fires", function()
-    local blend = require("manicule.ui.render").blend
+    local blend = require("manicule.ui.color").blend
     stub_colorscheme()
     assert.are.equal(0x89B4FA, hl("ManiculeCommentQuoteBar").fg)
 
@@ -1210,7 +1210,7 @@ describe("manicule card palette", function()
   end)
 
   it("splits the popup card into quote-bar, badge, author, and meta hl regions", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     local render = require("manicule.ui.render")
     local bufnr = vim.api.nvim_get_current_buf()
     local record = {
@@ -1267,7 +1267,7 @@ describe("manicule card palette", function()
         end,
       }
     end
-    require("manicule.config").current.ui.icons = "auto"
+    require("manicule.config").get().ui.icons = "auto"
     require("manicule.ui.icons")._reset()
 
     require("manicule").add({

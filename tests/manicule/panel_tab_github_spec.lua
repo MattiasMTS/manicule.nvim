@@ -263,8 +263,8 @@ describe("manicule github PR panel tab", function()
     assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
   end)
 
-  it("review.prefetch = false keeps the header fetch lazy", function()
-    require("manicule.config").get().review.prefetch = false
+  it("review.panel.prefetch = false keeps the header fetch lazy", function()
+    require("manicule.config").get().review.panel.prefetch = false
     start_pr_review()
     vim.wait(300)
     assert.is_false(log_has("pr view 42 --json"), table.concat(gh.log(), "\n"))

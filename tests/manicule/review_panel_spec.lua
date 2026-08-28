@@ -345,13 +345,13 @@ describe("manicule review panel current-pair highlight", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "blend" }))
 
-    local expected = require("manicule.ui.render").blend(0x1E1E2E, 0xCDD6F4, 0.08)
+    local expected = require("manicule.ui.color").blend(0x1E1E2E, 0xCDD6F4, 0.08)
     assert.are.equal(expected, vim.api.nvim_get_hl(0, { name = "ManiculePanelCurrent" }).bg)
 
     -- Recomputed when the colorscheme changes while the panel is open.
     vim.api.nvim_set_hl(0, "Normal", { fg = 0x000000, bg = 0xFFFFFF })
     vim.api.nvim_exec_autocmds("ColorScheme", {})
-    expected = require("manicule.ui.render").blend(0xFFFFFF, 0x000000, 0.08)
+    expected = require("manicule.ui.color").blend(0xFFFFFF, 0x000000, 0.08)
     assert.are.equal(expected, vim.api.nvim_get_hl(0, { name = "ManiculePanelCurrent" }).bg)
   end)
 
@@ -649,7 +649,7 @@ describe("manicule review panel file icons", function()
 
   it("omits the icon when ui.icons = false", function()
     stub_mini_icons("@")
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     assert.is_true(require("manicule.review").start({ files = make_pairs(1), label = "panel-icons-off" }))
     assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", panel_lines()[1])
   end)
@@ -1299,17 +1299,17 @@ describe("manicule review panel placement", function()
     assert.is_truthy(tostring(err4):find('review.panel.layout must be "flat" or "tree", got "nested"', 1, true))
   end)
 
-  it("review.prefetch defaults to true and rejects non-booleans", function()
+  it("review.panel.prefetch defaults to true and rejects non-booleans", function()
     ctx = H.setup()
     local config = require("manicule.config")
-    assert.is_true(config.get().review.prefetch)
+    assert.is_true(config.get().review.panel.prefetch)
 
-    local ok, err = pcall(config.setup, { review = { prefetch = "yes" } })
+    local ok, err = pcall(config.setup, { review = { panel = { prefetch = "yes" } } })
     assert.is_false(ok)
-    assert.is_truthy(tostring(err):find("review.prefetch", 1, true), tostring(err))
+    assert.is_truthy(tostring(err):find("review.panel.prefetch", 1, true), tostring(err))
 
     -- Booleans pass and land on the merged config.
-    require("manicule").setup({ review = { prefetch = false } })
-    assert.is_false(config.get().review.prefetch)
+    require("manicule").setup({ review = { panel = { prefetch = false } } })
+    assert.is_false(config.get().review.panel.prefetch)
   end)
 end)

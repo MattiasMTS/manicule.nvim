@@ -93,11 +93,11 @@ local function git_branch(root)
 end
 
 ---Memoized `store_name` results, keyed by root. Each entry records the
----`store.branch` flag it was computed under so a config toggle between
----`setup()` calls recomputes instead of serving a stale name.
+---`store.scope_by_branch` flag it was computed under so a config toggle
+---between `setup()` calls recomputes instead of serving a stale name.
 ---
 ---Why memoize: `store_name` runs on EVERY store read (`M.all` → `sync`
----→ `sqlite_db` → `sqlite_path`), and with `store.branch = true` each
+---→ `sqlite_db` → `sqlite_path`), and with `store.scope_by_branch = true` each
 ---un-memoized call forks `git branch --show-current` — once per viewport
 ---refresh. Pinning the resolved name for the session also keeps the
 ---cache/db pair coherent: `cache[root]` and `sqlite_dbs[path]` are keyed
@@ -111,8 +111,8 @@ local store_name_cache = {}
 ---@param root string
 ---@return string
 local function store_name(root)
-  local cfg = config.current.store
-  local want_branch = cfg.branch == true
+  local cfg = config.get().store
+  local want_branch = cfg.scope_by_branch == true
   local hit = store_name_cache[root]
   if hit and hit.branch == want_branch then
     return hit.name
@@ -134,7 +134,7 @@ local function sqlite_path(root)
   if not root or root == "" then
     return nil
   end
-  local cfg = config.current.store
+  local cfg = config.get().store
   return cfg.dir .. store_name(root) .. ".sqlite3"
 end
 
@@ -152,7 +152,7 @@ end
 ---session file instead of fragmenting per-directory.
 ---@return string|nil
 function M.root()
-  local cfg = config.current.store
+  local cfg = config.get().store
   return vim.fs.root(0, cfg.root_markers)
 end
 
@@ -208,7 +208,7 @@ end
 ---@param records table[]
 ---@return string|nil data, string? err
 local function encode(records)
-  local cfg = config.current.store
+  local cfg = config.get().store
   local payload = {
     version = STORE_VERSION,
     records = records,
@@ -235,7 +235,7 @@ end
 ---@param path string used purely for diagnostics
 ---@return table[] records
 local function decode(data, path)
-  local cfg = config.current.store
+  local cfg = config.get().store
   local decoder = cfg.format == "json" and vim.json.decode or vim.mpack.decode
   local ok, decoded = pcall(decoder, data)
   if not ok or type(decoded) ~= "table" then
@@ -359,7 +359,7 @@ local function sqlite_db(root)
   if existing then
     return existing
   end
-  vim.fn.mkdir(config.current.store.dir, "p")
+  vim.fn.mkdir(config.get().store.dir, "p")
   local db, err = require("manicule.sqlite").open(path)
   if not db then
     return nil, err
@@ -900,7 +900,7 @@ end
 ---Absolute path to the single session-scope file.
 ---@return string
 function M.session_path()
-  local cfg = config.current.store
+  local cfg = config.get().store
   return cfg.dir .. "session." .. cfg.format
 end
 
@@ -911,7 +911,7 @@ function M.session_load()
   if session_cache.loaded then
     return session_cache.records
   end
-  vim.fn.mkdir(config.current.store.dir, "p")
+  vim.fn.mkdir(config.get().store.dir, "p")
   local path = M.session_path()
   local records = {}
   local data = read_file(path)
@@ -930,7 +930,7 @@ function M.session_save()
   if not session_cache.dirty then
     return true
   end
-  vim.fn.mkdir(config.current.store.dir, "p")
+  vim.fn.mkdir(config.get().store.dir, "p")
   local persisted = {}
   for _, record in ipairs(session_cache.records) do
     if not is_ephemeral_record(record) then
@@ -1022,34 +1022,18 @@ end
 ---  * `opts.session_only = true`— skip project records entirely.
 ---  * no `opts` / neither field — fall back to the current buffer's
 ---                                root (`M.root()`).
----
----Compat (this wave): the pre-opts positional form is still accepted —
----`all_for_uri(uri, root)` behaves like `{ root = root }` and an
----explicit positional nil (`all_for_uri(uri, nil)`) behaves like
----`{ session_only = true }`. init.lua still calls positionally; wave 2
----repoints it and drops this shim.
 ---@param uri string
----@param opts? { root?: string, session_only?: boolean }|string|nil
+---@param opts? { root?: string, session_only?: boolean }
 ---@return table[]
-function M.all_for_uri(uri, ...)
+function M.all_for_uri(uri, opts)
+  assert(opts == nil or type(opts) == "table", "store.all_for_uri: opts must be a table")
   local out = {}
   if not uri or uri == "" then
     return out
   end
   local current_root
-  if select("#", ...) == 0 then
-    current_root = M.root()
-  else
-    local arg = select(1, ...)
-    if type(arg) == "table" then
-      if not arg.session_only then
-        current_root = arg.root or M.root()
-      end
-    else
-      -- Positional compat: a string is the root; explicit nil means
-      -- "session records only".
-      current_root = arg
-    end
+  if not (opts and opts.session_only) then
+    current_root = (opts and opts.root) or M.root()
   end
   if current_root then
     for _, r in ipairs(for_uri(current_root, uri)) do
@@ -1122,38 +1106,19 @@ function M.restore_record(record)
   return refresh_cache_entry(entry, db, root)
 end
 
----Dispatch a `remove` by scope.
----
----Preferred form: a single table mirroring a record/snapshot's identity
----fields — `remove_record({ scope = ..., id = ..., project_root = ... })`.
+---Dispatch a `remove` by scope. Takes a single table mirroring a
+---record/snapshot's identity fields —
+---`remove_record({ scope = ..., id = ..., project_root = ... })`.
 ---`scope = "session"` removes from the session store; anything else
 ---removes from the project store at `project_root`.
----
----Compat (this wave): the positional form
----`remove_record(scope_or_root, id, project_root)` is still accepted —
----`scope_or_root` may be "project", "session", or a raw root path
----(pre-dispatcher API). init.lua still calls positionally; wave 2
----repoints it and drops this shim.
----@param scope_or_root { scope?: "project"|"session", id: string, project_root?: string }|"project"|"session"|string
----@param id string? positional form only
----@param project_root string? positional form only; required when scope=="project"
+---@param opts { scope?: "project"|"session", id: string, project_root?: string }
 ---@return table|nil
-function M.remove_record(scope_or_root, id, project_root)
-  if type(scope_or_root) == "table" then
-    local opts = scope_or_root
-    if opts.scope == "session" then
-      return M.session_remove(opts.id)
-    end
-    return M.remove(opts.project_root, opts.id)
+function M.remove_record(opts)
+  assert(type(opts) == "table", "store.remove_record: opts must be a table")
+  if opts.scope == "session" then
+    return M.session_remove(opts.id)
   end
-  if scope_or_root == "session" then
-    return M.session_remove(id)
-  end
-  if scope_or_root == "project" then
-    return M.remove(project_root, id)
-  end
-  -- Treat it as a raw root path (pre-dispatcher API).
-  return M.remove(scope_or_root, id)
+  return M.remove(opts.project_root, opts.id)
 end
 
 ---Flush every dirty root in the cache AND the session cache. Used on
@@ -1217,10 +1182,16 @@ function M._events(root)
   return rows
 end
 
----Internal: exposed for tests.
----@return table<string, manicule.StoreEntry>
-function M._cache()
-  return cache
+---Project roots whose store has been loaded this session. Searching
+---these covers "every project touched so far" (init.lua's record-lookup
+---fallback) without loading arbitrary store files from disk.
+---@return string[]
+function M.loaded_roots()
+  local roots = {}
+  for root in pairs(cache) do
+    roots[#roots + 1] = root
+  end
+  return roots
 end
 
 ---Internal: exposed for tests. Resets the cache so a fresh load runs.

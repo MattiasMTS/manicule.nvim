@@ -157,31 +157,31 @@ describe("manicule display config", function()
   before_each(setup_env)
   after_each(teardown_env)
 
-  it("rejects an invalid ui.display value", function()
+  it("rejects an invalid ui.display_mode value", function()
     local ok, err = pcall(require("manicule.config").setup, {
-      ui = { display = "sideways" },
+      ui = { display_mode = "sideways" },
     })
     assert.is_false(ok)
-    assert.is_truthy(tostring(err):find("ui.display", 1, true))
+    assert.is_truthy(tostring(err):find("ui.display_mode", 1, true))
     assert.is_truthy(tostring(err):find('"float", "eol", "inline", or "hidden"', 1, true))
   end)
 
   it("defaults to the eol display mode", function()
-    assert.are.equal("eol", require("manicule.config").get().ui.display)
+    assert.are.equal("eol", require("manicule.config").get().ui.display_mode)
     assert.are.equal("eol", require("manicule.ui.render").display_mode())
   end)
 
-  it("rejects an invalid ui.expand value", function()
+  it("rejects an invalid ui.eol_expand value", function()
     local ok, err = pcall(require("manicule.config").setup, {
-      ui = { expand = "sideways" },
+      ui = { eol_expand = "sideways" },
     })
     assert.is_false(ok)
-    assert.is_truthy(tostring(err):find("ui.expand", 1, true))
+    assert.is_truthy(tostring(err):find("ui.eol_expand", 1, true))
     assert.is_truthy(tostring(err):find('"float" or "rail"', 1, true))
   end)
 
-  it("defaults ui.expand to float", function()
-    assert.are.equal("float", require("manicule.config").get().ui.expand)
+  it("defaults ui.eol_expand to float", function()
+    assert.are.equal("float", require("manicule.config").get().ui.eol_expand)
   end)
 
   it("rejects an unknown runtime mode without changing the current one", function()
@@ -565,12 +565,12 @@ describe("manicule eol origin badges", function()
         end,
       }
     end
-    require("manicule.config").current.ui.icons = "auto"
+    require("manicule.config").get().ui.icons = "auto"
     require("manicule.ui.icons")._reset()
   end
 
   it("marks imported records with the ASCII github badge when icons are off", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     local render = require("manicule.ui.render")
     local bufnr = vim.api.nvim_get_current_buf()
     local record = github_record(bufnr)
@@ -611,7 +611,7 @@ describe("manicule eol origin badges", function()
   end)
 
   it("keeps today's ● marker byte-identically for local records with icons off", function()
-    require("manicule.config").current.ui.icons = false
+    require("manicule.config").get().ui.icons = false
     local bufnr = vim.api.nvim_get_current_buf()
     move_cursor(bufnr, 3)
     require("manicule").add({

@@ -1,12 +1,12 @@
 -- manicule.nvim: comments rail — the "eol" display mode's cursor
--- expansion rendered into a real side window (`ui.expand = "rail"`).
+-- expansion rendered into a real side window (`ui.eol_expand = "rail"`).
 --
 -- The float expansion opens popups that hover over the buffer (with
 -- occlusion-aware placement to dodge code); the rail is a real
 -- top-level split on the far right, so covering code is structurally
 -- impossible. `ui/render.lua`'s viewport pass dispatches here instead
 -- of the float path when the live display mode is "eol" and
--- `config.get().ui.expand == "rail"`; the "float"/"inline"/"hidden"
+-- `config.get().ui.eol_expand == "rail"`; the "float"/"inline"/"hidden"
 -- display modes never touch this module.
 --
 -- Lifecycle:
@@ -34,7 +34,7 @@
 -- `manicule://rail` buffers accumulate across open/close cycles —
 -- matching `float.create_scratch_buf`'s choice for popup buffers.
 --
--- Card content is NOT built here: `render._rail_card_rows` returns the
+-- Card content is NOT built here: `render.rail_card_rows` returns the
 -- same bordered `[text, hl]` chunk rows the inline virt_lines box
 -- renders (shared `build_popup_content` card, wrap = true, inline
 -- border chars, kind→highlight mapping), and this module only
@@ -280,7 +280,7 @@ local function alignment_padding(source_win, anchor_line, stack_height)
 end
 
 ---Render a card stack into the rail, opening (or reusing) the window.
----Each entry's card is built by `render._rail_card_rows` — the SAME
+---Each entry's card is built by `render.rail_card_rows` — the SAME
 ---`build_popup_content` card the float popup and the inline box render,
 ---word-wrapped and boxed with the inline border chars — and the
 ---resulting `[text, hl]` chunk rows are materialized here into buffer
@@ -336,7 +336,7 @@ function M.render(opts)
   -- renderer).
   local rows = {}
   for _, entry in ipairs(opts.entries or {}) do
-    local card = render._rail_card_rows(entry.record, width, entry.index or 1, entry.total or 1, opts.bufnr)
+    local card = render.rail_card_rows(entry.record, width, entry.index or 1, entry.total or 1, opts.bufnr)
     for _, row in ipairs(card) do
       table.insert(rows, row)
     end

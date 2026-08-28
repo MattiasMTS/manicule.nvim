@@ -382,12 +382,12 @@ describe("manicule checks panel tab", function()
       assert.is_truthy(winbar():find("%#ManiculePanelTabActive#Files", 1, true), winbar())
     end)
 
-    it("review.prefetch = false keeps the fetch lazy", function()
+    it("review.panel.prefetch = false keeps the fetch lazy", function()
       local gh = fake_gh(PR_CHECKS)
-      require("manicule.config").get().review.prefetch = false
+      require("manicule.config").get().review.panel.prefetch = false
       start_review({ pr = 42 })
       vim.wait(300)
-      assert.are.equal(0, #gh.calls(), "prefetch fired despite review.prefetch = false")
+      assert.are.equal(0, #gh.calls(), "prefetch fired despite review.panel.prefetch = false")
       enter_checks_tab()
       assert.are.equal(1, #gh.calls())
     end)

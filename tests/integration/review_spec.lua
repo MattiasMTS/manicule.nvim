@@ -355,9 +355,6 @@ describe("manicule review session", function()
     assert.are.equal("socket", state.sink)
     assert.are.equal(ctx.artifact_root .. "/return.sock", state.ctx.socket)
     assert.are.equal("job-7", state.ctx.job)
-    -- Deprecated wave-2 alias: session.sink_ctx points at the SAME
-    -- table for out-of-tree readers (review/tabs/checks.lua this wave).
-    assert.are.equal(state.ctx, state.sink_ctx)
   end)
 
   it("start_from_job rejects unreadable or invalid job files", function()
@@ -1196,13 +1193,13 @@ describe("manicule review session", function()
   it(":ManiculeToggle without a session still toggles comment visuals", function()
     vim.cmd("runtime plugin/manicule.lua")
     local render = require("manicule.ui.render")
-    assert.is_false(render.is_hidden())
+    assert.is_true(render.is_visible())
 
     vim.cmd("ManiculeToggle")
-    assert.is_true(render.is_hidden())
+    assert.is_false(render.is_visible())
 
     vim.cmd("ManiculeToggle")
-    assert.is_false(render.is_hidden())
+    assert.is_true(render.is_visible())
   end)
 
   it("panel.toggle() without a session is a no-op returning false", function()
@@ -1423,7 +1420,7 @@ describe("manicule review winbar breadcrumb", function()
   end)
 
   it("unified mode: breadcrumb on the single window", function()
-    require("manicule.config").get().review.mode = "unified"
+    require("manicule.config").get().review.diff_mode = "unified"
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(1), label = "winbar-unified" }))
     assert.are.equal("f1.lua \u{00B7} M \u{00B7} +1 \u{2212}1", vim.wo[vim.api.nvim_get_current_win()].winbar)
@@ -1475,7 +1472,7 @@ end)
 
 describe("manicule review right panel + comments rail", function()
   before_each(function()
-    ctx = H.setup({ review = { panel = { position = "right" } }, ui = { expand = "rail" } })
+    ctx = H.setup({ review = { panel = { position = "right" } }, ui = { eol_expand = "rail" } })
   end)
   after_each(function()
     pcall(function()
@@ -1496,7 +1493,7 @@ describe("manicule review right panel + comments rail", function()
     assert.is_truthy(panel_winid, "panel window not open")
 
     -- Comment on the worktree line, then move the cursor onto it: the
-    -- eol expansion renders into the rail (ui.expand = "rail").
+    -- eol expansion renders into the rail (ui.eol_expand = "rail").
     local ui = require("manicule.ui")
     local original_prompt = ui.prompt
     ui.prompt = function(_opts, cb)

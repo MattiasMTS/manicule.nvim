@@ -4,7 +4,7 @@
 -- Available only when the active session carries a PR number in its
 -- ctx (a `:ManiculeReview pr <n>` session) and the gh CLI is
 -- executable. PR details are fetched eagerly at session open
--- (spec.prefetch, gated by `review.prefetch`) or lazily on first show
+-- (spec.prefetch, gated by `review.panel.prefetch`) or lazily on first show
 -- — either way one async `gh pr view`, cached per session+PR, with the
 -- registry's winbar spinner marking the in-flight window (spec.busy) —
 -- and the threads section derives entirely from records

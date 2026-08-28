@@ -111,13 +111,13 @@ Core actions are also exposed as `<Plug>` maps for your own bindings:
   short id and first body line; the full popup expands while the cursor
   sits on the line.
 - `float` — anchored floating popups with occlusion-aware placement, gated
-  by the viewport (or always shown with `ui.sticky = true`).
+  by the viewport (or always shown with `ui.always_show_popups = true`).
 - `inline` — a bordered virtual-line box below each commented line; code is
   pushed down, never covered.
 - `hidden` — anchor extmarks and line-number tint only.
 
 `:ManiculeDisplay <mode>` switches live; a bare `:ManiculeDisplay` cycles
-`float → eol → inline → hidden`. The startup mode comes from `ui.display`;
+`float → eol → inline → hidden`. The startup mode comes from `ui.display_mode`;
 runtime switches are in-memory and reset when Neovim restarts. Map
 `<Plug>(manicule-display-cycle)` to cycle from a keymap.
 
@@ -133,7 +133,7 @@ end                                │ before summing                 │
 
 A leading badge marks each comment's origin: `●` for local comments,
 `[gh]` (or a Nerd Font glyph — see `ui.icons`) for comments imported from
-a GitHub PR. `ui.expand = "rail"` renders `eol`'s expanded cards into a
+a GitHub PR. `ui.eol_expand = "rail"` renders `eol`'s expanded cards into a
 real side window on the far right instead of popups, so cards can never
 cover code (config-at-setup; no runtime command in v1). `gca`/`gcd` work
 from the commented line in every mode.
@@ -174,7 +174,7 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
     :ManiculeReviewStop          " close the session
     :ManiculeReviewDiffMode      " toggle split <-> unified (or name one)
 
-`review.mode` picks how a pair renders; `:ManiculeReviewDiffMode` flips it
+`review.diff_mode` picks how a pair renders; `:ManiculeReviewDiffMode` flips it
 mid-session. `split` (default) is a side-by-side `:diffsplit` pair.
 `unified` shows one window — the worktree file — with the diff painted on:
 added lines highlighted, removed lines drawn as virtual text where they
@@ -236,7 +236,7 @@ pair with `require("manicule").register_review_tab({...})`: a unique
 Optional extras: `available(session)` gates the tab per session,
 tab-local `keymaps` are active only while it is current, `on_show` is a
 lazy-fetch hook, `prefetch = true` fires it at review open (disable all
-eager fetching with `review.prefetch = false`), `busy`/`animated` drive
+eager fetching with `review.panel.prefetch = false`), `busy`/`animated` drive
 the winbar spinner and live row ticking, and `ctx.refresh()` re-renders
 after an async fetch. See ARCHITECTURE.md ("Extension Points") for the
 full spec.
@@ -264,7 +264,7 @@ require("manicule").setup({
   store = {
     dir = vim.fn.stdpath("state") .. "/manicule/",
     format = "mpack", -- session store: "mpack" or "json"
-    branch = false,
+    scope_by_branch = false, -- true scopes the store file by git branch (main/master skipped)
     persist_unrooted = true,
     canonicalize_symlinks = true,
     root_markers = { ".git", ".hg", "package.json" },
@@ -284,25 +284,28 @@ require("manicule").setup({
     },
   },
   review = {
-    mode = "split", -- "split" (side-by-side) or "unified" (inline)
+    diff_mode = "split", -- "split" (side-by-side) or "unified" (inline)
     fold_unchanged = false, -- collapse unchanged code into folds while reviewing
     context = 3, -- unified: lines kept visible around each hunk
     panel = {
       position = "bottom", -- "bottom", "left", "right", or "float"
       layout = "flat", -- Files tab: "flat" paths or a "tree" grouped by directory (t toggles)
+      prefetch = true, -- eagerly fetch opted-in panel tabs (PR header, CI) at review open
       -- size = 12, -- rows (bottom) or columns (left/right); default per position
     },
   },
   ui = {
-    width = 72,
-    height = 6,
-    editor_mode = "insert",
-    submit_keys = { "<CR>" },
-    cancel_keys = { "q" },
+    editor = { -- the floating comment editor
+      width = 72,
+      height = 6,
+      start_mode = "insert", -- mode the editor opens in: "insert" or "normal"
+      submit_keys = { "<CR>" },
+      cancel_keys = { "q" },
+    },
     opacity = 0.0, -- float transparency: 0.0 opaque, 1.0 fully transparent
-    sticky = false,
-    display = "eol", -- startup display mode: "float", "eol", "inline", "hidden"
-    expand = "float", -- eol expansion surface: "float" popups or the side "rail"
+    always_show_popups = false, -- float mode: render popups beyond the viewport too
+    display_mode = "eol", -- startup display mode: "float", "eol", "inline", "hidden"
+    eol_expand = "float", -- eol expansion surface: "float" popups or the side "rail"
     icons = "auto", -- Nerd Font badges + filetype icons: "auto", true, false
   },
 })
@@ -314,6 +317,26 @@ when [mini.icons](https://github.com/echasnovski/mini.icons) or
 installed (both are optional; neither is a dependency), `true` forces the
 Nerd Font badges on without a provider, and `false` keeps everything plain
 text (`[gh]`, `●`, `✓`).
+
+## Lua API
+
+`require("manicule")` exposes:
+
+- `setup(opts)` — merge config (see Configuration) and wire the autocmds.
+- `add(opts?)` — comment on the current line / visual selection, or `opts.range`; `opts.body` skips the editor prompt.
+- `jump("next"|"prev", opts?)` — cursor to the nearest comment in the buffer (`opts.count`); `next(opts?)` / `prev(opts?)` are shorthands.
+- `edit(id, opts?)` / `delete(id, opts?)` / `resolve(id, opts?)` — mutate one comment by id (`opts.scope`, `opts.project_root` locate it).
+- `undo_delete()` / `redo_delete()` — multi-level deletion undo/redo.
+- `list(filter?, opts?)` — return records; `filter` takes predicates (`uri`, `uris`, `path_suffix`, `unresolved`, `author`, `exclude_imported`), `opts.root` overrides root resolution, `opts.sync = false` skips the position sync.
+- `send(sink?, filter?, ctx?, opts?)` — dispatch listed comments to a sink (nil sink prompts through the picker).
+- `register_sink(spec)` / `register_review_tab(spec)` / `register_review_source(resolver)` — the three extension registries.
+
+Review sessions are driven from `require("manicule.review")`:
+`start`, `open_pair`, `next`, `prev`, `set_diff_mode`, `finish`, `stop`,
+`state`, `diffstat`, and `start_from_job`. See
+[ARCHITECTURE.md](./ARCHITECTURE.md) for extension authoring (sinks,
+panel tabs, review sources) and the `manicule.review.git` helpers
+available to resolver authors.
 
 ## Storage
 

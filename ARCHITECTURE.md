@@ -109,11 +109,11 @@ records)` is idempotent: it creates or updates handles for live records,
 clears handles whose record disappeared, and decides per mode what a record
 gets beyond its anchor extmark. `render.update_viewport_popups(bufnr,
 records)` owns the transient popups: under `float` it shows popups for
-viewport lines (or every line when `ui.sticky`), under `eol` its visibility
-test becomes the cursor line, and under `inline`/`hidden` it tears every
-popup down.
+viewport lines (or every line when `ui.always_show_popups`), under `eol`
+its visibility test becomes the cursor line, and under `inline`/`hidden`
+it tears every popup down.
 
-The mode is split state: `config.get().ui.display` is only the startup
+The mode is split state: `config.get().ui.display_mode` is only the startup
 default (`"eol"`); runtime switches (`:ManiculeDisplay` /
 `render.set_display_mode`, cycle order float → eol → inline → hidden) live
 in module state, in-memory, reset on restart. A switch repaints every
@@ -148,14 +148,14 @@ id + counter, body fitted to a width cap, date/actions footer). Floats
 ellipsis-truncate each body line; inline word-wraps instead, since there is
 no expanded popup left to reveal the rest.
 
-`config.ui.expand` picks where eol's cursor expansion renders (read at
+`config.ui.eol_expand` picks where eol's cursor expansion renders (read at
 dispatch time, config-at-setup): `"float"` (default) takes the popup path
 above; `"rail"` makes the viewport pass hand the cursor-line records to
 `ui/rail.lua` instead — a real `vertical botright` window on the far
 right, so covering code is structurally impossible and the occlusion
 placement never runs. The rail owns its window, scratch buffer
 (`manicule://rail`, `bufhidden=wipe`), and lifecycle augroup; render.lua
-owns the cards — `render._rail_card_rows` returns the inline box's
+owns the cards — `render.rail_card_rows` returns the inline box's
 `[text, hl]` chunk rows, and the rail only materializes them into buffer
 lines + highlight extmarks, aligned so the first card's top row sits at
 the anchor line's screen row. An uncommented cursor line clears the cards
@@ -192,7 +192,7 @@ Session stores use:
 session.<format>
 ```
 
-`store.branch = true` appends the current git branch to the project store name
+`store.scope_by_branch = true` appends the current git branch to the project store name
 except for `main` and `master`. The default is `false` because comments are
 treated as content annotations rather than branch-local editor state.
 
@@ -297,7 +297,9 @@ Events are native `User` autocmds.
 ## Extension Points
 
 Three registries: sinks (below), review panel tabs (below), and review
-source resolvers (`sources.register`, documented under Review Mode).
+source resolvers (`sources.register`, re-exported as
+`require("manicule").register_review_source`, documented under Review
+Mode).
 
 Sinks are the stable extension point:
 
@@ -338,7 +340,7 @@ require("manicule").register_review_tab({
     return { { text = "lint ok", spans = { { 0, 4, "DiagnosticOk" } }, data = { id = 1 } } }
   end,
   prefetch = true,                     -- optional: fire on_show once at review
-                                       -- open (gated by `review.prefetch`)
+                                       -- open (gated by `review.panel.prefetch`)
   busy = function(ctx)                 -- optional: true while fetching — the
     return false                       -- winbar title gets a spinner frame
   end,
@@ -380,7 +382,7 @@ worktree right). One active session at a time, in its own tab page.
 - Right side: real worktree file where it exists; comments anchor natively.
 - Left side: read-only staged baseline copy (modifiable=false, readonly=true,
   bufhidden=wipe, swapfile=false).
-- Diff rendering is chosen by `review.mode`; `:ManiculeReviewDiffMode`
+- Diff rendering is chosen by `review.diff_mode`; `:ManiculeReviewDiffMode`
   flips it and re-opens the current index.
   - `split` (default): `:diffsplit` pairs (left split beside right).
   - `unified`: one window on the worktree file, diff painted inline (below).
@@ -455,6 +457,15 @@ worktree right). One active session at a time, in its own tab page.
   (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI).
 - `register(resolver)` prepends to registry → user resolvers shadow builtins.
 - All resolvers return `{files: [{left, right, status, path}], label}`.
+- Resolver authors get the git plumbing as a library
+  (`require("manicule.review.git")`): `root(dir)` (repo toplevel),
+  `rev_parse(root, ref)` / `merge_base(root, a, b)` (both return
+  `sha|nil, err`), `changed_files(root, base)` (name-status list incl.
+  untracked as "A"), `stage_baseline(root, base, entries, dir)` (write
+  baseline copies under `dir` and return ready `{left, right, status,
+  path}` pairs), and `materialize(root, ref, paths, dir)` (batch-extract
+  arbitrary blobs). Custom resolvers compose these instead of shelling
+  out to git themselves.
 - `pr <n>` with the head checked out also imports existing PR review comments
   (`lua/manicule/review/import.lua`): `gh api .../pulls/<n>/comments --paginate`
   → project records with `meta.github = {id, url, imported = true}`. Best-effort
