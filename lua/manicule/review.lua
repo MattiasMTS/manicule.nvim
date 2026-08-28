@@ -176,7 +176,7 @@ local function map_navigation(bufnr)
   end, { buffer = bufnr, desc = "Manicule review: next file (marks this one viewed; skips viewed files)" })
   vim.keymap.set("n", "<S-Tab>", function()
     require("manicule.review").prev()
-  end, { buffer = bufnr, desc = "Manicule review: previous file (marks this one viewed; skips viewed files)" })
+  end, { buffer = bufnr, desc = "Manicule review: previous file (literal step back)" })
   session.mapped_bufs = session.mapped_bufs or {}
   session.mapped_bufs[bufnr] = true
 end
@@ -299,9 +299,12 @@ local function seek_unviewed(dir)
   return session.index + dir -- all viewed: plain cycle (M.open_pair wraps)
 end
 
--- next/prev mark the pair the user navigates AWAY from as viewed (the
--- natural reading flow; the panel's `v` un-marks) and then skip pairs
--- already viewed while any unviewed pair remains.
+-- Only next() marks the pair the user navigates AWAY from as viewed and
+-- skips already-viewed pairs — advancing is the completion gesture (the
+-- panel's `v` un-marks). prev() is a literal step back: going back means
+-- the user is NOT done, so it neither marks nor skips — otherwise
+-- <Tab><S-Tab> would land on the bottom-most unviewed file instead of
+-- the one just left.
 
 ---Open the nearest unviewed pair after the current one (wrapping),
 ---marking the pair navigated away from as viewed. With every pair
@@ -313,12 +316,11 @@ function M.next()
   end
 end
 
----`M.next` in the other direction: the nearest unviewed pair before the
----current one (wrapping). No-op without a session.
+---Open the previous pair, literally: one step back with wrap, no
+---viewed-marking and no skipping. No-op without a session.
 function M.prev()
   if session then
-    M.set_viewed(session.index, true)
-    M.open_pair(seek_unviewed(-1))
+    M.open_pair(session.index - 1)
   end
 end
 

@@ -344,10 +344,9 @@ describe("manicule review panel current-pair highlight", function()
 
     R.next()
     assert.are.same({ 1 }, current_rows())
-    -- prev() marks pair 2 viewed and skips the (auto-viewed) pair 1,
-    -- wrapping to pair 3 — see the viewed-tracking specs.
+    -- prev() steps back literally to the pair just left, viewed or not.
     R.prev()
-    assert.are.same({ 2 }, current_rows())
+    assert.are.same({ 0 }, current_rows())
   end)
 
   it("overlays the ▸ marker and bolds the open pair's filename", function()

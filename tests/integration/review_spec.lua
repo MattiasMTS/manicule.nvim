@@ -1157,10 +1157,10 @@ describe("manicule review session", function()
     -- Focus must stay in the diff window, not the panel.
     assert.are_not.equal(pwin, vim.api.nvim_get_current_win())
 
-    -- prev() skips pair 1 (auto-marked viewed by next) and wraps to 3.
+    -- prev() is a literal step back to the pair just left, viewed or not.
     R.prev()
-    assert.are.equal(3, panel_current_row())
-    assert.are.equal(3, vim.api.nvim_win_get_cursor(pwin)[1])
+    assert.are.equal(1, panel_current_row())
+    assert.are.equal(1, vim.api.nvim_win_get_cursor(pwin)[1])
   end)
 
   it("comment-add refresh keeps the panel index on the open pair", function()
@@ -1362,16 +1362,24 @@ describe("manicule review viewed tracking", function()
     assert.are.equal(3, state.index, "next() did not skip the viewed pair")
   end)
 
-  it("prev() auto-marks and skips viewed pairs, wrapping", function()
+  it("prev() steps back literally: no viewed-marking, no skipping", function()
     local R = require("manicule.review")
     assert.is_true(R.start({ files = make_pairs(3), label = "viewed-prev" }))
-    R.set_viewed(3, true)
 
-    R.prev() -- from 1: marks 1 viewed, wraps past viewed 3 to 2
+    -- <Tab> then <S-Tab> must return to the file just left, even though
+    -- next() marked it viewed.
+    R.next()
+    assert.are.equal(2, R.state().index)
+    R.prev()
 
     local state = R.state()
-    assert.is_true(state.viewed[1])
-    assert.are.equal(2, state.index)
+    assert.are.equal(1, state.index, "prev() did not return to the pair just left")
+    -- Going back is not a completion gesture: pair 2 stays unviewed.
+    assert.is_nil(state.viewed[2])
+
+    -- Wraps backward from the first pair.
+    R.prev()
+    assert.are.equal(3, R.state().index)
   end)
 
   it("falls back to plain cycling when every pair is viewed", function()
