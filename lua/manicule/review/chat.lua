@@ -5,12 +5,13 @@
 -- the absolute cwd with every non-alphanumeric byte replaced by `-`
 -- (`/Users/me/src/github.com/x.nvim` → `-Users-me-src-github-com-x-nvim`).
 -- `:ManiculeReview chat` picks a session and one assistant turn from it,
--- writes the turn's text out as a markdown file, and opens it as an
--- all-added pair in the normal review session — so a plan or report the
--- agent wrote can be commented on line by line and the batch sent back
--- through any sink. Read-only and best-effort: the transcripts are never
--- modified, and a missing directory or unrecognized shape fails the
--- resolve with a clear message.
+-- writes the turn's text out as a markdown file, and opens it as a
+-- DOCUMENT pair (`status = "doc"`, no left side — see review.lua) in the
+-- normal review session: no diff against anything, prose wrapping on —
+-- so a plan or report the agent wrote can be commented on line by line
+-- and the batch sent back through any sink. Read-only and best-effort:
+-- the transcripts are never modified, and a missing directory or
+-- unrecognized shape fails the resolve with a clear message.
 --
 -- Transcript shape this reads (verified against Claude Code 2.x files):
 --
@@ -49,9 +50,11 @@ local M = {}
 
 local uv = vim.uv
 
----A turn is offered when it has at least this many lines AND characters:
----real reports run 10+ lines / 1000+ chars, narration between tool calls
----is one line under ~140 chars.
+---A turn is offered when it has at least this many NON-BLANK lines AND
+---this many characters: real reports run 10+ lines / 1000+ chars,
+---narration between tool calls is one line under ~140 chars. Blank
+---lines do not count — text blocks join with one, so a URL plus a
+---sentence spans three lines but is two lines of text.
 M.MIN_LINES = 3
 M.MIN_CHARS = 120
 
@@ -99,6 +102,20 @@ end
 ---First non-blank line of `text`, CR/LF agnostic.
 local function first_line(text)
   return vim.trim(text):match("^[^\r\n]*")
+end
+
+---Total and non-blank line counts of (trimmed, LF-only) `text`.
+---@param text string
+---@return integer total, integer nonblank
+local function count_lines(text)
+  local total, nonblank = 0, 0
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    total = total + 1
+    if line:find("%S") then
+      nonblank = nonblank + 1
+    end
+  end
+  return total, nonblank
 end
 
 ---The prompt text of a user event: a string content, or its first text
@@ -238,7 +255,7 @@ end
 ---@field timestamp string|nil ISO timestamp of the turn's first text event
 ---@field text string text blocks joined with blank lines
 ---@field first_line string
----@field line_count integer
+---@field line_count integer total lines, blank ones included (the picker's `(n lines)`)
 
 ---Kept assistant turns of `session`, newest first and numbered over the
 ---kept ones (so `chat <n>` and the picker agree). `nil, err` when the
@@ -295,9 +312,8 @@ function M.list_turns(session)
   local kept = {}
   for i = #turns, 1, -1 do
     local turn = turns[i]
-    local _, newlines = turn.text:gsub("\n", "")
-    local line_count = newlines + 1
-    if line_count >= M.MIN_LINES and #turn.text >= M.MIN_CHARS then
+    local line_count, text_lines = count_lines(turn.text)
+    if text_lines >= M.MIN_LINES and #turn.text >= M.MIN_CHARS then
       turn.index = #kept + 1
       turn.first_line = first_line(turn.text)
       turn.line_count = line_count
@@ -307,11 +323,11 @@ function M.list_turns(session)
   return kept
 end
 
----Write `turn` as markdown under stdpath("cache")/manicule/chat and
----return the path. Three HTML-comment header lines (session title; turn
----number, timestamp, branch; source transcript), a blank line, the text.
----Re-materializing the same turn overwrites the same path, so comments
----left on it keep their URI.
+---Write `turn.text` as markdown under stdpath("cache")/manicule/chat and
+---return the path — the text alone. (A header above it would be
+---concealed markup in markdown: blank rows on screen, and every
+---commented line offset from the turn.) Re-materializing the same turn
+---overwrites the same path, so comments left on it keep their URI.
 ---@param session manicule.chat.Session
 ---@param turn manicule.chat.Turn
 ---@return string path
@@ -319,32 +335,12 @@ function M.materialize(session, turn)
   local dir = vim.fn.stdpath("cache") .. "/manicule/chat"
   vim.fn.mkdir(dir, "p")
   local path = ("%s/%s-turn-%d.md"):format(dir, session.id:sub(1, 8), turn.index)
-  local lines = {
-    ("<!-- session: %s -->"):format(session.title),
-    ("<!-- turn %d · %s · %s -->"):format(turn.index, turn.timestamp or "?", session.branch or "?"),
-    ("<!-- source: %s -->"):format(session.path),
-    "",
-  }
-  vim.list_extend(lines, vim.split(turn.text, "\n", { plain = true }))
-  vim.fn.writefile(lines, path)
+  vim.fn.writefile(vim.split(turn.text, "\n", { plain = true }), path)
   return path
 end
 
 -- ---------------------------------------------------------------------------
 -- Resolver
-
----Staging dir outside nvim's runtime staged-path pattern — the same rule
----as sources.lua's make_stage_dir (kept local there; see its comment):
----adapter.identify would otherwise treat the pair as a `:DiffTool` copy.
-local function make_stage_dir()
-  local tmpdir = (os.getenv("TMPDIR") or "/tmp"):gsub("/$", "")
-  local dir = uv.fs_mkdtemp(tmpdir .. "/manicule-review-XXXXXX")
-  if not dir or dir == "" or dir == "/" then
-    dir = vim.fn.tempname()
-    vim.fn.mkdir(dir, "p")
-  end
-  return dir
-end
 
 local function human_size(bytes)
   if bytes >= 1024 * 1024 then
@@ -414,21 +410,17 @@ function M.format_turn(turn)
   return ("%s  %s  (%d lines)"):format(hhmm(turn.timestamp), first, turn.line_count)
 end
 
----The review job for one turn: the materialized markdown on the right,
----an empty staged file on the left (all-added), the stage dir owned by
----the session so stop() removes it. The cached markdown stays.
+---The review job for one turn: the materialized markdown as a document
+---pair — `status = "doc"`, no `left` — which the session opens plain
+---(review.lua's open_pair). Nothing is staged, so the job owns no stage
+---dirs; the cached markdown stays.
 ---@param session manicule.chat.Session
 ---@param turn manicule.chat.Turn
 local function job_for(session, turn)
   local right = M.materialize(session, turn)
-  local name = vim.fs.basename(right)
-  local stage = make_stage_dir()
-  local left = stage .. "/" .. name
-  vim.fn.writefile({}, left)
   return {
-    files = { { left = left, right = right, status = "A", path = name } },
+    files = { { right = right, status = "doc", path = vim.fs.basename(right) } },
     label = "chat: " .. session.title,
-    stage_dirs = { stage },
   }
 end
 

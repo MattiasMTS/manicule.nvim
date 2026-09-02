@@ -1528,6 +1528,174 @@ describe("manicule review winbar breadcrumb", function()
   end)
 end)
 
+describe("manicule review document pairs", function()
+  before_each(function()
+    ctx = H.setup()
+  end)
+  after_each(function()
+    pcall(function()
+      require("manicule.review").stop()
+    end)
+    H.teardown(ctx)
+    ctx = nil
+  end)
+
+  ---A `doc` pair: a prose file reviewed without a baseline — no `left`.
+  local function make_doc_pair(name)
+    local right = ctx.root .. "/" .. name
+    vim.fn.writefile({ "# Plan", "", ("prose "):rep(40) }, right)
+    return { right = right, status = "doc", path = name }
+  end
+
+  ---Non-panel windows of the current tab, in layout order.
+  local function file_wins()
+    local wins = {}
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.bo[vim.api.nvim_win_get_buf(winid)].filetype ~= "manicule-panel" then
+        wins[#wins + 1] = winid
+      end
+    end
+    return wins
+  end
+
+  local function buf_map(bufnr, lhs)
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if map.lhs:lower() == lhs:lower() then
+        return map
+      end
+    end
+    return nil
+  end
+
+  it("opens plain: one window, no diff, prose wrapping, `path · doc` breadcrumb", function()
+    local R = require("manicule.review")
+    local pair = make_doc_pair("plan.md")
+    assert.is_true(R.start({ files = { pair }, label = "doc" }))
+
+    local wins = file_wins()
+    assert.are.equal(1, #wins, "a doc pair must not split")
+    local win = wins[1]
+    local buf = vim.api.nvim_win_get_buf(win)
+    assert.are.equal(win, vim.api.nvim_get_current_win())
+    assert.are.equal(pair.right, vim.api.nvim_buf_get_name(buf))
+    assert.is_false(vim.wo[win].diff)
+    assert.is_true(vim.bo[buf].modifiable)
+    assert.is_true(vim.wo[win].wrap)
+    assert.is_true(vim.wo[win].linebreak)
+    assert.is_true(vim.wo[win].breakindent)
+    assert.are.equal("plan.md \u{00B7} doc", vim.wo[win].winbar)
+
+    -- The deferred diffstat fill has nothing to count for a doc pair and
+    -- leaves the breadcrumb without a `+N`.
+    wait_diffstat()
+    assert.is_nil(R.diffstat()[1])
+    assert.are.equal("plan.md \u{00B7} doc", vim.wo[win].winbar)
+  end)
+
+  it("keeps <Tab>/<S-Tab> mapped in the doc buffer; stop() removes them and the session", function()
+    local R = require("manicule.review")
+    local files = { make_doc_pair("plan.md"), make_pairs(1)[1] }
+    assert.is_true(R.start({ files = files, label = "doc-nav" }))
+    local doc_buf = vim.api.nvim_get_current_buf()
+    local tab_map = buf_map(doc_buf, "<Tab>")
+    assert.is_truthy(tab_map, "<Tab> not mapped in the doc buffer")
+    assert.is_truthy(buf_map(doc_buf, "<S-Tab>"), "<S-Tab> not mapped in the doc buffer")
+
+    tab_map.callback()
+    assert.are.equal(2, R.state().index)
+    R.prev()
+    assert.are.equal(1, R.state().index)
+    assert.are.equal(doc_buf, vim.api.nvim_get_current_buf())
+
+    assert.is_true(R.stop())
+    assert.is_nil(R.state())
+    assert.is_nil(buf_map(doc_buf, "<Tab>"), "<Tab> map leaked past stop()")
+    assert.is_nil(buf_map(doc_buf, "<S-Tab>"), "<S-Tab> map leaked past stop()")
+  end)
+
+  it("diff-mode toggle on a doc pair re-opens it plain without error", function()
+    local R = require("manicule.review")
+    local pair = make_doc_pair("plan.md")
+    assert.is_true(R.start({ files = { pair }, label = "doc-mode" }))
+    for _, mode in ipairs({ "unified", "split" }) do
+      assert.are.equal(mode, R.set_diff_mode(mode))
+      local wins = file_wins()
+      assert.are.equal(1, #wins, mode .. ": a doc pair must stay one window")
+      assert.are.equal(pair.right, vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(wins[1])))
+      assert.is_false(vim.wo[wins[1]].diff)
+      assert.is_true(vim.wo[wins[1]].linebreak)
+      assert.are.equal("plan.md \u{00B7} doc", vim.wo[wins[1]].winbar)
+    end
+  end)
+
+  it("prose options stay with the doc buffer: the next pair's diff windows are unaffected", function()
+    local R = require("manicule.review")
+    local files = { make_doc_pair("plan.md"), make_pairs(1)[1] }
+    assert.is_true(R.start({ files = files, label = "doc-leak" }))
+    assert.is_true(vim.wo[vim.api.nvim_get_current_win()].linebreak)
+
+    -- The pair switch reuses the doc's window for the M pair's right
+    -- side (close_session_windows keeps the first file window).
+    R.next()
+    assert.are.equal(2, R.state().index)
+    local wins = file_wins()
+    assert.are.equal(2, #wins)
+    for _, win in ipairs(wins) do
+      assert.is_true(vim.wo[win].diff)
+      assert.is_false(vim.wo[win].linebreak, "linebreak leaked onto a diff window")
+      assert.is_false(vim.wo[win].breakindent, "breakindent leaked onto a diff window")
+    end
+
+    -- Back on the doc, its options come back with it.
+    R.prev()
+    assert.are.equal(1, R.state().index)
+    local win = vim.api.nvim_get_current_win()
+    assert.is_true(vim.wo[win].wrap)
+    assert.is_true(vim.wo[win].linebreak)
+    assert.is_true(vim.wo[win].breakindent)
+  end)
+
+  it("pair_path, the session uris, and diffstat see the right side and no counts", function()
+    local R = require("manicule.review")
+    local doc = make_doc_pair("plan.md")
+    local files = { doc, make_pairs(1)[1] }
+    assert.are.equal(doc.right, R.pair_path(doc))
+    local stats = R.diffstat(files)
+    assert.is_nil(stats[1], "a doc pair has no diffstat")
+    assert.are.same({ added = 1, removed = 1 }, stats[2])
+
+    assert.is_true(R.start({ files = files, label = "doc-cache" }))
+    local state = R.state()
+    local uri = require("manicule.uri").for_path(doc.right)
+    assert.are.equal(uri, state.uris[1])
+    assert.is_true(state.uri_set[uri])
+    assert.are.equal(1, state.uri_index[uri])
+    wait_diffstat()
+    assert.is_nil(R.diffstat()[1])
+    assert.are.same({ added = 1, removed = 1 }, R.diffstat()[2])
+  end)
+
+  it("comments on a doc pair count as the session's", function()
+    local R = require("manicule.review")
+    local doc = make_doc_pair("plan.md")
+    assert.is_true(R.start({ files = { doc }, label = "doc-comment" }))
+    vim.api.nvim_win_set_cursor(0, { 3, 0 })
+    local ui = require("manicule.ui")
+    local original_prompt = ui.prompt
+    ui.prompt = function(_opts, cb)
+      cb("tighten this paragraph")
+    end
+    require("manicule").add()
+    ui.prompt = original_prompt
+
+    local state = R.state()
+    local records = require("manicule").list({ uris = state.uri_set }, { root = state.root })
+    assert.are.equal(1, #records)
+    assert.are.equal("tighten this paragraph", records[1].body)
+    assert.are.equal(state.uris[1], records[1].uri)
+  end)
+end)
+
 describe("manicule review right panel + comments rail", function()
   before_each(function()
     ctx = H.setup({ review = { panel = { position = "right" } }, ui = { eol_expand = "rail" } })

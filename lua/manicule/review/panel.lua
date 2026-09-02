@@ -12,7 +12,8 @@
 -- progress right-aligned — switched with `L` (next) / `H` (previous),
 -- wrapping. The Files tab renders one row per pair — `<icon> [M] path
 -- +12 −4  · N comments` — with a per-file diffstat and live comment
--- counts; the OPEN pair's line is marked with a `▸ ` overlay, a
+-- counts (a baseline-less `doc` pair renders a dim `[·]` and no
+-- diffstat); the OPEN pair's line is marked with a `▸ ` overlay, a
 -- full-line `ManiculePanelCurrent` background, and a bold filename;
 -- VIEWED pairs (`v`, or auto-marked by next/prev) get a `✓ ` lead and
 -- dim. The tab has two LAYOUTS — `t` toggles them for the session,
@@ -441,6 +442,8 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "ManiculePanelCurrentFile", { bold = true })
   vim.api.nvim_set_hl(0, "ManiculePanelStatusA", { link = "DiagnosticOk", default = true })
   vim.api.nvim_set_hl(0, "ManiculePanelStatusD", { link = "DiagnosticError", default = true })
+  -- `doc` pairs have no change to color: their `[·]` dims like the tails.
+  vim.api.nvim_set_hl(0, "ManiculePanelStatusDoc", { link = "Comment", default = true })
   -- M (and any other status) stays default text on purpose — most of a
   -- review is modifications, and coloring all of them is noise.
   vim.api.nvim_set_hl(0, "ManiculePanelAdded", { link = "Added", default = true })
@@ -605,9 +608,12 @@ local function pair_row(idx, label, indent, ctx)
     end
     col = col + #glyph + 1
   end
-  local status = ("[%s]"):format(pair.status)
+  -- A `doc` pair keeps the three-cell column with a dim `[·]`.
+  local is_doc = pair.status == "doc"
+  local status = is_doc and "[\u{00B7}]" or ("[%s]"):format(pair.status)
   local status_hl = pair.status == "A" and "ManiculePanelStatusA"
     or pair.status == "D" and "ManiculePanelStatusD"
+    or is_doc and "ManiculePanelStatusDoc"
     or nil
   parts[#parts + 1] = status .. " "
   if status_hl then

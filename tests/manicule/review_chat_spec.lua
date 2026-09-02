@@ -283,21 +283,34 @@ describe("manicule review chat", function()
       assert.are.same({ 1, 2 }, { turns[1].index, turns[2].index })
     end)
 
-    it("materializes a markdown document with a header under the cache dir", function()
+    it("materializes the turn text alone as a markdown document under the cache dir", function()
       fixture()
       local sessions = assert(chat().list_sessions({ cwd = CWD_A }))
       local turns = assert(chat().list_turns(sessions[1]))
       local path = chat().materialize(sessions[1], turns[2])
 
       assert.are.equal(cache_dir() .. "/" .. ID_A2:sub(1, 8) .. "-turn-2.md", path)
-      local lines = vim.fn.readfile(path)
-      for i = 1, 3 do
-        assert.is_truthy(lines[i]:match("^<!%-%-.*%-%->$"), ("header line %d is not a comment: %s"):format(i, lines[i]))
-      end
-      assert.is_truthy(lines[1]:find("Error diagnosis", 1, true), lines[1])
-      assert.is_truthy(lines[2]:find("2026-09-02T10:01:00.000Z", 1, true), lines[2])
-      assert.are.equal("", lines[4])
-      assert.are.equal(BLOCK_A .. "\n\n" .. BLOCK_B, table.concat(vim.list_slice(lines, 5), "\n"))
+      -- No header: markdown conceals HTML comments, which rendered as
+      -- blank lines above the turn and shifted every commented line.
+      assert.are.same(vim.split(BLOCK_A .. "\n\n" .. BLOCK_B, "\n", { plain = true }), vim.fn.readfile(path))
+    end)
+
+    it("counts non-blank lines toward MIN_LINES: a URL plus one sentence is not a report", function()
+      -- Two text blocks join with a blank line: three lines, two of them
+      -- text, well over MIN_CHARS. The join line must not make it kept.
+      local url = "https://github.com/MattiasMTS/manicule.nvim/pull/3/files#diff-0123456789abcdef0123456789abcdef"
+      local sentence = "The review is open on the PR with both comments attached; nothing else changed."
+      assert.is_true(#url + 2 + #sentence >= chat().MIN_CHARS)
+      local path = write_session(CWD_A, ID_A1, {
+        user(CWD_A, "2026-09-01T09:00:00.000Z", "post the review"),
+        assistant(CWD_A, "2026-09-01T09:00:01.000Z", { text(url), text(sentence) }),
+        user(CWD_A, "2026-09-01T09:01:00.000Z", "and the plan?"),
+        assistant(CWD_A, "2026-09-01T09:01:01.000Z", { text(LONG_A1) }),
+      })
+      local turns = assert(chat().list_turns({ path = path, id = ID_A1, title = "x" }))
+      assert.are.equal(1, #turns)
+      assert.are.equal(LONG_A1, turns[1].text)
+      assert.are.equal(5, turns[1].line_count, "line_count stays the total: it is the picker's `(n lines)`")
     end)
 
     it("rejects a transcript whose assistant events have an unexpected shape", function()
@@ -327,16 +340,13 @@ describe("manicule review chat", function()
       assert.are.equal("chat: Error diagnosis", job.label)
       assert.are.equal(1, #job.files)
       local pair = job.files[1]
-      assert.are.equal("A", pair.status)
+      -- A document pair: no baseline side, nothing staged, no diff.
+      assert.are.equal("doc", pair.status)
+      assert.is_nil(pair.left)
       assert.are.equal(cache_dir() .. "/" .. ID_A2:sub(1, 8) .. "-turn-2.md", pair.right)
       assert.are.equal(ID_A2:sub(1, 8) .. "-turn-2.md", pair.path)
-      assert.is_truthy(vim.fn.readfile(pair.right)[5]:find("Root cause found", 1, true))
-      -- Empty staged left inside the one owned stage dir.
-      assert.are.equal("table", type(job.stage_dirs))
-      assert.are.equal(1, #job.stage_dirs)
-      assert.are.equal(1, pair.left:find(job.stage_dirs[1], 1, true), pair.left)
-      assert.are.same({}, vim.fn.readfile(pair.left))
-      vim.fn.delete(job.stage_dirs[1], "rf")
+      assert.is_truthy(vim.fn.readfile(pair.right)[1]:find("Root cause found", 1, true))
+      assert.is_nil(job.stage_dirs, "a chat job owns no stage dirs")
     end)
 
     it("resolve_async never fires in the caller's frame", function()
@@ -353,7 +363,6 @@ describe("manicule review chat", function()
       assert.is_nil(err)
       assert.are.equal("chat: Error diagnosis", job.label)
       assert.is_truthy(vim.endswith(job.files[1].right, "-turn-1.md"))
-      vim.fn.delete(job.stage_dirs[1], "rf")
     end)
 
     it("`chat <n>` past the kept turns fails with a clear error", function()
@@ -399,7 +408,6 @@ describe("manicule review chat", function()
 
       assert.are.equal("chat: Plan the chat resolver", job.label)
       assert.are.equal(cache_dir() .. "/" .. ID_A1:sub(1, 8) .. "-turn-1.md", job.files[1].right)
-      vim.fn.delete(job.stage_dirs[1], "rf")
     end)
 
     it("a single session for the cwd skips the session picker", function()
@@ -411,7 +419,6 @@ describe("manicule review chat", function()
       assert.are.equal(1, #calls)
       assert.is_truthy(calls[1].prompt:lower():find("turn", 1, true), calls[1].prompt)
       assert.are.equal("chat: " .. ID_B1, job.label)
-      vim.fn.delete(job.stage_dirs[1], "rf")
     end)
 
     it("`chat all` offers sessions across every project", function()
@@ -422,7 +429,6 @@ describe("manicule review chat", function()
       local job = assert(resolve_sync({ "chat", "all" }, { cwd = CWD_B }))
       assert.are.equal(3, #calls[1].items)
       assert.are.equal("chat: Error diagnosis", job.label)
-      vim.fn.delete(job.stage_dirs[1], "rf")
     end)
 
     it("cancelling a picker fails the resolve", function()
@@ -477,9 +483,17 @@ describe("manicule review chat", function()
       assert.are.equal("chat: Error diagnosis", state.label)
       assert.are.equal(1, #state.files)
       local right = cache_dir() .. "/" .. ID_A2:sub(1, 8) .. "-turn-2.md"
+      assert.are.equal("doc", state.files[1].status)
+      assert.is_nil(state.files[1].left)
       assert.are.equal(right, state.files[1].right)
       assert.are.equal(right, vim.api.nvim_buf_get_name(vim.api.nvim_get_current_buf()))
       assert.are.equal("markdown", vim.bo.filetype)
+      -- Opened as a document, not an all-added diff: no diff window,
+      -- prose wrapping on, first line of the turn on the first row.
+      assert.is_false(vim.wo.diff)
+      assert.is_true(vim.wo.wrap)
+      assert.is_true(vim.wo.linebreak)
+      assert.are.equal("Root cause found and reproduced.", vim.api.nvim_buf_get_lines(0, 0, 1, false)[1])
     end)
 
     it(":ManiculeReview chat <n> needs no picker", function()

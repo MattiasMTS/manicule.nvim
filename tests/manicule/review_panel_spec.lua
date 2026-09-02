@@ -204,6 +204,24 @@ describe("manicule review panel files view", function()
     assert.are.equal("DiagnosticError", vim.api.nvim_get_hl(0, { name = "ManiculePanelStatusD" }).link)
   end)
 
+  it("renders a doc pair as a dim `[\u{00B7}]` row without a diffstat", function()
+    local R = require("manicule.review")
+    local doc = ctx.root .. "/plan.md"
+    vim.fn.writefile({ "# Plan", "", "one long line of prose" }, doc)
+    local files = { { right = doc, status = "doc", path = "plan.md" }, make_pairs(1)[1] }
+    start_review({ files = files, label = "doc-row" })
+    local lines = panel_lines()
+    -- Same three-cell status column as `[M]`; no `+N` for a file that
+    -- has no baseline to count against.
+    assert.are.equal("  [\u{00B7}] plan.md  \u{00B7} 0 comments", lines[1])
+    assert.are.equal("  [M] f1.lua  +1 \u{2212}1  \u{00B7} 0 comments", lines[2])
+    local status = span_marks(0, "ManiculePanelStatusDoc")
+    assert.are.equal(1, #status, "doc status span missing")
+    assert.are.equal("[\u{00B7}]", lines[1]:sub(status[1][3] + 1, status[1][4].end_col))
+    assert.are.equal(0, #span_marks(0, "ManiculePanelStatusA") + #span_marks(0, "ManiculePanelAdded"))
+    assert.are.equal("Comment", vim.api.nvim_get_hl(0, { name = "ManiculePanelStatusDoc" }).link)
+  end)
+
   it("dims the comment count tail", function()
     local R = require("manicule.review")
     start_review({ files = make_pairs(1), label = "counts" })
@@ -853,6 +871,20 @@ describe("manicule review panel tree layout", function()
       "      [M] b.lua  +1 \u{2212}1  \u{00B7} 0 comments",
       "\u{25BE} tests  +1 \u{2212}1  \u{00B7} 0 comments  \u{25CF}",
       "    [M] c.lua  +1 \u{2212}1  \u{00B7} 0 comments",
+    }, panel_lines())
+  end)
+
+  it("rolls a directory up around a doc pair, which contributes no counts", function()
+    local files = make_nested_pairs({ "docs/a.lua" })
+    local doc = ctx.root .. "/docs/plan.md"
+    vim.fn.writefile({ "# Plan", "", "prose" }, doc)
+    table.insert(files, 1, { right = doc, status = "doc", path = "docs/plan.md" })
+    start_review({ files = files, label = "tree-doc" })
+    press_in_panel(1, "t")
+    assert.are.same({
+      "\u{25BE} docs  +1 \u{2212}1  \u{00B7} 0 comments  \u{25CF}",
+      "    [\u{00B7}] plan.md  \u{00B7} 0 comments",
+      "    [M] a.lua  +1 \u{2212}1  \u{00B7} 0 comments",
     }, panel_lines())
   end)
 

@@ -11,13 +11,18 @@
 --
 -- `:ManiculeReviewDiffMode` flips between them, re-rendering the pair
 -- that is currently open.
+--
+-- A pair with `status = "doc"` has NO baseline (`left` is nil): a
+-- document — a plan, a report, a chat turn — reviewed for its own sake.
+-- It opens plain in one window with prose wrapping, in either diff
+-- mode, and carries no diffstat.
 
 local M = {}
 
 local uv = vim.uv
 
 ---@class manicule.ReviewSession
----@field files {left: string, right: string, status: string, path: string}[] empty while `resolving`
+---@field files {left: string|nil, right: string, status: string, path: string}[] empty while `resolving`; `left` is nil for `status = "doc"`
 ---@field label string
 ---@field sink string|nil
 ---@field ctx table|nil sink dispatch context (finish() passes it to the sink)
@@ -191,9 +196,9 @@ local function unmap_navigation(mapped_bufs)
 end
 
 ---Open the pair at `index` in the session tab: rebuild the diff layout
----(split or unified per `review.diff_mode`), set the winbar breadcrumbs, and
----point the panel's files view at the pair. Out-of-range indexes wrap.
----No-op without a session.
+---(split or unified per `review.diff_mode`; `doc` pairs open plain in
+---either mode), set the winbar breadcrumbs, and point the panel's files
+---view at the pair. Out-of-range indexes wrap. No-op without a session.
 ---@param index integer
 function M.open_pair(index)
   -- No pairs yet while a resolve is in flight (begin() opened only the
@@ -227,6 +232,24 @@ function M.open_pair(index)
   -- Winbar breadcrumb data: the cached per-pair diffstat (computed
   -- lazily once per session).
   local stat = (M.diffstat() or {})[index]
+
+  if pair.status == "doc" then
+    -- A document, not a diff: the file alone in the one window, wrapped
+    -- for prose. The options go on with `:setlocal` scope — `vim.wo`
+    -- has `:set` semantics for these and would also set the window's
+    -- value for NEW buffers, leaking onto the next pair edited into the
+    -- reused window. Local values travel with this buffer instead, so
+    -- no restore is needed on switch or stop.
+    vim.cmd.edit(vim.fn.fnameescape(pair.right))
+    local win = vim.api.nvim_get_current_win()
+    for _, name in ipairs({ "wrap", "linebreak", "breakindent" }) do
+      vim.api.nvim_set_option_value(name, true, { win = win, scope = "local" })
+    end
+    map_navigation(vim.api.nvim_get_current_buf())
+    set_breadcrumb(win, pair, nil)
+    require("manicule.review.panel").sync_index(index)
+    return
+  end
 
   if pair.status == "D" then
     vim.cmd.edit(vim.fn.fnameescape(pair.left))
@@ -344,10 +367,10 @@ function M.state()
 end
 
 ---Path of the buffer a pair is reviewed — and commented — in: the
----worktree file (right side), except for deletions, where only the
----staged baseline (left side) still exists to open and anchor
----comments to.
----@param pair {left: string, right: string, status: string}
+---worktree file (right side; a `doc` pair has nothing else), except
+---for deletions, where only the staged baseline (left side) still
+---exists to open and anchor comments to.
+---@param pair {left: string|nil, right: string, status: string}
 ---@return string
 function M.pair_path(pair)
   return pair.status == "D" and pair.left or pair.right
@@ -380,9 +403,14 @@ end
 ---Added/removed line counts for one pair. `A` and `D` shortcut to the
 ---surviving side's line count; everything else diffs the two sides.
 ---An unreadable side counts as {0, 0} — the panel simply omits the stat.
----@param pair {left: string, right: string, status: string}
----@return {added: integer, removed: integer}
+---A `doc` pair has no baseline to count against: nil, and the panel row
+---and breadcrumb omit the segment.
+---@param pair {left: string|nil, right: string, status: string}
+---@return {added: integer, removed: integer}|nil
 local function pair_diffstat(pair)
+  if pair.status == "doc" then
+    return nil
+  end
   if pair.status == "A" then
     local lines = read_lines(pair.right)
     return { added = lines and #lines or 0, removed = 0 }
@@ -422,8 +450,8 @@ end
 ---session; the stat deliberately stays as-of-attach rather than
 ---re-reading every pair per render (the next :ManiculeReview
 ---recomputes).
----@param files? {left: string, right: string, status: string}[] explicit pairs (bypasses the session cache)
----@return {added: integer, removed: integer}[]|nil stats nil for the argless form without a session or before the deferred fill lands
+---@param files? {left: string|nil, right: string, status: string}[] explicit pairs (bypasses the session cache)
+---@return {added: integer, removed: integer}[]|nil stats nil for the argless form without a session or before the deferred fill lands; `doc` pairs leave their index nil
 function M.diffstat(files)
   if files then
     local stats = {}
