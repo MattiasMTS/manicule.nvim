@@ -127,7 +127,7 @@ end
 local function reverse_map_temp_path(abs)
   local config = require("manicule.config")
   local uri_mod = require("manicule.uri")
-  local uv = vim.uv or vim.loop
+  local uv = vim.uv
 
   local suffix = uri_mod.nvim_runtime_staged_suffix(abs)
   if not suffix or suffix == "" or not suffix:find("/", 1, true) then
@@ -151,7 +151,7 @@ local function reverse_map_temp_path(abs)
     end
   end
 
-  local cfg = (config.current or {}).store or {}
+  local cfg = config.get().store or {}
   push(vim.fs.root(0, cfg.root_markers or { ".git", ".hg", "package.json" }))
   push(vim.fn.getcwd())
   -- HOME fallback: only engage when the suffix looks like a dotfile /
@@ -184,15 +184,14 @@ end
 ---URI (e.g. diff-pair's `working_uri` reporting) still get *something*
 ---sensible instead of crashing.
 ---
----Exposed on `M` under an underscore-prefixed name so tests and the
----diff-pair branch can share the same resolution without re-deriving
----the logic. Not part of the public surface.
+---Used by the diff-pair branch (`resolve_diff_pair`) to anchor the
+---working side's URI without re-deriving the reverse-map logic.
 ---@param bufnr integer
 ---@return string?
-function M._resolve_uri_for_bufnr(bufnr)
+local function resolve_uri_for_bufnr(bufnr)
   local uri_mod = require("manicule.uri")
   local config = require("manicule.config")
-  local codediff = codediff_identity(bufnr, config.current.store.root_markers)
+  local codediff = codediff_identity(bufnr, config.get().store.root_markers)
   if codediff then
     return codediff.uri
   end
@@ -259,7 +258,7 @@ function M.resolve_diff_pair(bufnr)
     -- configs), its URI still anchors to the real file. Falls back to
     -- the raw URI when reverse-map fails — diff-pair is a secondary
     -- concern, not worth crashing over.
-    local working_uri = M._resolve_uri_for_bufnr(working_bufnr)
+    local working_uri = resolve_uri_for_bufnr(working_bufnr)
     if not working_uri then
       return nil, "working-tree buffer has no URI"
     end
@@ -416,7 +415,7 @@ function M.identify(bufnr)
     }
   end
 
-  local codediff = codediff_identity(bufnr, config.current.store.root_markers)
+  local codediff = codediff_identity(bufnr, config.get().store.root_markers)
   if codediff then
     return {
       uri = codediff.uri,
@@ -435,7 +434,7 @@ function M.identify(bufnr)
     local pair = M.resolve_diff_pair(bufnr)
     if pair then
       if bufnr == pair.working_bufnr then
-        local root = root_for_bufnr(bufnr, config.current.store.root_markers)
+        local root = root_for_bufnr(bufnr, config.get().store.root_markers)
         return {
           uri = uri,
           scope = root and "project" or "session",
@@ -462,7 +461,7 @@ function M.identify(bufnr)
         -- reference side still routes records to the right project.
         local root
         if pair.working_bufnr and vim.api.nvim_buf_is_valid(pair.working_bufnr) then
-          root = root_for_bufnr(pair.working_bufnr, config.current.store.root_markers)
+          root = root_for_bufnr(pair.working_bufnr, config.get().store.root_markers)
         end
         return {
           uri = pair.working_uri,
@@ -487,9 +486,9 @@ function M.identify(bufnr)
     -- record into session scope instead of the real project store.
     local root
     if reverse_mapped_path then
-      root = vim.fs.root(reverse_mapped_path, config.current.store.root_markers)
+      root = vim.fs.root(reverse_mapped_path, config.get().store.root_markers)
     else
-      root = root_for_bufnr(bufnr, config.current.store.root_markers)
+      root = root_for_bufnr(bufnr, config.get().store.root_markers)
     end
     if root then
       return {
@@ -502,7 +501,7 @@ function M.identify(bufnr)
       }
     end
     -- Unrooted plain file buffer: route to session if the user allows.
-    if config.current.store.persist_unrooted then
+    if config.get().store.persist_unrooted then
       return {
         uri = uri,
         scope = "session",

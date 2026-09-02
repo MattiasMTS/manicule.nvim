@@ -9,7 +9,17 @@ local helpers = require("manicule.sinks.helpers")
 
 local M = {}
 
-local DEFAULT_PATTERNS = { "Claude Code", "claude-code", "Claude", "OpenAI Codex", "Codex", "sourcegraph/amp", "Amp" }
+local DEFAULT_PATTERNS = {
+  "Claude Code",
+  "claude-code",
+  "Claude",
+  "OpenAI Codex",
+  "Codex",
+  "sourcegraph/amp",
+  "Amp",
+  "Pi",
+  "π",
+}
 local DEFAULT_CACHE_TTL_MS = 5000
 local agent_surface_cache = {}
 
@@ -52,7 +62,7 @@ local function shorten(value, max)
 end
 
 local function now_ms()
-  return math.floor((vim.uv or vim.loop).hrtime() / 1000000)
+  return math.floor(vim.uv.hrtime() / 1000000)
 end
 
 local function patterns_key(patterns)
@@ -76,7 +86,10 @@ local function cache_key(opts)
   }, "\t")
 end
 
-local function split_lines(text)
+-- Split on CR/LF and drop blank lines — deliberately NOT str.split_lines
+-- (which keeps blanks): cmux tree/ps output is parsed line-by-line and
+-- blank/CR-terminated lines are noise here. Do not fold into manicule.str.
+local function split_nonempty_lines(text)
   local lines = {}
   for line in tostring(text or ""):gmatch("[^\r\n]+") do
     table.insert(lines, line)
@@ -92,13 +105,19 @@ local function split_tabs(text)
   return fields
 end
 
+local function is_pi_name(value)
+  local lower = tostring(value or ""):lower()
+  return lower:find("π", 1, true) ~= nil or lower:match("%f[%w]pi%f[%W]") ~= nil
+end
+
 local function title_matches(title, patterns)
   if type(title) ~= "string" then
     return false
   end
   local lower = title:lower()
   for _, pattern in ipairs(patterns or DEFAULT_PATTERNS) do
-    if lower:find(tostring(pattern):lower(), 1, true) then
+    local needle = tostring(pattern):lower()
+    if (needle == "pi" and is_pi_name(lower)) or (needle ~= "pi" and lower:find(needle, 1, true)) then
       return true
     end
   end
@@ -115,6 +134,19 @@ local function detect_agent_from_command(command)
   end
   if lower:find("sourcegraph/amp", 1, true) or lower:find("/amp", 1, true) then
     return "Amp"
+  end
+  -- Pi is often launched behind wrappers (e.g. `node /nix/.../pi-coding-agent/...`);
+  -- the `pi-coding-agent` path check covers those. For direct launches only the
+  -- invoked program (the FIRST argv token) may match by basename: scanning
+  -- every token misclassifies commands that merely mention pi in an argument
+  -- (`sudo -u pi bash`, `chown pi file`, `ssh -l pi host`). Bare "pi"
+  -- substrings (pip, spotify, pi.txt) must not match either.
+  if lower:find("pi-coding-agent", 1, true) then
+    return "Pi"
+  end
+  local program = lower:match("%S+")
+  if program and program:match("([^/]+)$") == "pi" then
+    return "Pi"
   end
   return nil
 end
@@ -136,12 +168,48 @@ local function detect_agent_from_screen(screen)
   if lower:find("sourcegraph/amp", 1, true) or lower:match("%f[%w]amp%f[%W]") then
     return "Amp"
   end
+  if lower:find("pi coding agent", 1, true) or lower:find("π coding agent", 1, true) then
+    return "Pi"
+  end
+  if lower:find("pi-coding-agent", 1, true) then
+    return "Pi"
+  end
+  -- Pi's TUI header shows a standalone π glyph even when no textual agent
+  -- name appears on screen. Plain prose "pi" must not match.
+  for token in lower:gmatch("%S+") do
+    if token == "π" then
+      return "Pi"
+    end
+  end
+  return nil
+end
+
+local function agent_from_metadata(surface, patterns)
+  local candidates = {}
+  local function add(value)
+    if type(value) == "string" and value ~= "" then
+      table.insert(candidates, value)
+    end
+  end
+
+  add(surface.agent)
+  add(surface.agent_key)
+  if type(surface.resume_binding) == "table" then
+    add(surface.resume_binding.name)
+    add(surface.resume_binding.kind)
+  end
+
+  for _, candidate in ipairs(candidates) do
+    if title_matches(candidate, patterns) then
+      return is_pi_name(candidate) and "Pi" or candidate
+    end
+  end
   return nil
 end
 
 ---@param surface string|table
 ---@return string?
-function M.surface_ref(surface)
+local function surface_ref(surface)
   if type(surface) == "string" then
     return surface
   end
@@ -153,12 +221,12 @@ end
 
 ---@param surface table|string
 ---@return string
-function M.surface_label(surface)
+local function surface_label(surface)
   if type(surface) ~= "table" then
     return tostring(surface)
   end
   local title = surface.tab_title or surface.title or surface.name or "cmux surface"
-  local ref = M.surface_ref(surface) or "?"
+  local ref = surface_ref(surface) or "?"
   local agent = surface.agent or surface.type
   local status = surface.status
   if type(surface.detail) == "string" and surface.detail ~= "" then
@@ -178,7 +246,7 @@ function M.surface_label(surface)
 end
 
 local function clean_tmpdir(dir)
-  return tostring(dir or "/tmp"):gsub("/+$", "")
+  return (tostring(dir or "/tmp"):gsub("/+$", ""))
 end
 
 local function read_first_line(path)
@@ -200,9 +268,9 @@ local function read_agent_states(opts)
   local files = vim.fn.glob(clean_tmpdir(opts.agent_state_dir) .. "/cmux-agent-state-*/*.state", false, true)
   for _, file in ipairs(files) do
     local line = read_first_line(file)
-    local surface_key = line and line ~= "" and split_tabs(line)[6] or nil
+    local fields = line and line ~= "" and split_tabs(line) or nil
+    local surface_key = fields and fields[6] or nil
     if surface_key and surface_key ~= "" then
-      local fields = split_tabs(line)
       local state = {
         agent_key = fields[1],
         agent_title = fields[2],
@@ -254,17 +322,13 @@ local function parse_tree_surface(line)
   }
 end
 
-local function list_tree_surfaces(opts)
-  if not opts.workspace_id or opts.workspace_id == "" then
-    return nil, "CMUX_WORKSPACE_ID not set in env"
-  end
-  local result = helpers.system({ cli(opts), "tree", "--workspace", opts.workspace_id })
+local function parse_tree_result(result)
   if result.code ~= 0 then
-    return nil, "cmux tree exited " .. tostring(result.code) .. ": " .. result.stderr:gsub("%s+$", "")
+    return nil, "cmux tree exited " .. tostring(result.code) .. ": " .. (result.stderr or ""):gsub("%s+$", "")
   end
 
   local surfaces = {}
-  for _, line in ipairs(split_lines(result.stdout)) do
+  for _, line in ipairs(split_nonempty_lines(result.stdout)) do
     local surface = parse_tree_surface(line)
     if surface then
       table.insert(surfaces, surface)
@@ -276,22 +340,14 @@ local function list_tree_surfaces(opts)
   return surfaces, nil
 end
 
-local function list_rpc_surfaces(opts)
-  if not opts.workspace_id or opts.workspace_id == "" then
-    return nil, "CMUX_WORKSPACE_ID not set in env"
-  end
-  local result = helpers.system({
-    cli(opts),
-    "rpc",
-    "surface.list",
-    vim.json.encode({ workspace_id = opts.workspace_id }),
-  })
+local function parse_rpc_result(result)
   if result.code ~= 0 then
-    return nil, "cmux rpc exited " .. tostring(result.code) .. ": " .. result.stderr:gsub("%s+$", "")
+    return nil, "cmux rpc exited " .. tostring(result.code) .. ": " .. (result.stderr or ""):gsub("%s+$", "")
   end
-  local ok, decoded = pcall(vim.json.decode, result.stdout)
+  local stdout = result.stdout or ""
+  local ok, decoded = pcall(vim.json.decode, stdout)
   if not ok or type(decoded) ~= "table" then
-    return nil, "cmux rpc returned invalid JSON: " .. result.stdout:sub(1, 200)
+    return nil, "cmux rpc returned invalid JSON: " .. stdout:sub(1, 200)
   end
   if type(decoded.surfaces) ~= "table" then
     return nil, "cmux rpc response missing surfaces key"
@@ -319,33 +375,41 @@ local function merge_tree_rpc_surfaces(tree_surfaces, rpc_surfaces)
 end
 
 ---@return table[]? surfaces, string? err
-function M.list_surfaces(opts)
+local function list_surfaces(opts)
   opts = normalize_opts(opts)
-  local tree_surfaces, tree_err = list_tree_surfaces(opts)
-  if tree_surfaces then
-    local rpc_surfaces = list_rpc_surfaces(opts)
-    if rpc_surfaces then
-      return merge_tree_rpc_surfaces(tree_surfaces, rpc_surfaces), nil
-    end
-    return tree_surfaces, nil
+  if not opts.workspace_id or opts.workspace_id == "" then
+    return nil, "CMUX_WORKSPACE_ID not set in env"
   end
+  -- The tree and rpc listings are independent; fan both out concurrently
+  -- and join instead of running two blocking waits back to back.
+  local tree_job = vim.system({ cli(opts), "tree", "--workspace", opts.workspace_id }, { text = true })
+  local rpc_job = vim.system({
+    cli(opts),
+    "rpc",
+    "surface.list",
+    vim.json.encode({ workspace_id = opts.workspace_id }),
+  }, { text = true })
 
-  local rpc_surfaces, rpc_err = list_rpc_surfaces(opts)
-  if rpc_surfaces then
-    return rpc_surfaces, nil
+  local tree_surfaces, tree_err = parse_tree_result(tree_job:wait())
+  local rpc_surfaces, rpc_err = parse_rpc_result(rpc_job:wait())
+  if tree_surfaces and rpc_surfaces then
+    return merge_tree_rpc_surfaces(tree_surfaces, rpc_surfaces), nil
+  end
+  if tree_surfaces or rpc_surfaces then
+    return tree_surfaces or rpc_surfaces, nil
   end
   return nil, tree_err or rpc_err
 end
 
-local function tree_ttys_by_surface_ref(opts)
-  local surfaces = list_tree_surfaces(opts)
+-- Surfaces from `list_surfaces` already carry the tree-parsed tty (the
+-- rpc/tree merge keeps it); build the ref -> tty lookup from them instead
+-- of re-forking `cmux tree`.
+local function ttys_by_surface_ref(surfaces)
   local ttys = {}
-  if not surfaces then
-    return ttys
-  end
   for _, surface in ipairs(surfaces) do
-    if surface.ref and surface.tty then
-      ttys[surface.ref] = surface.tty
+    local ref = surface_ref(surface)
+    if ref and surface.tty then
+      ttys[ref] = surface.tty
     end
   end
   return ttys
@@ -370,7 +434,7 @@ local function ps_commands_for_tty(tty, cache)
   end
 
   local commands = {}
-  for _, line in ipairs(split_lines(result.stdout)) do
+  for _, line in ipairs(split_nonempty_lines(result.stdout)) do
     local command = line:gsub("^%s+", "")
     if command ~= "" then
       table.insert(commands, command)
@@ -383,7 +447,7 @@ end
 local function read_surface_screens(opts, surfaces)
   local jobs = {}
   for _, surface in ipairs(surfaces) do
-    local ref = M.surface_ref(surface)
+    local ref = surface_ref(surface)
     if ref then
       table.insert(jobs, {
         surface = surface,
@@ -456,6 +520,8 @@ function M.list_agent_surfaces(opts)
     if cached and now_ms() - cached.at <= (opts.cache_ttl_ms or DEFAULT_CACHE_TTL_MS) then
       return cached.surfaces, cached.err
     end
+    -- TTL expired (or never cached): evict so stale entries don't pile up.
+    agent_surface_cache[key] = nil
   end
 
   local function finish(surfaces, err)
@@ -469,7 +535,7 @@ function M.list_agent_surfaces(opts)
     return surfaces, err
   end
 
-  local surfaces, err = M.list_surfaces(opts)
+  local surfaces, err = list_surfaces(opts)
   if not surfaces then
     return finish(nil, err)
   end
@@ -486,12 +552,12 @@ function M.list_agent_surfaces(opts)
     if not metadata then
       return
     end
-    local ref = M.surface_ref(surface)
+    local ref = surface_ref(surface)
     local key_for_surface = ref or surface.id or tostring(surface.index or surface)
     if not metadata.tty and ref then
       metadata.tty = surface.tty
       if not metadata.tty then
-        ttys = ttys or tree_ttys_by_surface_ref(opts)
+        ttys = ttys or ttys_by_surface_ref(surfaces)
         metadata.tty = ttys[ref]
       end
     end
@@ -508,6 +574,7 @@ function M.list_agent_surfaces(opts)
     if not is_current_surface(opts, surface) then
       local state = state_for_surface(states, surface)
       local agent = state and (state.agent_title or state.agent_key) or nil
+      local rpc_agent = agent_from_metadata(surface, opts.patterns)
       local metadata = nil
 
       if state and state_matches(state, opts.patterns) then
@@ -521,21 +588,21 @@ function M.list_agent_surfaces(opts)
           agent_state = state,
           detected_by = "state",
         }
+      elseif rpc_agent then
+        metadata = {
+          agent = rpc_agent,
+          detected_by = "metadata",
+        }
       elseif title_matches(surface.title, opts.patterns) or title_matches(surface.name, opts.patterns) then
         metadata = {
-          agent = surface.agent or surface.type,
+          agent = is_pi_name(surface.title) and "Pi" or surface.agent or surface.type,
           detected_by = "title",
-        }
-      elseif title_matches(surface.agent, opts.patterns) or title_matches(surface.agent_key, opts.patterns) then
-        metadata = {
-          agent = surface.agent or surface.agent_key,
-          detected_by = "metadata",
         }
       elseif opts.process_fallback ~= false then
         local tty = surface.tty
         if not tty then
-          ttys = ttys or tree_ttys_by_surface_ref(opts)
-          tty = ttys[M.surface_ref(surface)]
+          ttys = ttys or ttys_by_surface_ref(surfaces)
+          tty = ttys[surface_ref(surface)]
         end
         for _, command in ipairs(ps_commands_for_tty(tty, ps)) do
           local command_agent = detect_agent_from_command(command)
@@ -598,14 +665,15 @@ function M.is_available(opts)
   return opts.workspace_id ~= nil and opts.workspace_id ~= "" and helpers.executable(cli(opts))
 end
 
-local function sleep_ms(ms)
+-- Run `fn` after `ms` milliseconds without blocking the UI; immediately
+-- when the delay is zero or unset.
+local function defer_ms(ms, fn)
   ms = tonumber(ms) or 0
   if ms <= 0 then
+    fn()
     return
   end
-  vim.wait(ms, function()
-    return false
-  end, math.max(1, math.min(ms, 50)), false)
+  vim.defer_fn(fn, ms)
 end
 
 -- Split text into segments that each keep their trailing newline, so the
@@ -675,57 +743,130 @@ local function partial_paste_error(pasted, total, detail)
   return msg
 end
 
-local function send_text(opts, surface, text)
-  local ref = M.surface_ref(surface)
+-- Chunked set-buffer/paste-buffer path, fully async. The set-buffer
+-- uploads are independent (each chunk gets a distinct buffer name), so
+-- they all fan out concurrently up front; the paste-buffer sequence is
+-- then chained strictly in chunk order, with the inter-chunk delay via a
+-- deferred timer instead of a busy-wait. `done(ok, err)` fires once.
+local function send_chunked(opts, ref, text, chunk_bytes, done)
+  local chunks = chunk_text(text, chunk_bytes)
+  local total = #chunks
+  local stamp = string.format("%d", vim.uv.hrtime())
+  local function buffer_name(idx)
+    return "manicule-" .. stamp .. "-" .. idx
+  end
+
+  -- Fan out the independent uploads. Callbacks land on the main loop
+  -- (helpers.system_async schedules them), so no locking is needed.
+  local set_results = {}
+  local waiting -- paste chain blocked on a not-yet-finished set-buffer
+  for idx, chunk in ipairs(chunks) do
+    helpers.system_async({ cli(opts), "set-buffer", "--name", buffer_name(idx), "--", chunk }, nil, function(result)
+      set_results[idx] = result
+      if waiting and waiting.idx == idx then
+        local resume = waiting.resume
+        waiting = nil
+        resume(result)
+      end
+    end)
+  end
+
+  local paste_chunk
+  local function on_set_ready(idx, set_result)
+    if set_result.code ~= 0 then
+      -- Chunks 1..idx-1 were pasted before this chunk's upload failure
+      -- surfaced; report how far we got so the caller knows the pane
+      -- holds a partial review.
+      done(false, partial_paste_error(idx - 1, total, (set_result.stderr:gsub("%s+$", ""))))
+      return
+    end
+    helpers.system_async(
+      { cli(opts), "paste-buffer", "--name", buffer_name(idx), "--surface", ref },
+      nil,
+      function(paste_result)
+        if paste_result.code ~= 0 then
+          -- Chunk idx failed after 1..idx-1 were pasted: the pane now holds a
+          -- truncated review. Surface that so a retry doesn't silently
+          -- duplicate content into a half-pasted pane.
+          done(false, partial_paste_error(idx - 1, total, (paste_result.stderr:gsub("%s+$", ""))))
+          return
+        end
+        if idx >= total then
+          done(true, nil)
+          return
+        end
+        defer_ms(opts.paste_chunk_delay_ms, function()
+          paste_chunk(idx + 1)
+        end)
+      end
+    )
+  end
+
+  paste_chunk = function(idx)
+    local set_result = set_results[idx]
+    if set_result then
+      on_set_ready(idx, set_result)
+    else
+      waiting = {
+        idx = idx,
+        resume = function(result)
+          on_set_ready(idx, result)
+        end,
+      }
+    end
+  end
+
+  paste_chunk(1)
+end
+
+local function send_text(opts, surface, text, cb)
+  local ref = surface_ref(surface)
   if not ref or ref == "" then
-    return false, "cmux target has no surface ref"
+    cb(false, "cmux target has no surface ref")
+    return
   end
   text = tostring(text or "")
   local chunk_bytes = math.max(1, math.floor(tonumber(opts.paste_chunk_bytes) or 1024))
+
+  -- After the text has landed: auto-submit (deferred, not busy-waited)
+  -- unless disabled, then report to the caller.
+  local function submit(ok, err)
+    if not ok then
+      cb(false, err)
+      return
+    end
+    if opts.auto_submit == false then
+      cb(true, nil)
+      return
+    end
+    defer_ms(opts.submit_delay_ms, function()
+      helpers.system_async({ cli(opts), "send-key", "--surface", ref, "enter" }, nil, function(key_result)
+        if key_result.code ~= 0 then
+          cb(false, "text landed but submit failed; press Enter in the cmux pane manually")
+          return
+        end
+        cb(true, nil)
+      end)
+    end)
+  end
+
   -- Route through the chunked set-buffer/paste-buffer path whenever the
   -- payload is multiline OR larger than the chunk threshold. A single,
   -- newline-free payload that exceeds the threshold must NOT be passed as
   -- one argv to `cmux send --` (it can fail at the exec layer with E2BIG).
   -- The small/simple `cmux send` path stays only for genuinely small,
   -- single-line payloads.
-  local result
   if text:find("\n", 1, true) or #text > chunk_bytes then
-    local chunks = chunk_text(text, chunk_bytes)
-    local stamp = string.format("%d", (vim.uv or vim.loop).hrtime())
-    for idx, chunk in ipairs(chunks) do
-      local buffer_name = "manicule-" .. stamp .. "-" .. idx
-      local set_result = helpers.system({ cli(opts), "set-buffer", "--name", buffer_name, "--", chunk })
-      if set_result.code ~= 0 then
-        -- Nothing for this chunk was pasted yet; report how far we got so the
-        -- caller knows the pane holds a partial review.
-        return false, partial_paste_error(idx - 1, #chunks, set_result.stderr:gsub("%s+$", ""))
-      end
-      local paste_result = helpers.system({ cli(opts), "paste-buffer", "--name", buffer_name, "--surface", ref })
-      if paste_result.code ~= 0 then
-        -- Chunk idx failed after 1..idx-1 were pasted: the pane now holds a
-        -- truncated review. Surface that so a retry doesn't silently
-        -- duplicate content into a half-pasted pane.
-        return false, partial_paste_error(idx - 1, #chunks, paste_result.stderr:gsub("%s+$", ""))
-      end
-      if idx < #chunks then
-        sleep_ms(opts.paste_chunk_delay_ms)
-      end
-    end
-    result = { code = 0, stdout = "", stderr = "" }
+    send_chunked(opts, ref, text, chunk_bytes, submit)
   else
-    result = helpers.system({ cli(opts), "send", "--surface", ref, "--", text })
+    helpers.system_async({ cli(opts), "send", "--surface", ref, "--", text }, nil, function(result)
+      if result.code ~= 0 then
+        submit(false, (result.stderr:gsub("%s+$", "")))
+        return
+      end
+      submit(true, nil)
+    end)
   end
-  if result.code ~= 0 then
-    return false, result.stderr:gsub("%s+$", "")
-  end
-  if opts.auto_submit ~= false then
-    sleep_ms(opts.submit_delay_ms)
-    local key_result = helpers.system({ cli(opts), "send-key", "--surface", ref, "enter" })
-    if key_result.code ~= 0 then
-      return false, "text landed but submit failed; press Enter in the cmux pane manually"
-    end
-  end
-  return true, nil
 end
 
 local function pick_surface(opts, cb)
@@ -740,7 +881,7 @@ local function pick_surface(opts, cb)
   end
   vim.ui.select(surfaces, {
     prompt = opts.picker_prompt,
-    format_item = M.surface_label,
+    format_item = surface_label,
   }, function(surface)
     cb(surface, surface and nil or "cancelled")
   end)
@@ -788,8 +929,7 @@ function M.setup(opts)
       local target = ctx_surface(ctx)
       local text = helpers.format_markdown_review(comments, opts)
       if target then
-        local ok, err = send_text(opts, target, text)
-        cb(ok, err)
+        send_text(opts, target, text, cb)
         return
       end
       pick_surface(opts, function(surface, err)
@@ -797,18 +937,21 @@ function M.setup(opts)
           cb(false, err or "cancelled")
           return
         end
-        local ok, send_err = send_text(opts, surface, text)
-        if ok then
-          vim.notify("Review sent to " .. M.surface_label(surface), vim.log.levels.INFO)
-        end
-        cb(ok, send_err)
+        send_text(opts, surface, text, function(ok, send_err)
+          if ok then
+            vim.notify("Review sent to " .. surface_label(surface), vim.log.levels.INFO)
+          end
+          cb(ok, send_err)
+        end)
       end)
     end,
   }
 end
 
-function M._clear_cache()
-  agent_surface_cache = {}
-end
+-- Exposed for unit tests only.
+M._internal = {
+  detect_agent_from_command = detect_agent_from_command,
+  detect_agent_from_screen = detect_agent_from_screen,
+}
 
 return M

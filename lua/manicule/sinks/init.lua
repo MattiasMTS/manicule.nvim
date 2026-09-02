@@ -11,6 +11,8 @@ local sinks = {}
 local builtin_integrations = {
   clipboard = "manicule.sinks.clipboard",
   cmux = "manicule.sinks.cmux",
+  github = "manicule.sinks.github",
+  socket = "manicule.sinks.socket",
 }
 
 local builtin_defaults = {
@@ -18,6 +20,12 @@ local builtin_defaults = {
     enabled = true,
   },
   cmux = {
+    enabled = true,
+  },
+  github = {
+    enabled = true,
+  },
+  socket = {
     enabled = true,
   },
 }
@@ -63,7 +71,13 @@ local function load_spec(module_name, opts)
 end
 
 ---Register a sink adapter.
----@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, pre_text?: string, post_text?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean}
+---
+---Errors when a sink with the same name is already registered (mirrors
+---`panel.register_tab`): a user sink can never silently clobber a builtin
+---or another user sink. To replace a builtin, disable it in config first
+---(e.g. `sinks = { github = false }`). `M.setup` re-registers builtins
+---safely because it clears the builtin names before registering them.
+---@param spec {name: string, send: fun(comments, ctx, cb), type?: string, label?: string, description?: string, pre_text?: string, post_text?: string, format?: fun(c): string, validate?: fun(ctx): boolean, string?, health?: fun(): table?, clear_on_success?: boolean, hidden?: boolean}
 ---
 ---Spec fields:
 ---  name              string     unique sink identifier
@@ -79,20 +93,28 @@ end
 ---  clear_on_success  boolean?   if true, core deletes every record in the batch
 ---                               after the sink's send callback reports ok=true.
 ---                               default: false (records persist).
+---  hidden            boolean?   if true, the sink stays registered (dispatchable
+---                               by name via `get`/`dispatch`) but is excluded
+---                               from `list()`, i.e. from interactive pickers,
+---                               single-sink auto-dispatch, and completion.
+---                               For sinks that only work with a caller-supplied
+---                               ctx (e.g. socket). default: false.
 function M.register(spec)
-  vim.validate({
-    name = { spec.name, "string" },
-    send = { spec.send, "function" },
-    type = { spec.type, "string", true },
-    label = { spec.label, "string", true },
-    description = { spec.description, "string", true },
-    pre_text = { spec.pre_text, "string", true },
-    post_text = { spec.post_text, "string", true },
-    format = { spec.format, "function", true },
-    validate = { spec.validate, "function", true },
-    health = { spec.health, "function", true },
-    clear_on_success = { spec.clear_on_success, "boolean", true },
-  })
+  vim.validate("name", spec.name, "string")
+  vim.validate("send", spec.send, "function")
+  vim.validate("type", spec.type, "string", true)
+  vim.validate("label", spec.label, "string", true)
+  vim.validate("description", spec.description, "string", true)
+  vim.validate("pre_text", spec.pre_text, "string", true)
+  vim.validate("post_text", spec.post_text, "string", true)
+  vim.validate("format", spec.format, "function", true)
+  vim.validate("validate", spec.validate, "function", true)
+  vim.validate("health", spec.health, "function", true)
+  vim.validate("clear_on_success", spec.clear_on_success, "boolean", true)
+  vim.validate("hidden", spec.hidden, "boolean", true)
+  if sinks[spec.name] then
+    error(("manicule: sink %q is already registered"):format(spec.name))
+  end
   spec.type = spec.type or "sink"
   sinks[spec.name] = spec
 end
@@ -102,7 +124,12 @@ end
 ---`sinks.clipboard` defaults to true.
 ---`sinks.cmux` defaults to `{ enabled = true }`: register when a cmux
 ---workspace and usable cmux executable are available.
----@param cfg table|nil
+---
+---Idempotent for builtins: every builtin name is cleared before its spec
+---is (re-)registered, so repeated setup() calls (config reload, tests)
+---never trip `register`'s duplicate-name error. User-registered sinks
+---under non-builtin names are left untouched.
+---@param cfg table|nil per-sink config keyed by builtin name; `false` or `{ enabled = false }` disables a builtin
 function M.setup(cfg)
   cfg = cfg or {}
   for name in pairs(builtin_integrations) do
@@ -128,59 +155,59 @@ function M.get(name)
 end
 
 ---Return all registered sink specs keyed by name.
+---
+---The result is a deepcopied snapshot — mutating it never affects the
+---registry. Do not call in hot paths (checkhealth-style consumers only).
 ---@return table<string, table>
 function M.all()
   return vim.deepcopy(sinks)
 end
 
----Return bundled integration names.
----@return string[]
-function M.integrations()
-  local names = vim.tbl_keys(builtin_integrations)
-  table.sort(names)
-  return names
-end
-
----List all registered sink names.
+---List sink names offered for interactive selection.
+---
+---Hidden sinks (`spec.hidden`) stay registered — `get`/`dispatch` by name
+---keep working, e.g. a review job dispatching to "socket" with a session ctx —
+---but are excluded here so pickers, single-sink auto-dispatch, and cmdline
+---completion never offer a sink that cannot validate without a
+---caller-supplied ctx.
 ---@return string[]
 function M.list()
-  local names = vim.tbl_keys(sinks)
+  local names = {}
+  for name, spec in pairs(sinks) do
+    if not spec.hidden then
+      table.insert(names, name)
+    end
+  end
   table.sort(names)
   return names
 end
 
 ---Dispatch a comment list to a named sink.
+---
+---Every outcome — unknown sink, failed validate, sync throw in send,
+---async failure — is reported through `cb(ok, err)`; `cb` fires exactly
+---once, with `err` set only when `ok` is false. Dispatch never throws for
+---sink-level failures.
 ---@param name string
 ---@param comments table
 ---@param ctx table|nil
----@param cb fun(ok: boolean, err: string?)|nil
+---@param cb fun(ok: boolean, err: string?) required; receives the outcome exactly once
 function M.dispatch(name, comments, ctx, cb)
+  vim.validate("cb", cb, "function")
   local sink = sinks[name]
   if not sink then
-    local err = "manicule: unknown sink: " .. tostring(name)
-    if cb then
-      cb(false, err)
-    else
-      error(err)
-    end
+    cb(false, "manicule: unknown sink: " .. tostring(name))
     return
   end
   ctx = ctx or {}
-  local function fail(err)
-    if cb then
-      cb(false, err)
-    else
-      error(err)
-    end
-  end
   if sink.validate then
     local ok, valid, err = pcall(sink.validate, ctx)
     if not ok then
-      fail("manicule: sink " .. tostring(name) .. " validate failed: " .. tostring(valid))
+      cb(false, "manicule: sink " .. tostring(name) .. " validate failed: " .. tostring(valid))
       return
     end
     if not valid then
-      fail(err)
+      cb(false, err)
       return
     end
   end
@@ -190,27 +217,9 @@ function M.dispatch(name, comments, ctx, cb)
       return
     end
     done = true
-    if cb then
-      cb(ok, err)
-    elseif not ok then
-      error(err)
-    end
+    cb(ok, err)
   end
-  -- When no caller cb is supplied we must still observe async failures: a
-  -- bare no-op only catches sync throws via pcall below, so an async send
-  -- that reports ok == false later (e.g. cmux's vim.ui.select path) would be
-  -- silently dropped. Notify instead so the failure is surfaced.
-  local function finish_no_cb(ok, err)
-    if done then
-      return
-    end
-    done = true
-    if not ok then
-      vim.notify(tostring(err or ("manicule: sink " .. tostring(name) .. " failed")), vim.log.levels.ERROR)
-    end
-  end
-  local sink_cb = cb and finish or finish_no_cb
-  local ok, err = pcall(sink.send, comments, ctx, sink_cb)
+  local ok, err = pcall(sink.send, comments, ctx, finish)
   if not ok then
     finish(false, "manicule: sink " .. tostring(name) .. " send failed: " .. tostring(err))
   end

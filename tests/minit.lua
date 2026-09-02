@@ -1,6 +1,6 @@
 #!/usr/bin/env -S nvim -l
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local cwd = uv.cwd()
 
 local args = {}

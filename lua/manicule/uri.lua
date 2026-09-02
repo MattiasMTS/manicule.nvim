@@ -13,7 +13,8 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
+local config = require("manicule.config")
 
 ---Normalised absolute path to Neovim's per-session runtime dir
 ---(`stdpath('run')`). Buffers produced by plugins that stage content
@@ -24,10 +25,9 @@ local uv = vim.uv or vim.loop
 ---reload, so we treat it as ephemeral.
 local RUN_DIR_PREFIX = vim.fs.normalize(vim.fn.stdpath("run")) .. "/"
 
----Path prefixes we consider ephemeral. Order matters: `RUN_DIR_PREFIX`
----is listed first so reverse-map logic can peel the nvim-runtime
----`nvim.<user>/<run-id>/<N>/` segment before falling back to the plain
----`/var/folders/` case.
+---Path prefixes we consider ephemeral. Consumed only through
+---`M.is_temp_path` (the adapter's reverse-map and diff-pair heuristics
+---go through that predicate rather than reading the list directly).
 local TMP_PREFIXES = {
   RUN_DIR_PREFIX,
   "/tmp/",
@@ -35,13 +35,6 @@ local TMP_PREFIXES = {
   "/var/folders/",
   "/private/var/folders/",
 }
-
----Exposed so the adapter (reverse-map) and any other caller share the
----same list without re-declaring the ordering.
----@return string[]
-function M.tmp_prefixes()
-  return TMP_PREFIXES
-end
 
 ---The normalised absolute path to `stdpath('run')` (trailing slash).
 ---@return string
@@ -142,28 +135,62 @@ local function ephemeral_for_bufnr(bufnr)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return nil
   end
-  local ok, existing = pcall(vim.api.nvim_buf_get_var, bufnr, "manicule_ephemeral_uri")
-  if ok and M.is_ephemeral(existing) then
+  local existing = vim.b[bufnr].manicule_ephemeral_uri
+  if M.is_ephemeral(existing) then
     return existing
   end
   ephemeral_seq = ephemeral_seq + 1
   local uri = ("%s%s/%d"):format(EPHEMERAL_SCHEME, tostring(vim.fn.getpid()), ephemeral_seq)
-  pcall(vim.api.nvim_buf_set_var, bufnr, "manicule_ephemeral_uri", uri)
+  vim.b[bufnr].manicule_ephemeral_uri = uri
   return uri
 end
 
 ---Return true if symlink canonicalisation is enabled (default true).
 ---@return boolean
 local function canonicalize_symlinks()
-  local ok, config = pcall(require, "manicule.config")
-  if not ok then
-    return true
-  end
   local cfg = (config.get() or {}).store or {}
-  if cfg.canonicalize_symlinks == false then
-    return false
+  return cfg.canonicalize_symlinks ~= false
+end
+
+---Memoized successful `uv.fs_realpath` results, keyed by the normalized
+---absolute path fed to `canonical_uri`. URI construction runs on hot
+---paths (every CursorMoved-driven viewport refresh resolves the buffer's
+---identity), and `fs_realpath` is a syscall per call.
+---
+---Conservative by design:
+---  * Only SUCCESSFUL resolutions are cached — a path that doesn't
+---    exist yet (unsaved new file) re-resolves once it lands on disk.
+---  * The cache is cleared WHOLESALE on every buffer rename
+---    (`BufFilePost` in init.lua calls `M.invalidate_realpath_cache`),
+---    so a rename can never be served a stale resolution.
+---  * A size cap bounds pathological path churn.
+local realpath_cache = {}
+local realpath_cache_size = 0
+local REALPATH_CACHE_MAX = 512
+
+---Drop every memoized realpath. Called from init.lua's BufFilePost
+---handling (renames can retarget what a path resolves to).
+function M.invalidate_realpath_cache()
+  realpath_cache = {}
+  realpath_cache_size = 0
+end
+
+---@param abs string normalized absolute path
+---@return string? real
+local function memoized_realpath(abs)
+  local cached = realpath_cache[abs]
+  if cached then
+    return cached
   end
-  return true
+  local real = uv.fs_realpath(abs)
+  if real then
+    if realpath_cache_size >= REALPATH_CACHE_MAX then
+      M.invalidate_realpath_cache()
+    end
+    realpath_cache[abs] = real
+    realpath_cache_size = realpath_cache_size + 1
+  end
+  return real
 end
 
 ---Encode an already-`vim.fs.normalize`d absolute path as a `file://`
@@ -174,7 +201,7 @@ end
 ---@return string
 local function canonical_uri(abs)
   if canonicalize_symlinks() then
-    local real = uv.fs_realpath(abs)
+    local real = memoized_realpath(abs)
     if real then
       abs = real
     end
@@ -264,11 +291,12 @@ function M.bufnr_for_uri(uri)
   if type(uri) ~= "string" or uri == "" then
     return nil
   end
+  -- Loop-invariant: the URI's ephemerality never changes per buffer.
+  local ephemeral = M.is_ephemeral(uri)
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(bufnr) then
-      if M.is_ephemeral(uri) then
-        local ok, existing = pcall(vim.api.nvim_buf_get_var, bufnr, "manicule_ephemeral_uri")
-        if ok and existing == uri then
+      if ephemeral then
+        if vim.b[bufnr].manicule_ephemeral_uri == uri then
           return bufnr
         end
       elseif vim.api.nvim_buf_get_name(bufnr) == uri then

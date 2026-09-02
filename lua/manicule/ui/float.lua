@@ -8,7 +8,7 @@ local M = {}
 
 ---@param border any
 ---@return boolean
-function M.border_is_none(border)
+local function border_is_none(border)
   if border == nil then
     return false
   end
@@ -86,8 +86,9 @@ function M.set_float_transparency(winid, opacity)
   vim.wo[winid].winblend = M.opacity_to_winblend(opacity)
 end
 
----Attach title/footer to a win_config table, respecting Neovim's version
----constraints. Does nothing for the "none" border or on Neovim < 0.9.
+---Attach title/footer to a win_config table. Does nothing for the
+---"none" border. Both fields exist on every supported Neovim (floor is
+---0.12; title/footer landed long before) — no version checks.
 ---@param win_config table
 ---@param border any
 ---@param title string?
@@ -95,17 +96,14 @@ end
 ---@param footer string?
 ---@param footer_pos string?
 function M.apply_title_footer(win_config, border, title, title_pos, footer, footer_pos)
-  if M.border_is_none(border) then
-    return
-  end
-  if vim.fn.has("nvim-0.9") ~= 1 then
+  if border_is_none(border) then
     return
   end
   if title then
     win_config.title = title
     win_config.title_pos = title_pos or "left"
   end
-  if footer and vim.fn.has("nvim-0.10") == 1 then
+  if footer then
     win_config.footer = footer
     win_config.footer_pos = footer_pos or "left"
   end
@@ -115,25 +113,28 @@ end
 ---reconfigure and the fresh open are wrapped in pcall: a bad win_config
 ---(e.g. an anchor window that vanished between layout and open) must not
 ---unwind the caller's render closure. Returns nil on failure so callers
----can leave a consistent handle instead of propagating the throw.
+---can leave a consistent handle instead of propagating the throw. The
+---second return distinguishes a freshly opened window (`true`) from a
+---reconfigured one (`false`) so callers can skip re-applying one-time
+---window state (tags, window-local options) on reuse.
 ---@param existing_winid integer?
 ---@param bufnr integer
 ---@param enter boolean
 ---@param win_config table
----@return integer? winid
+---@return integer? winid, boolean created
 function M.open_or_reconfigure(existing_winid, bufnr, enter, win_config)
   if existing_winid and vim.api.nvim_win_is_valid(existing_winid) then
     local ok = pcall(vim.api.nvim_win_set_config, existing_winid, win_config)
     if ok then
-      return existing_winid
+      return existing_winid, false
     end
-    return nil
+    return nil, false
   end
   local ok, winid = pcall(vim.api.nvim_open_win, bufnr, enter, win_config)
   if ok then
-    return winid
+    return winid, true
   end
-  return nil
+  return nil, false
 end
 
 return M

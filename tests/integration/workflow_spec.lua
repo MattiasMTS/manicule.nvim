@@ -3,7 +3,9 @@ local H = require("helpers")
 local ctx
 
 local function setup_env()
-  ctx = H.setup()
+  -- Several workflows assert on float popups; the shipped default is
+  -- `ui.display_mode = "eol"`, so opt into float mode explicitly.
+  ctx = H.setup({ ui = { display_mode = "float" } })
   H.edit_project_file(ctx, "src/example.lua", {
     "local value = 1",
     "return value",
@@ -55,7 +57,7 @@ describe("manicule headless workflow", function()
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("review this line", records[1].body)
     assert.are.equal("project", records[1].scope)
@@ -69,7 +71,7 @@ describe("manicule headless workflow", function()
     assert.are.equal(records[1].id, calls[1].comments[1].id)
     assert.are.equal("review this line", calls[1].comments[1].body)
 
-    local remaining = require("manicule").list({ _quiet = true })
+    local remaining = require("manicule").list()
     assert.are.equal(1, #remaining)
     assert.are.equal(records[1].id, remaining[1].id)
 
@@ -83,6 +85,25 @@ describe("manicule headless workflow", function()
     stop_capture()
   end)
 
+  it("list() syncs extmark positions by default; opts.sync = false reads as-is", function()
+    require("manicule").add({
+      body = "tracks its line",
+      range = { start = { 1, 0 }, end_ = { 1, 0 } },
+    })
+    local before = require("manicule").list()[1].range.start[1]
+
+    -- Push the commented line down: the anchor extmark follows the text,
+    -- but the record's stored range only catches up through a syncing
+    -- list() (or another mutating path).
+    vim.api.nvim_buf_set_lines(0, 0, 0, false, { "-- inserted above" })
+
+    local stale = require("manicule").list(nil, { sync = false })[1]
+    assert.are.equal(before, stale.range.start[1], "sync = false still moved the record")
+
+    local synced = require("manicule").list()[1]
+    assert.are.equal(before + 1, synced.range.start[1], "default list() did not sync the moved extmark")
+  end)
+
   it("can drive the command path with a fake prompt and consuming sink", function()
     vim.cmd("runtime plugin/manicule.lua")
     local events, stop_capture = H.capture_events({ "ManiculeAdded", "ManiculeSent", "ManiculeDeleted" })
@@ -94,7 +115,7 @@ describe("manicule headless workflow", function()
     end
 
     vim.cmd("ManiculeAdd")
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("from prompt", records[1].body)
 
@@ -105,7 +126,7 @@ describe("manicule headless workflow", function()
     assert.are.equal(1, #calls)
     assert.are.equal(1, #calls[1].comments)
     assert.are.equal("from prompt", calls[1].comments[1].body)
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
 
     assert.are.equal("ManiculeAdded", events[1].pattern)
     assert.are.equal("ManiculeSent", events[2].pattern)
@@ -129,7 +150,7 @@ describe("manicule headless workflow", function()
     vim.cmd("ManiculeEdit 1")
     ui.prompt = original_prompt
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("edited body", records[1].body)
     assert.are.equal(0, #responses)
@@ -183,57 +204,58 @@ describe("manicule headless workflow", function()
     assert.are.same({ 3, 0 }, vim.api.nvim_win_get_cursor(0))
   end)
 
-  it("deletes a project record through the real manicule quickfix window", function()
+  it("deletes a project record through the project comments panel", function()
     vim.cmd("runtime plugin/manicule.lua")
     local events, stop_capture = H.capture_events({ "ManiculeDeleted" })
 
     require("manicule").add({
-      body = "delete from qf",
+      body = "delete from panel",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
 
+    local qf_title_before = vim.fn.getqflist({ title = 1 }).title
     vim.cmd("ManiculeList")
 
-    local quickfix = require("manicule.ui.quickfix")
-    local qf_winid = quickfix.is_manicule_qf_open()
-    assert.is_truthy(qf_winid)
-    vim.api.nvim_set_current_win(qf_winid)
+    -- :ManiculeList opens the panel in project mode and never touches
+    -- the quickfix list.
+    local panel = require("manicule.review.panel")
+    local panel_winid = assert(panel.winid(), "project-mode panel did not open")
+    assert.are.equal(panel_winid, vim.api.nvim_get_current_win())
+    assert.are.equal("manicule-panel", vim.bo[vim.api.nvim_win_get_buf(panel_winid)].filetype)
+    assert.are.equal(qf_title_before, vim.fn.getqflist({ title = 1 }).title)
+    assert.are.equal(0, #vim.fn.getqflist())
 
-    assert.are.equal("quickfix", vim.bo.buftype)
-    local locator = quickfix.record_locator_at_cursor()
-    assert.is_truthy(locator)
-    assert.are.equal(records[1].id, locator.id)
-    assert.are.equal("project", locator.scope)
-    assert.are.equal(ctx.root, locator.project_root)
-
+    vim.api.nvim_win_set_cursor(panel_winid, { 1, 0 })
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("dd", true, false, true), "mx", false)
 
     assert.is_true(vim.wait(1000, function()
-      return #require("manicule.store").all(ctx.root) == 0 and #vim.fn.getqflist() == 0
+      local lines = vim.api.nvim_buf_get_lines(panel.bufnr(), 0, -1, false)
+      return #require("manicule.store").all(ctx.root) == 0 and not lines[1]:find("delete from panel", 1, true)
     end, 10))
     assert.are.equal("ManiculeDeleted", events[1].pattern)
     assert.are.equal(records[1].id, events[1].data.id)
 
+    panel.close()
     stop_capture()
   end)
 
-  it("edits a project record through quickfix and repaints the source popup", function()
+  it("edits a project record through the panel and repaints the source popup", function()
     vim.cmd("runtime plugin/manicule.lua")
 
     require("manicule").add({
-      body = "edit from qf before",
+      body = "edit from panel before",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    assert.is_true(wait_for_popup_count("edit from qf before", 1))
+    assert.is_true(wait_for_popup_count("edit from panel before", 1))
 
     vim.cmd("ManiculeList")
-    local quickfix = require("manicule.ui.quickfix")
-    local qf_winid = quickfix.is_manicule_qf_open()
-    assert.is_truthy(qf_winid)
-    vim.api.nvim_set_current_win(qf_winid)
+    local panel = require("manicule.review.panel")
+    local panel_winid = assert(panel.winid(), "project-mode panel did not open")
+    vim.api.nvim_set_current_win(panel_winid)
+    vim.api.nvim_win_set_cursor(panel_winid, { 1, 0 })
 
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ce", true, false, true), "mx", false)
     assert.is_true(vim.wait(1000, function()
@@ -242,25 +264,27 @@ describe("manicule headless workflow", function()
 
     local editor_bufnr = vim.api.nvim_get_current_buf()
     vim.bo[editor_bufnr].modifiable = true
-    vim.api.nvim_buf_set_lines(editor_bufnr, 0, -1, false, { "edit from qf after" })
+    vim.api.nvim_buf_set_lines(editor_bufnr, 0, -1, false, { "edit from panel after" })
     vim.bo[editor_bufnr].modifiable = false
     vim.cmd.stopinsert()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
 
     assert.is_true(vim.wait(1000, function()
       local records = require("manicule.store").all(ctx.root)
-      return records[1] and records[1].body == "edit from qf after"
+      return records[1] and records[1].body == "edit from panel after"
     end, 10))
     assert.is_true(vim.wait(1000, function()
       return not require("manicule.ui.editor").is_active()
     end, 10))
 
-    assert.is_true(wait_for_popup_count("edit from qf before", 0))
-    assert.is_true(wait_for_popup_count("edit from qf after", 1))
+    assert.is_true(wait_for_popup_count("edit from panel before", 0))
+    assert.is_true(wait_for_popup_count("edit from panel after", 1))
     assert.is_true(vim.wait(1000, function()
-      local qf = vim.fn.getqflist()
-      return #qf == 1 and qf[1].text:find("edit from qf after", 1, true) ~= nil
+      local lines = vim.api.nvim_buf_get_lines(panel.bufnr(), 0, -1, false)
+      return #lines == 1 and lines[1]:find("edit from panel after", 1, true) ~= nil
     end, 10))
+
+    panel.close()
   end)
 
   it("uses insert enter for newlines and normal enter for submitting the comment editor", function()
@@ -285,9 +309,9 @@ describe("manicule headless workflow", function()
     end, 10))
 
     assert.is_true(vim.wait(1000, function()
-      return #require("manicule").list({ _quiet = true }) == 1
+      return #require("manicule").list() == 1
     end, 10))
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
     assert.are.equal("line one\nline two", records[1].body)
   end)
@@ -312,7 +336,7 @@ describe("manicule headless workflow", function()
       return not require("manicule.ui.editor").is_active()
     end, 10))
     assert.are.equal(target_win, vim.api.nvim_get_current_win())
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
   end)
 
   it("keeps insert enter as newline when other plugins map enter", function()
@@ -348,9 +372,9 @@ describe("manicule headless workflow", function()
     vim.cmd.stopinsert()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
     assert.is_true(vim.wait(1000, function()
-      return #require("manicule").list({ _quiet = true }) == 1
+      return #require("manicule").list() == 1
     end, 10))
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal("conflict first\nconflict second", records[1].body)
   end)
 
@@ -392,7 +416,7 @@ describe("manicule headless workflow", function()
     assert.is_true(wait_for_popup_count("delete only this popup", 1))
     assert.is_true(wait_for_popup_count("keep this popup visible", 1))
 
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     local delete_id
     for _, record in ipairs(records) do
       if record.body == "delete only this popup" then
@@ -480,7 +504,7 @@ describe("manicule headless workflow", function()
 
     vim.notify = original_notify
 
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
     assert.are.equal(0, #events)
     assert.are.equal(vim.log.levels.WARN, notifications[1].level)
     assert.is_truthy(notifications[1].msg:find("quickfix buffers don't accept comments", 1, true))
@@ -493,7 +517,7 @@ describe("manicule headless workflow", function()
       body = "keep this body",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(1, #records)
 
     local ui = require("manicule.ui")
@@ -504,7 +528,7 @@ describe("manicule headless workflow", function()
     require("manicule").edit(records[1].id)
     ui.prompt = original_prompt
 
-    local after_cancel = require("manicule").list({ _quiet = true })
+    local after_cancel = require("manicule").list()
     assert.are.equal(1, #after_cancel)
     assert.are.equal("keep this body", after_cancel[1].body)
     assert.are.equal(1, #events)
@@ -535,7 +559,7 @@ describe("manicule headless workflow", function()
     vim.notify = original_notify
 
     assert.are.equal(0, #events)
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
     assert.are.equal(vim.log.levels.ERROR, notifications[1].level)
     assert.is_truthy(notifications[1].msg:find("failed to persist new comment", 1, true))
 
@@ -559,11 +583,11 @@ describe("manicule headless workflow", function()
       body = "must remain",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local before_send = require("manicule").list({ _quiet = true })
+    local before_send = require("manicule").list()
     require("manicule").send("fail-consume")
     vim.notify = original_notify
 
-    local after_send = require("manicule").list({ _quiet = true })
+    local after_send = require("manicule").list()
     assert.are.equal(1, #calls)
     assert.are.equal(1, #after_send)
     assert.are.equal(before_send[1].id, after_send[1].id)
@@ -580,6 +604,98 @@ describe("manicule headless workflow", function()
     assert.is_truthy(notifications[1].msg:find('sink "fail%-consume" failed'))
 
     stop_capture()
+  end)
+
+  it("paints the buffer in a single pass when a comment is added", function()
+    local manicule = require("manicule")
+    -- Drain callbacks scheduled by setup's edit (BufWinEnter attach).
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    local adapter = require("manicule.adapter")
+    local original_identify = adapter.identify
+    local identify_calls = 0
+    adapter.identify = function(b, ...)
+      if b == bufnr then
+        identify_calls = identify_calls + 1
+      end
+      return original_identify(b, ...)
+    end
+
+    -- With a body, add() runs synchronously — nothing scheduled can
+    -- inflate the count before the spy is removed.
+    manicule.add({
+      body = "single pass",
+      range = { start = { 0, 0 }, end_ = { 0, 0 } },
+    })
+    adapter.identify = original_identify
+
+    -- finalize_add resolves identity twice itself (record build + the
+    -- invariant canary); the repaint must add exactly ONE more pass —
+    -- not two (reconcile + viewport each re-identifying and re-reading
+    -- the store).
+    assert.are.equal(3, identify_calls)
+  end)
+
+  it("repaints buffers once per consuming send, not once per cleared record", function()
+    local calls = H.register_fake_sink("consume-batch", { clear_on_success = true })
+    local manicule = require("manicule")
+    for i = 1, 3 do
+      manicule.add({
+        body = "batch clear " .. i,
+        range = { start = { i - 1, 0 }, end_ = { i - 1, 0 } },
+      })
+    end
+    assert.are.equal(3, #manicule.list())
+
+    -- Drain callbacks already scheduled by the adds (and by earlier
+    -- tests in this Neovim instance) so the counter below only sees
+    -- work caused by the send itself.
+    vim.wait(50, function()
+      return false
+    end, 10)
+
+    local target_bufnr = vim.api.nvim_get_current_buf()
+    local render = require("manicule.ui.render")
+    local original_reconcile = render.reconcile
+    local reconcile_calls = 0
+    render.reconcile = function(bufnr, ...)
+      if bufnr == target_bufnr then
+        reconcile_calls = reconcile_calls + 1
+      end
+      return original_reconcile(bufnr, ...)
+    end
+
+    local events, stop_capture = H.capture_events({ "ManiculeDeleted" })
+    manicule.send("consume-batch")
+    render.reconcile = original_reconcile
+
+    assert.are.equal(1, #calls)
+    assert.are.equal(0, #manicule.list())
+    -- Event semantics unchanged: one ManiculeDeleted per cleared record.
+    assert.are.equal(3, #events)
+    -- Repaint batched: ONE refresh sweep after the clear loop, not one
+    -- editor-wide repaint per deleted record.
+    assert.are.equal(1, reconcile_calls)
+
+    stop_capture()
+  end)
+
+  it("clears the pre-rename URI snapshot when the buffer unloads before BufFilePost lands", function()
+    local path, bufnr = H.edit_project_file(ctx, "src/rename_me.lua", { "local x = 1" })
+    -- `:file` fires BufFilePre (URI snapshotted) then BufFilePost, whose
+    -- handler is deferred via vim.schedule. Wipe the buffer BEFORE the
+    -- schedule drains: the deferred handler early-returns on the dead
+    -- buffer, so only the BufUnload/BufDelete handler can clear the
+    -- snapshot — without it the bufnr slot leaks a stale URI.
+    vim.cmd("file " .. vim.fn.fnameescape(path .. ".renamed"))
+    vim.cmd("bwipeout! " .. bufnr)
+    vim.wait(100, function()
+      return false
+    end, 10)
+    assert.is_nil(require("manicule")._pre_rename_uris()[bufnr])
   end)
 
   it("can send to the bundled cmux integration through a fake cmux cli", function()
@@ -612,14 +728,19 @@ describe("manicule headless workflow", function()
       body = "send this to the agent",
       range = { start = { 0, 0 }, end_ = { 0, 0 } },
     })
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
 
     local original_notify = vim.notify
     vim.notify = function() end
     require("manicule").send("cmux")
+    -- The cmux send path is asynchronous (vim.system callbacks); wait for
+    -- the full Added -> Sent -> Deleted event chain before asserting.
+    vim.wait(2000, function()
+      return #events >= 3
+    end)
     vim.notify = original_notify
 
-    assert.are.equal(0, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(0, #require("manicule").list())
     local log_lines = vim.fn.readfile(log)
     local log_text = table.concat(log_lines, "\n")
     assert.is_truthy(log_text:find("set%-buffer\tmanicule%-", 1, false))

@@ -2,11 +2,11 @@
 --
 -- Strategy
 -- --------
--- Each comment is pinned to a buffer range with an extmark. We rely on
--- Neovim's `invalidate = true` option so that the extmark is flagged as
--- invalid when its anchor lines are deleted, allowing us to surface
--- "orphaned" comments without losing them. `undo_restore = false` keeps
--- invalidation stable across undo.
+-- Each comment is pinned to a buffer range with an extmark (created by
+-- `lua/manicule/ui/render.lua`). We rely on Neovim's `invalidate = true`
+-- option so that the extmark is flagged as invalid when its anchor lines
+-- are deleted, allowing us to surface "orphaned" comments without losing
+-- them. `undo_restore = false` keeps invalidation stable across undo.
 --
 -- The extmark anchors the comment and tints the line number via
 -- `ManiculeLineNr` (default-linked to `DiagnosticSignInfo`). All other
@@ -20,28 +20,14 @@ local M = {}
 ---Neovim namespace used for all manicule extmarks.
 M.ns = vim.api.nvim_create_namespace("manicule")
 
----Create an anchor for a comment range.
----@param bufnr integer
----@param range {start: integer[], end_: integer[]}
----@return integer mark_id
-function M.create(bufnr, range)
-  local start_row, start_col = range.start[1], range.start[2] or 0
-  local end_row, end_col = range.end_[1], range.end_[2] or 0
-  return vim.api.nvim_buf_set_extmark(bufnr, M.ns, start_row, start_col, {
-    end_row = end_row,
-    end_col = end_col,
-    invalidate = true,
-    undo_restore = false,
-    -- number_hl_group only tints the start line.
-    number_hl_group = "ManiculeLineNr",
-  })
-end
-
 ---Resolve an anchor back to a live range.
 ---@param bufnr integer
 ---@param mark_id integer
 ---@return {range: {start: integer[], end_: integer[]}, invalid: boolean}|nil
 function M.resolve(bufnr, mark_id)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
   local pos = vim.api.nvim_buf_get_extmark_by_id(bufnr, M.ns, mark_id, { details = true })
   if not pos or #pos == 0 then
     return nil
@@ -54,16 +40,6 @@ function M.resolve(bufnr, mark_id)
     },
     invalid = details.invalid == true,
   }
-end
-
----Delete an anchor.
----@param bufnr integer
----@param mark_id integer
-function M.delete(bufnr, mark_id)
-  if not vim.api.nvim_buf_is_valid(bufnr) then
-    return
-  end
-  pcall(vim.api.nvim_buf_del_extmark, bufnr, M.ns, mark_id)
 end
 
 return M

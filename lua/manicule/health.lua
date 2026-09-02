@@ -1,6 +1,6 @@
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local function path_join(...)
   return table.concat({ ... }, "/"):gsub("/+", "/")
@@ -84,7 +84,7 @@ function M._collect()
   return {
     nvim = {
       version = vim.version(),
-      has_required = vim.fn.has("nvim-0.10") == 1,
+      has_required = vim.fn.has("nvim-0.12") == 1,
       has_vim_system = type(vim.system) == "function",
       has_vim_fs_root = type(vim.fs) == "table" and type(vim.fs.root) == "function",
       has_mpack = type(vim.mpack) == "table" and type(vim.mpack.encode) == "function",
@@ -132,7 +132,7 @@ function M.check()
     local version = snapshot.nvim.version
     health.ok(("Neovim version: %d.%d.%d"):format(version.major, version.minor, version.patch))
   else
-    health.error("Neovim >= 0.10 is required")
+    health.error("manicule requires Neovim >= 0.12")
   end
   if snapshot.nvim.has_vim_system then
     health.ok("vim.system is available")
@@ -220,6 +220,23 @@ function M.check()
     health.info("cmux is available but the integration is not registered")
   else
     health.info("cmux integration is not registered")
+  end
+
+  health.start("manicule review mode")
+  if vim.fn.executable("git") == 1 then
+    health.ok("git is available")
+  else
+    health.warn("git is not available; :ManiculeReview needs git for ref/pr resolvers")
+  end
+  if vim.fn.executable("tar") == 1 then
+    health.ok("tar is available")
+  else
+    health.warn("tar is not available; review baseline staging degrades or fails without it")
+  end
+  if vim.fn.executable("gh") == 1 then
+    health.ok("gh CLI is available")
+  else
+    health.info("gh CLI not found; :ManiculeReview pr <n> is disabled")
   end
 end
 

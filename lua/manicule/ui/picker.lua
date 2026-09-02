@@ -154,7 +154,7 @@ end
 local function location_for(record)
   local path = display_path(record)
   -- Reuse the shared 1-indexed range accessors so the picker's line
-  -- numbers stay in lockstep with the quickfix formatter. `start_line`
+  -- numbers stay in lockstep with the review panel. `start_line`
   -- falls back to 1 when the range is missing; `end_line` is nil unless
   -- there's a numeric end row.
   local sl = range.start_line(record)
@@ -186,11 +186,10 @@ local function body_for(record)
 end
 
 ---Format `records` into display strings, parallel-indexed to `records`.
----Callers can zip into `{ record, display }` tables or map over the
----result directly.
+---`M.pick` zips them into `{ record, display }` tables.
 ---@param records table[]
 ---@return string[]
-function M.format_items(records)
+local function format_items(records)
   local out = {}
   local count = #records
   local idx_width = #tostring(math.max(count, 1))
@@ -213,7 +212,7 @@ function M.pick(action, records)
     vim.notify("manicule: no comments", vim.log.levels.INFO)
     return
   end
-  local formatted = M.format_items(records)
+  local formatted = format_items(records)
   local items = {}
   for i, r in ipairs(records) do
     items[i] = { record = r, display = formatted[i] }

@@ -27,7 +27,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("manicule.config")
 
 -- Seed the RNG once at module load so `client_id`'s random suffix is not
@@ -92,17 +92,39 @@ local function git_branch(root)
   return branch
 end
 
+---Memoized `store_name` results, keyed by root. Each entry records the
+---`store.scope_by_branch` flag it was computed under so a config toggle
+---between `setup()` calls recomputes instead of serving a stale name.
+---
+---Why memoize: `store_name` runs on EVERY store read (`M.all` → `sync`
+---→ `sqlite_db` → `sqlite_path`), and with `store.scope_by_branch = true` each
+---un-memoized call forks `git branch --show-current` — once per viewport
+---refresh. Pinning the resolved name for the session also keeps the
+---cache/db pair coherent: `cache[root]` and `sqlite_dbs[path]` are keyed
+---off the load-time path, so re-resolving the branch mid-session would
+---silently split reads and writes across two databases. A branch switch
+---therefore picks up its own store only after `M._reset()` (i.e. a fresh
+---Neovim session); there is no runtime reload command today.
+---@type table<string, { branch: boolean, name: string }>
+local store_name_cache = {}
+
 ---@param root string
 ---@return string
 local function store_name(root)
-  local cfg = config.current.store
+  local cfg = config.get().store
+  local want_branch = cfg.scope_by_branch == true
+  local hit = store_name_cache[root]
+  if hit and hit.branch == want_branch then
+    return hit.name
+  end
   local name = escape(root)
-  if cfg.branch then
+  if want_branch then
     local branch = git_branch(root)
     if branch and branch ~= "main" and branch ~= "master" then
       name = name .. "%%" .. escape(branch)
     end
   end
+  store_name_cache[root] = { branch = want_branch, name = name }
   return name
 end
 
@@ -112,7 +134,7 @@ local function sqlite_path(root)
   if not root or root == "" then
     return nil
   end
-  local cfg = config.current.store
+  local cfg = config.get().store
   return cfg.dir .. store_name(root) .. ".sqlite3"
 end
 
@@ -130,7 +152,7 @@ end
 ---session file instead of fragmenting per-directory.
 ---@return string|nil
 function M.root()
-  local cfg = config.current.store
+  local cfg = config.get().store
   return vim.fs.root(0, cfg.root_markers)
 end
 
@@ -182,30 +204,11 @@ function M.schema_version()
   return STORE_VERSION
 end
 
----@param value any
----@return boolean
-local function is_list(value)
-  if type(value) ~= "table" then
-    return false
-  end
-  if vim.islist then
-    return vim.islist(value)
-  end
-  local count = 0
-  for key, _ in pairs(value) do
-    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
-      return false
-    end
-    count = count + 1
-  end
-  return count == #value
-end
-
 ---Encode records per the configured format as a versioned envelope.
 ---@param records table[]
 ---@return string|nil data, string? err
 local function encode(records)
-  local cfg = config.current.store
+  local cfg = config.get().store
   local payload = {
     version = STORE_VERSION,
     records = records,
@@ -232,7 +235,7 @@ end
 ---@param path string used purely for diagnostics
 ---@return table[] records
 local function decode(data, path)
-  local cfg = config.current.store
+  local cfg = config.get().store
   local decoder = cfg.format == "json" and vim.json.decode or vim.mpack.decode
   local ok, decoded = pcall(decoder, data)
   if not ok or type(decoded) ~= "table" then
@@ -258,7 +261,7 @@ local function decode(data, path)
   end
 
   local records = decoded.records
-  if not is_list(records) then
+  if not vim.islist(records) then
     vim.notify(("manicule: unrecognised records shape at %s; starting fresh"):format(path), vim.log.levels.WARN)
     return {}
   end
@@ -356,7 +359,7 @@ local function sqlite_db(root)
   if existing then
     return existing
   end
-  vim.fn.mkdir(config.current.store.dir, "p")
+  vim.fn.mkdir(config.get().store.dir, "p")
   local db, err = require("manicule.sqlite").open(path)
   if not db then
     return nil, err
@@ -603,7 +606,7 @@ function M.load(root)
 end
 
 ---Refresh a cache entry from the on-disk SQLite state. Shared by
----`M.load`, `M.sync`, and post-write resync (`M.save`/`M.restore_record`)
+---`M.load`, `sync`, and post-write resync (`M.save`/`M.restore_record`)
 ---so the `records = read; base_by_id = by_id(records); removed = {};
 ---last_seen_event_id = ...; dirty = false` sequence — and the
 ---transient-read-error guard — exist in exactly one place. On a read
@@ -728,6 +731,9 @@ function M.save(root)
   return refresh_cache_entry(entry, db, root)
 end
 
+---Forward declaration: defined right below `M.all`, which calls it.
+local sync
+
 ---Return all cached records for `root` (loads on first access).
 ---@param root string|nil
 ---@return table[]
@@ -738,17 +744,18 @@ function M.all(root)
   if not cache[root] then
     M.load(root)
   else
-    M.sync(root)
+    sync(root)
   end
   return cache[root].records
 end
 
 ---Pull externally-written SQLite events into a clean cache entry. Dirty
 ---entries are left alone so in-flight local edits can save field-level
----patches against their original base snapshot.
+---patches against their original base snapshot. Internal: callers go
+---through `M.all` (per root) or `M.sync_all`.
 ---@param root string|nil
 ---@return boolean changed
-function M.sync(root)
+function sync(root)
   if not root then
     return false
   end
@@ -779,7 +786,7 @@ end
 function M.sync_all()
   local changed = {}
   for root in pairs(cache) do
-    if M.sync(root) then
+    if sync(root) then
       table.insert(changed, root)
     end
   end
@@ -867,11 +874,13 @@ function M.remove(root, id)
   return nil
 end
 
----Return records whose `uri` matches `uri`.
+---Return project records for `root` whose `uri` matches `uri`.
+---Internal: external callers use `M.all_for_uri`, which merges in the
+---session store.
 ---@param root string|nil
 ---@param uri string
 ---@return table[]
-function M.for_uri(root, uri)
+local function for_uri(root, uri)
   local out = {}
   if not uri or uri == "" then
     return out
@@ -891,7 +900,7 @@ end
 ---Absolute path to the single session-scope file.
 ---@return string
 function M.session_path()
-  local cfg = config.current.store
+  local cfg = config.get().store
   return cfg.dir .. "session." .. cfg.format
 end
 
@@ -902,7 +911,7 @@ function M.session_load()
   if session_cache.loaded then
     return session_cache.records
   end
-  vim.fn.mkdir(config.current.store.dir, "p")
+  vim.fn.mkdir(config.get().store.dir, "p")
   local path = M.session_path()
   local records = {}
   local data = read_file(path)
@@ -921,7 +930,7 @@ function M.session_save()
   if not session_cache.dirty then
     return true
   end
-  vim.fn.mkdir(config.current.store.dir, "p")
+  vim.fn.mkdir(config.get().store.dir, "p")
   local persisted = {}
   for _, record in ipairs(session_cache.records) do
     if not is_ephemeral_record(record) then
@@ -1006,27 +1015,28 @@ end
 -- Polymorphic dispatcher
 -- ---------------------------------------------------------------------------
 
----Return all records that match `uri` across both stores. Project
----records are only included if the record's `project_root` matches the
----given project root. When no project root argument is passed, the
----current buffer's root is used for backwards compatibility with older
----callers. Passing nil explicitly means "session records only".
+---Return all records that match `uri` across both stores. Session
+---records always merge in; which project store contributes is decided
+---by `opts`:
+---  * `opts.root`               — read project records from this root.
+---  * `opts.session_only = true`— skip project records entirely.
+---  * no `opts` / neither field — fall back to the current buffer's
+---                                root (`M.root()`).
 ---@param uri string
----@param project_root? string|nil Optional explicit root for project records.
+---@param opts? { root?: string, session_only?: boolean }
 ---@return table[]
-function M.all_for_uri(uri, ...)
+function M.all_for_uri(uri, opts)
+  assert(opts == nil or type(opts) == "table", "store.all_for_uri: opts must be a table")
   local out = {}
   if not uri or uri == "" then
     return out
   end
   local current_root
-  if select("#", ...) > 0 then
-    current_root = select(1, ...)
-  else
-    current_root = M.root()
+  if not (opts and opts.session_only) then
+    current_root = (opts and opts.root) or M.root()
   end
   if current_root then
-    for _, r in ipairs(M.for_uri(current_root, uri)) do
+    for _, r in ipairs(for_uri(current_root, uri)) do
       table.insert(out, r)
     end
   end
@@ -1096,42 +1106,19 @@ function M.restore_record(record)
   return refresh_cache_entry(entry, db, root)
 end
 
----Dispatch a `remove` by scope. For project-scope, `scope_or_root` may
----be the root path directly (matching the existing API) or the literal
----string "project" — in which case the record's `project_root` is
----looked up via `get` across known caches.
----@param scope_or_root "project"|"session"|string
----@param id string
----@param project_root string? required when scope=="project"
+---Dispatch a `remove` by scope. Takes a single table mirroring a
+---record/snapshot's identity fields —
+---`remove_record({ scope = ..., id = ..., project_root = ... })`.
+---`scope = "session"` removes from the session store; anything else
+---removes from the project store at `project_root`.
+---@param opts { scope?: "project"|"session", id: string, project_root?: string }
 ---@return table|nil
-function M.remove_record(scope_or_root, id, project_root)
-  if scope_or_root == "session" then
-    return M.session_remove(id)
+function M.remove_record(opts)
+  assert(type(opts) == "table", "store.remove_record: opts must be a table")
+  if opts.scope == "session" then
+    return M.session_remove(opts.id)
   end
-  if scope_or_root == "project" then
-    return M.remove(project_root, id)
-  end
-  -- Treat it as a raw root path (pre-dispatcher API).
-  return M.remove(scope_or_root, id)
-end
-
----Return every record across every known store — project caches AND
----session. Used by `list` when scope-agnostic enumeration is needed.
----@return table[]
-function M.all_records()
-  M.sync_all()
-  local out = {}
-  for _, entry in pairs(cache) do
-    for _, r in ipairs(entry.records) do
-      table.insert(out, r)
-    end
-  end
-  if session_cache.loaded then
-    for _, r in ipairs(session_cache.records) do
-      table.insert(out, r)
-    end
-  end
-  return out
+  return M.remove(opts.project_root, opts.id)
 end
 
 ---Flush every dirty root in the cache AND the session cache. Used on
@@ -1169,9 +1156,11 @@ function M.sqlite_info(root)
   return info
 end
 
+---Internal: the decoded event log for `root`, exposed as a test seam
+---(store_spec asserts on event kinds). Not part of the public surface.
 ---@param root string
 ---@return table[]
-function M.events(root)
+function M._events(root)
   if not root then
     return {}
   end
@@ -1193,10 +1182,16 @@ function M.events(root)
   return rows
 end
 
----Internal: exposed for tests.
----@return table<string, manicule.StoreEntry>
-function M._cache()
-  return cache
+---Project roots whose store has been loaded this session. Searching
+---these covers "every project touched so far" (init.lua's record-lookup
+---fallback) without loading arbitrary store files from disk.
+---@return string[]
+function M.loaded_roots()
+  local roots = {}
+  for root in pairs(cache) do
+    roots[#roots + 1] = root
+  end
+  return roots
 end
 
 ---Internal: exposed for tests. Resets the cache so a fresh load runs.
@@ -1208,6 +1203,7 @@ function M._reset()
   end
   sqlite_dbs = {}
   cache = {}
+  store_name_cache = {}
   session_cache = { records = {}, dirty = false, loaded = false }
   client_id = ("%s-%d-%d"):format(tostring(vim.fn.hostname()), vim.fn.getpid(), math.random(0, 0xfffffff))
 end

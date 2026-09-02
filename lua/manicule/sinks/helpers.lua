@@ -2,10 +2,20 @@
 --
 -- Integration authors can use these helpers to keep formatting and
 -- command execution consistent with bundled sinks.
+--
+-- Stable sink-author surface (see ARCHITECTURE.md "Sinks"):
+--   relative_path, line_span, location            comment geometry
+--   format_markdown_review, wrap_text, format_line payload formatting
+--   executable, system, system_async               command execution
+-- Everything else in this file is a private implementation detail.
 
 local M = {}
 
-local function split_lines(text)
+-- Split on LF keeping blank lines (comment bodies and pre/post text are
+-- prose; blank lines are content). Kept local so sinks/helpers stays
+-- self-contained for third-party consumers — do not fold into
+-- manicule.str.split_lines.
+local function split_lines_keep_blanks(text)
   text = tostring(text or "")
   local lines = {}
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
@@ -27,7 +37,7 @@ local function append_block(parts, text)
   if not text then
     return
   end
-  for _, line in ipairs(split_lines(text)) do
+  for _, line in ipairs(split_lines_keep_blanks(text)) do
     table.insert(parts, line)
   end
   table.insert(parts, "")
@@ -41,7 +51,7 @@ local function join_blocks(parts)
 end
 
 local function normalize_path(path)
-  return tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("/$", "")
+  return (tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("/$", ""))
 end
 
 local function relpath(root, path)
@@ -80,38 +90,58 @@ local function inferred_root(comment)
   return parts and parts.git_root or nil
 end
 
+---Return the project-relative path for a comment, or nil when the
+---comment's URI cannot be resolved against a project root (session-scope
+---temp buffers, files outside the root, unparseable URIs).
+---@param comment table
+---@return string|nil
+function M.relative_path(comment)
+  local abs = uri_to_path(comment.uri)
+  local root = inferred_root(comment)
+  if not (abs and root) then
+    return nil
+  end
+  return relpath(root, abs)
+end
+
 ---Return an absolute or project-relative path for a comment.
 ---@param comment table
 ---@return string
-function M.display_path(comment)
-  local abs = uri_to_path(comment.uri)
-  local root = inferred_root(comment)
-  if abs and root then
-    local rel = relpath(root, abs)
-    if rel then
-      return rel
-    end
+local function display_path(comment)
+  local rel = M.relative_path(comment)
+  if rel then
+    return rel
   end
-  return abs or comment.uri or "?"
+  return uri_to_path(comment.uri) or comment.uri or "?"
 end
 
----Return a 1-indexed display range for a comment.
+---Return the 1-indexed start and end lines for a comment.
 ---@param comment table
----@return string
-function M.display_range(comment)
+---@return integer start_lnum, integer end_lnum
+function M.line_span(comment)
   local range = comment.range or {}
   local start = range.start or { 0, 0 }
   local finish = range["end_"] or start
   local s = (start[1] or 0) + 1
   local e = (finish[1] or start[1] or 0) + 1
+  return s, e
+end
+
+---Return a 1-indexed display range for a comment.
+---@param comment table
+---@return string
+local function display_range(comment)
+  local s, e = M.line_span(comment)
   return e ~= s and (s .. "-" .. e) or tostring(s)
 end
 
----Return `path:range` for a comment.
+---Return `path:range` for a comment (1-indexed, project-relative when
+---resolvable). The primitive `format_line` and the markdown headings are
+---built on; useful for custom `format` implementations.
 ---@param comment table
 ---@return string
 function M.location(comment)
-  return ("%s:%s"):format(M.display_path(comment), M.display_range(comment))
+  return ("%s:%s"):format(display_path(comment), display_range(comment))
 end
 
 ---Format comments as a markdown review payload suitable for agents.
@@ -128,7 +158,7 @@ function M.format_markdown_review(comments, opts)
   append_block(parts, opts.pre_text)
   for index, comment in ipairs(comments) do
     table.insert(parts, ("## M%d %s"):format(index, M.location(comment)))
-    for _, line in ipairs(split_lines(comment.body)) do
+    for _, line in ipairs(split_lines_keep_blanks(comment.body)) do
       table.insert(parts, line)
     end
     table.insert(parts, "")
@@ -176,6 +206,26 @@ function M.system(argv, opts)
     stdout = result.stdout or "",
     stderr = result.stderr or "",
   }
+end
+
+---Run a command asynchronously without blocking the UI. The callback
+---receives the same normalized result table as `M.system` and is invoked
+---via `vim.schedule` (vim.system's on_exit fires in a fast-event
+---context), so it may safely touch the vim API and `vim.notify`.
+---@param argv string[]
+---@param opts? table
+---@param cb fun(result: {code: integer, stdout: string, stderr: string})
+function M.system_async(argv, opts, cb)
+  opts = vim.tbl_extend("force", { text = true }, opts or {})
+  vim.system(argv, opts, function(result)
+    vim.schedule(function()
+      cb({
+        code = result.code or 0,
+        stdout = result.stdout or "",
+        stderr = result.stderr or "",
+      })
+    end)
+  end)
 end
 
 return M

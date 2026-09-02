@@ -1,5 +1,5 @@
 local H = {}
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local function unique_name(prefix)
   return ("%s-%d-%d"):format(prefix, os.time(), math.random(1000000))
 end
@@ -30,7 +30,7 @@ function H.setup(opts)
   require("manicule.store")._reset()
   require("manicule.sinks")._reset()
   pcall(function()
-    require("manicule.ui.render")._reset_for_tests()
+    require("manicule.ui.render")._reset()
   end)
   vim.g.loaded_manicule = nil
 
@@ -44,26 +44,49 @@ function H.setup(opts)
     sinks = {
       clipboard = false,
       cmux = false,
+      github = false,
+      socket = false,
     },
   }
   require("manicule").setup(vim.tbl_deep_extend("force", base, opts or {}))
   return ctx
 end
 
+---Remove a path recursively via `rm -rf`, retrying once.
+---vim.fn.delete(..., "rf") intermittently fails with E484 on macOS when
+---entries change under the walk (e.g. git object trees still settling);
+---rm tolerates both racing entries and read-only files.
+function H.rimraf(path)
+  if type(path) ~= "string" or path == "" or path == "/" then
+    return
+  end
+  for _ = 1, 2 do
+    local result = vim.system({ "rm", "-rf", path }, { text = true }):wait()
+    if result.code == 0 then
+      return
+    end
+  end
+end
+
 function H.teardown(ctx)
+  pcall(vim.cmd, "silent! tabonly")
   pcall(vim.cmd, "silent! only")
   pcall(vim.cmd, "silent! %bwipeout!")
+  -- Free all quickfix lists so a spec that populates one (e.g. the
+  -- "user's quickfix is untouched" coverage) can't leak it into a later
+  -- spec's "manicule never creates a qf list" assertion.
+  pcall(vim.fn.setqflist, {}, "f")
   pcall(function()
-    require("manicule")._stop_sync_timer_for_tests()
+    require("manicule")._reset_sync_timer()
   end)
   require("manicule.store")._reset()
   require("manicule.sinks")._reset()
   pcall(function()
-    require("manicule.ui.render")._reset_for_tests()
+    require("manicule.ui.render")._reset()
   end)
   vim.g.loaded_manicule = nil
   if ctx then
-    pcall(vim.fn.delete, ctx.artifact_root, "rf")
+    H.rimraf(ctx.artifact_root)
   end
 end
 
@@ -106,6 +129,7 @@ function H.register_fake_sink(name, opts)
     label = opts.label,
     description = opts.description,
     clear_on_success = opts.clear_on_success,
+    accepts_verdict = opts.accepts_verdict,
     validate = opts.validate,
     send = function(comments, ctx, cb)
       table.insert(calls, {
@@ -206,6 +230,37 @@ function H.fake_cmux(ctx, opts)
   vim.fn.writefile(lines, bin)
   vim.fn.setfperm(bin, "rwx------")
   return bin, log
+end
+
+---Create a real git repository with an initial commit.
+---@param ctx table H.setup context
+---@param files table<string, string[]>|nil relative path -> lines
+---@return string root, fun(...): table git  -- git(...) runs git -C root
+function H.git_repo(ctx, files)
+  local root = H.project_dir(ctx.artifact_root, "gitrepo")
+  H.rimraf(root .. "/.git")
+  local function git(...)
+    local result = vim.system({ "git", "-C", root, ... }, { text = true }):wait()
+    assert(result.code == 0, ("git %s failed: %s"):format(table.concat({ ... }, " "), result.stderr))
+    return result
+  end
+  git("init", "-q", "-b", "main")
+  git("config", "user.email", "manicule@test.local")
+  git("config", "user.name", "Manicule Test")
+  git("config", "commit.gpgsign", "false")
+  -- No detached background jobs: they keep writing into .git while
+  -- teardown deletes the tree, the source of intermittent E484 noise.
+  git("config", "gc.auto", "0")
+  git("config", "maintenance.auto", "false")
+  git("config", "core.fsmonitor", "false")
+  for path, lines in pairs(files or {}) do
+    local abs = root .. "/" .. path
+    vim.fn.mkdir(vim.fn.fnamemodify(abs, ":h"), "p")
+    vim.fn.writefile(lines, abs)
+    git("add", path)
+  end
+  git("commit", "-q", "--allow-empty", "-m", "init")
+  return root, git
 end
 
 return H

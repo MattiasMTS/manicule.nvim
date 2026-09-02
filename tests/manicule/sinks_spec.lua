@@ -60,6 +60,7 @@ describe("manicule sink helpers", function()
     require("manicule.sinks")._reset()
     local bin = H.fake_cmux(ctx)
     require("manicule.sinks").setup({
+      github = false,
       clipboard = {
         pre_text = "clipboard header",
         post_text = "clipboard footer",
@@ -75,6 +76,10 @@ describe("manicule sink helpers", function()
 
     local names = require("manicule.sinks").list()
     assert.are.same({ "clipboard", "cmux" }, names)
+    -- The socket sink registers (dispatchable by name from a review job)
+    -- but is hidden from selection listing: it can never validate without
+    -- a caller-supplied ctx.socket.
+    assert.is_truthy(require("manicule.sinks").get("socket"))
     assert.are.equal("sink", require("manicule.sinks").get("clipboard").type)
     assert.are.equal("integration", require("manicule.sinks").get("cmux").type)
     assert.is_false(require("manicule.sinks").get("cmux").clear_on_success)
@@ -140,6 +145,10 @@ describe("manicule sink helpers", function()
     sink.send({ comment }, { surface = "surface:2" }, function(ok, err)
       sent = { ok = ok, err = err }
     end)
+    -- The send path is asynchronous (vim.system callbacks); wait for the cb.
+    vim.wait(2000, function()
+      return sent ~= nil
+    end)
 
     local log_text = table.concat(vim.fn.readfile(log), "\n")
     assert.is_true(sent.ok)
@@ -185,6 +194,10 @@ describe("manicule sink helpers", function()
     sink.send({ record }, { surface = "surface:2" }, function(ok, err)
       sent = { ok = ok, err = err }
     end)
+    -- The send path is asynchronous (vim.system callbacks); wait for the cb.
+    vim.wait(2000, function()
+      return sent ~= nil
+    end)
 
     assert.is_true(sent.ok)
     assert.is_nil(sent.err)
@@ -223,6 +236,17 @@ describe("manicule sink helpers", function()
     assert.is_true(set_count > 1, "expected more than one chunk, got " .. tostring(set_count))
     assert.are.equal(set_count, paste_count)
 
+    -- Pastes are strictly ordered by chunk index even though the
+    -- set-buffer uploads may complete in any order.
+    local paste_order = {}
+    for idx in raw_log:gmatch("paste%-buffer\tsurface:2\tmanicule%-%d+%-(%d+)\t") do
+      table.insert(paste_order, tonumber(idx))
+    end
+    assert.are.equal(paste_count, #paste_order)
+    for i, idx in ipairs(paste_order) do
+      assert.are.equal(i, idx)
+    end
+
     -- The sink never falls back to `cmux send` for the multiline payload.
     assert.is_nil(raw_log:find("\nsend\tsurface:2", 1, true))
     assert.is_nil(raw_log:find("^send\tsurface:2"))
@@ -252,6 +276,7 @@ describe("manicule sink helpers", function()
     require("manicule.sinks")._reset()
     require("manicule.sinks").setup({
       clipboard = false,
+      github = false,
       cmux = {
         enabled = true,
         command = ctx.state .. "/missing-cmux",
@@ -259,7 +284,91 @@ describe("manicule sink helpers", function()
       },
     })
 
+    assert.is_nil(require("manicule.sinks").get("cmux"))
+    -- Socket stays registered but hidden, so nothing is listed for selection.
     assert.are.same({}, require("manicule.sinks").list())
+    assert.is_truthy(require("manicule.sinks").get("socket"))
+  end)
+
+  it("hides the socket sink from selection listing but keeps it registered", function()
+    require("manicule.sinks")._reset()
+    require("manicule.sinks").setup({
+      clipboard = false,
+      github = false,
+      cmux = false,
+    })
+
+    local sinks = require("manicule.sinks")
+    assert.are.same({}, sinks.list())
+    local socket = sinks.get("socket")
+    assert.is_truthy(socket)
+    assert.is_true(socket.hidden)
+  end)
+
+  it("discovers Pi from cmux resume metadata before scanning stale screen content", function()
+    local bin = H.fake_cmux(ctx, {
+      surfaces = {
+        { id = "surface-current", ref = "surface:1", title = "manicule.nvim" },
+        {
+          id = "surface-pi",
+          ref = "surface:2",
+          title = "dotfiles",
+          resume_binding = { kind = "pi", name = "Pi" },
+        },
+      },
+      tree = {
+        'surface:1 [terminal] "manicule.nvim" tty=ttys001 here',
+        'surface:2 [terminal] "dotfiles" tty=ttys002',
+      },
+      screens = {
+        ["surface:2"] = "old notes mentioning OpenAI Codex\nContext 0 tokens",
+      },
+    })
+
+    local surfaces, err = require("manicule.sinks.cmux").list_agent_surfaces({
+      command = bin,
+      workspace_id = "workspace-1",
+      current_surface = "surface-current",
+      process_fallback = false,
+      cache = false,
+      agent_state_dir = ctx.state,
+    })
+
+    assert.is_nil(err)
+    assert.are.equal(1, #surfaces)
+    assert.are.equal("surface:2", surfaces[1].ref)
+    assert.are.equal("Pi", surfaces[1].agent)
+    assert.are.equal("metadata", surfaces[1].detected_by)
+  end)
+
+  it("discovers Pi from its unicode cmux title", function()
+    local bin = H.fake_cmux(ctx, {
+      surfaces = {
+        { id = "surface-current", ref = "surface:1", title = "manicule.nvim" },
+        { id = "surface-pi", ref = "surface:2", title = "π - dotfiles" },
+      },
+      tree = {
+        'surface:1 [terminal] "manicule.nvim" tty=ttys001 here',
+        'surface:2 [terminal] "π - dotfiles" tty=ttys002',
+      },
+      screens = {},
+    })
+
+    local surfaces, err = require("manicule.sinks.cmux").list_agent_surfaces({
+      command = bin,
+      workspace_id = "workspace-1",
+      current_surface = "surface-current",
+      process_fallback = false,
+      screen_fallback = false,
+      cache = false,
+      agent_state_dir = ctx.state,
+    })
+
+    assert.is_nil(err)
+    assert.are.equal(1, #surfaces)
+    assert.are.equal("surface:2", surfaces[1].ref)
+    assert.are.equal("Pi", surfaces[1].agent)
+    assert.are.equal("title", surfaces[1].detected_by)
   end)
 
   it("discovers a generic-titled split pane by reading the agent screen", function()
@@ -330,6 +439,50 @@ describe("manicule sink helpers", function()
     assert.are.equal("Codex", by_ref["surface:3"].agent)
   end)
 
+  it("errors when registering a sink under an already-registered name", function()
+    local sinks = require("manicule.sinks")
+    sinks.register({
+      name = "dup",
+      send = function(_, _, cb)
+        cb(true)
+      end,
+    })
+
+    local ok, err = pcall(sinks.register, {
+      name = "dup",
+      send = function(_, _, cb)
+        cb(true)
+      end,
+    })
+
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("already registered", 1, true))
+  end)
+
+  it("re-registers builtins on repeated setup without duplicate errors", function()
+    local sinks = require("manicule.sinks")
+    sinks._reset()
+    sinks.setup({ github = false, cmux = false })
+    sinks.setup({ github = false, cmux = false })
+
+    assert.are.same({ "clipboard" }, sinks.list())
+  end)
+
+  it("requires a dispatch callback", function()
+    local sinks = require("manicule.sinks")
+    sinks.register({
+      name = "needs-cb",
+      send = function(_, _, cb)
+        cb(true)
+      end,
+    })
+
+    local ok, err = pcall(sinks.dispatch, "needs-cb", {}, {})
+
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("cb", 1, true))
+  end)
+
   it("reports thrown validate and send callbacks as dispatch failures", function()
     local sinks = require("manicule.sinks")
     sinks.register({
@@ -361,5 +514,38 @@ describe("manicule sink helpers", function()
     end)
     assert.is_false(send_result.ok)
     assert.is_truthy(send_result.err:find("send failed", 1, true))
+  end)
+
+  it("detects pi from wrapped process commands", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.are.equal("Pi", internal.detect_agent_from_command("node /nix/store/abc/pi-coding-agent/dist/main.js"))
+    assert.are.equal("Pi", internal.detect_agent_from_command("/usr/local/bin/pi --resume"))
+    assert.are.equal("Pi", internal.detect_agent_from_command("pi"))
+  end)
+
+  it("does not detect pi from bare pi substrings in commands", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.is_nil(internal.detect_agent_from_command("pip install requests"))
+    assert.is_nil(internal.detect_agent_from_command("spotify"))
+    assert.is_nil(internal.detect_agent_from_command("vim pi.txt"))
+  end)
+
+  it("does not detect pi from argument tokens of unrelated commands", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.is_nil(internal.detect_agent_from_command("sudo -u pi bash"))
+    assert.is_nil(internal.detect_agent_from_command("chown pi file"))
+    assert.is_nil(internal.detect_agent_from_command("ssh -l pi host"))
+    assert.is_nil(internal.detect_agent_from_command("ls /home/pi"))
+  end)
+
+  it("detects pi from screen contents", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.are.equal("Pi", internal.detect_agent_from_screen("π  dotfiles\nready for input"))
+    assert.are.equal("Pi", internal.detect_agent_from_screen("node running pi-coding-agent v1"))
+  end)
+
+  it("does not detect pi from plain prose containing pi in screens", function()
+    local internal = require("manicule.sinks.cmux")._internal
+    assert.is_nil(internal.detect_agent_from_screen("we computed pi to 10 digits\nnothing agent-like here"))
   end)
 end)

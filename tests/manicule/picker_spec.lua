@@ -15,6 +15,9 @@ local function setup_env()
   -- Isolate the per-project store to a tempdir and open a buffer inside
   -- the fake root so `store.root()` resolves predictably.
   require("manicule.store")._reset()
+  -- Force `runtime plugin/manicule.lua` to re-source per test so the
+  -- plugin's completion cache starts fresh.
+  vim.g.loaded_manicule = nil
   require("manicule").setup({
     store = {
       dir = tmp_state .. "/",
@@ -72,14 +75,36 @@ describe("manicule positional picker", function()
     vim.cmd("runtime plugin/manicule.lua")
     local cmd = vim.api.nvim_get_commands({})["ManiculeDelete"]
     assert.is_truthy(cmd)
-    -- Re-materialize the completion fn: user_commands expose `complete_arg`
-    -- but not the fn. Call our position completer directly via global.
-    local records = require("manicule").list({ _quiet = true })
-    local expected = {}
-    for i = 1, #records do
-      expected[i] = tostring(i)
+    assert.are.same({ "1", "2", "3" }, vim.fn.getcompletion("ManiculeDelete ", "cmdline"))
+  end)
+
+  it("completion prefix-filters positions by arglead", function()
+    for i = 1, 12 do
+      add("note " .. i, i, "a.lua")
     end
-    assert.are.same({ "1", "2", "3" }, expected)
+    vim.cmd("runtime plugin/manicule.lua")
+    assert.are.same({ "1", "10", "11", "12" }, vim.fn.getcompletion("ManiculeDelete 1", "cmdline"))
+    assert.are.same({ "3" }, vim.fn.getcompletion("ManiculeEdit 3", "cmdline"))
+  end)
+
+  it("completion caches positions so repeated <Tab> does not re-query the store", function()
+    add("one", 1, "a.lua")
+    vim.cmd("runtime plugin/manicule.lua")
+
+    local manicule = require("manicule")
+    local orig_list = manicule.list
+    local calls = 0
+    manicule.list = function(...)
+      calls = calls + 1
+      return orig_list(...)
+    end
+    local first = vim.fn.getcompletion("ManiculeDelete ", "cmdline")
+    local second = vim.fn.getcompletion("ManiculeDelete ", "cmdline")
+    manicule.list = orig_list
+
+    assert.are.same({ "1" }, first)
+    assert.are.same({ "1" }, second)
+    assert.are.equal(1, calls)
   end)
 
   it(":ManiculeDelete <n> removes the positional record", function()
@@ -88,7 +113,7 @@ describe("manicule positional picker", function()
     local id3 = add("third", 3, "a.lua")
     vim.cmd("runtime plugin/manicule.lua")
     vim.cmd("ManiculeDelete 2")
-    local remaining = require("manicule").list({ _quiet = true })
+    local remaining = require("manicule").list()
     assert.are.equal(2, #remaining)
     assert.are.equal(id1, remaining[1].id)
     assert.are.equal(id3, remaining[2].id)
@@ -98,7 +123,7 @@ describe("manicule positional picker", function()
     add("short", 1, "README.md")
     add("a much longer body that should be truncated to a fixed maximum width", 10, "src/aaaa/bbbb/cccc/dddd.lua")
     local resolved_id = add("already done", 5, "src/zzz.lua")
-    local records_pre = require("manicule").list({ _quiet = true })
+    local records_pre = require("manicule").list()
     local store = require("manicule.store")
     for _, r in ipairs(records_pre) do
       if r.id == resolved_id then
@@ -119,7 +144,7 @@ describe("manicule positional picker", function()
     vim.ui.select = orig
 
     assert.is_truthy(captured_items)
-    local records = require("manicule").list({ _quiet = true })
+    local records = require("manicule").list()
     assert.are.equal(#records, #captured_items)
     for i, item in ipairs(captured_items) do
       assert.are.equal(records[i].id, item.record.id)
@@ -152,7 +177,7 @@ describe("manicule positional picker", function()
     assert.is_truthy(notified)
     assert.are.equal(vim.log.levels.ERROR, notified.level)
     assert.is_truthy(notified.msg:find("no comment at position"))
-    assert.are.equal(3, #require("manicule").list({ _quiet = true }))
+    assert.are.equal(3, #require("manicule").list())
   end)
 
   it("empty list → INFO notify, no picker", function()
@@ -177,28 +202,20 @@ describe("manicule positional picker", function()
     assert.is_truthy(notified.msg:find("no comments"))
   end)
 
-  it("list() ordering matches quickfix build_items ordering", function()
+  it("list() orders records by uri → line → id", function()
     add("b-first", 5, "b.lua")
     add("a-second", 10, "a.lua")
     add("a-first", 3, "a.lua")
-    local list_ids = {}
-    for _, r in ipairs(require("manicule").list({ _quiet = true })) do
-      table.insert(list_ids, r.id)
-    end
-    local qf_items = require("manicule.ui.quickfix").build_items(require("manicule").list({ _quiet = true }))
-    local qf_ids = {}
-    for _, it in ipairs(qf_items) do
-      table.insert(qf_ids, it.user_data.id)
-    end
-    assert.are.same(list_ids, qf_ids)
-    -- Sanity check: a.lua records should come before b.lua (URI order
-    -- reflects the filesystem path order).
-    local ordered = require("manicule").list({ _quiet = true })
+    -- a.lua records come before b.lua (URI order reflects the
+    -- filesystem path order), and within a file lines sort ascending.
+    local ordered = require("manicule").list()
     local function ends_with(uri, suffix)
       return uri:sub(-#suffix) == suffix
     end
     assert.is_true(ends_with(ordered[1].uri, "/a.lua"))
     assert.is_true(ends_with(ordered[2].uri, "/a.lua"))
     assert.is_true(ends_with(ordered[3].uri, "/b.lua"))
+    assert.are.equal("a-first", ordered[1].body)
+    assert.are.equal("a-second", ordered[2].body)
   end)
 end)

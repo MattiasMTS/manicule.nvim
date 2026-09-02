@@ -21,6 +21,8 @@ local function setup_env(opts)
     sinks = {
       clipboard = false,
       cmux = false,
+      github = false,
+      socket = false,
     },
   }
   require("manicule").setup(vim.tbl_deep_extend("force", base, opts or {}))

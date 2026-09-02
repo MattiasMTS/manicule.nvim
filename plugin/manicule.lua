@@ -1,3 +1,8 @@
+if vim.fn.has("nvim-0.12") ~= 1 then
+  vim.notify("manicule.nvim requires Neovim >= 0.12", vim.log.levels.ERROR)
+  return
+end
+
 if vim.g.loaded_manicule then
   return
 end
@@ -12,7 +17,7 @@ vim.g.loaded_manicule = 1
 ---@param action "edit"|"delete"|"resolve"
 ---@param opts table
 local function dispatch_positional(action, opts)
-  local records = require("manicule").list({ _quiet = true })
+  local records = require("manicule").list()
   if opts.args == nil or opts.args == "" then
     require("manicule.ui.picker").pick(action, records)
     return
@@ -28,32 +33,111 @@ local function dispatch_positional(action, opts)
   })
 end
 
+---Keep only the candidates starting with the cmdline prefix `arglead`.
+---@param arglead string
+---@param candidates string[]
+---@return string[]
+local function prefix_filter(arglead, candidates)
+  return vim.tbl_filter(function(candidate)
+    return vim.startswith(candidate, arglead)
+  end, candidates)
+end
+
+---Completion candidates are cached for a short TTL (the pattern used by
+---manicule.review.complete): repeated <Tab> presses must not re-query
+---the whole store on every keystroke.
+local COMPLETION_CACHE_TTL_MS = 10 * 1000
+
+---@type table<string, {at: number, items: string[]}>
+local completion_cache = {}
+
+---Memoize `fn()` under `key` for COMPLETION_CACHE_TTL_MS.
+---@param key string
+---@param fn fun(): string[]
+---@return string[]
+local function cached(key, fn)
+  local hit = completion_cache[key]
+  local now = vim.uv.hrtime() / 1e6
+  if hit and now - hit.at < COMPLETION_CACHE_TTL_MS then
+    return hit.items
+  end
+  local items = fn()
+  completion_cache[key] = { at = now, items = items }
+  return items
+end
+
 ---Tab-completion returns stringified positions `"1"`..`"N"`. Command-
 ---line completion tokens don't support display text — that's what the
 ---picker is for.
+---@param arglead string
 ---@return string[]
-local function position_completer()
-  local records = require("manicule").list({ _quiet = true })
-  local out = {}
-  for i = 1, #records do
-    out[i] = tostring(i)
-  end
-  return out
+local function position_completer(arglead)
+  local items = cached("positions:" .. tostring(vim.uv.cwd()), function()
+    local records = require("manicule").list()
+    local out = {}
+    for i = 1, #records do
+      out[i] = tostring(i)
+    end
+    return out
+  end)
+  return prefix_filter(arglead, items)
 end
 
 vim.api.nvim_create_user_command("ManiculeAdd", function(opts)
   require("manicule").add({ range = opts.range > 0 and { opts.line1, opts.line2 } or nil })
 end, { range = true })
 
+-- Outside a review session: the panel in project mode (all project
+-- comments, Comments-only tab). Inside one: focus the review panel's
+-- Comments tab.
 vim.api.nvim_create_user_command("ManiculeList", function()
-  require("manicule").list()
+  require("manicule.review.panel").open_comments()
 end, {})
 
+---Verdict words accepted as the optional second argument of
+---`:ManiculeSend github`, mapped to the GitHub review event they pick
+---for that send (overriding the sink's configured `event`).
+local send_verdicts = {
+  comment = "COMMENT",
+  approve = "APPROVE",
+  ["request-changes"] = "REQUEST_CHANGES",
+}
+
 vim.api.nvim_create_user_command("ManiculeSend", function(opts)
-  require("manicule").send(opts.args)
+  local sink = opts.fargs[1]
+  local ctx
+  if opts.fargs[2] ~= nil then
+    local event = send_verdicts[opts.fargs[2]]
+    if not event then
+      vim.notify(
+        ("manicule: unknown verdict %q (expected comment, approve, or request-changes)"):format(opts.fargs[2]),
+        vim.log.levels.ERROR
+      )
+      return
+    end
+    -- A verdict only means something to a sink that consumes ctx.event
+    -- (`spec.accepts_verdict`, e.g. github). Refuse rather than silently
+    -- dropping the verdict and sending anyway. An unregistered sink name
+    -- falls through: dispatch reports its own "unknown sink" error.
+    local spec = require("manicule.sinks").get(sink)
+    if spec and not spec.accepts_verdict then
+      vim.notify(
+        ("manicule: sink %q does not accept a verdict; drop %q or send to github"):format(sink, opts.fargs[2]),
+        vim.log.levels.ERROR
+      )
+      return
+    end
+    ctx = { event = event }
+  end
+  require("manicule").send(sink, nil, ctx)
 end, {
-  nargs = "?",
-  complete = function()
+  nargs = "*",
+  complete = function(arglead, cmdline)
+    -- Second argument after `github`: complete the verdict words.
+    local sink = cmdline:match("ManiculeSend%s+(%S+)%s")
+    if sink == "github" then
+      return prefix_filter(arglead, { "approve", "comment", "request-changes" })
+    end
     return require("manicule.sinks").list()
   end,
 })
@@ -70,9 +154,28 @@ vim.api.nvim_create_user_command("ManiculeEdit", function(opts)
   dispatch_positional("edit", opts)
 end, { nargs = "?", complete = position_completer })
 
-vim.api.nvim_create_user_command("ManiculeToggle", function()
+---During an active review session, :ManiculeToggle shows/hides the
+---review panel; otherwise it flips comment visuals on/off.
+local function toggle()
+  if require("manicule.review").state() then
+    require("manicule.review.panel").toggle()
+    return
+  end
   require("manicule.ui.render").toggle()
-end, {})
+end
+
+vim.api.nvim_create_user_command("ManiculeToggle", toggle, {})
+
+-- `:ManiculeDisplay <mode>` sets the comment display mode; with no
+-- argument it cycles float → eol → inline → hidden → float.
+vim.api.nvim_create_user_command("ManiculeDisplay", function(opts)
+  require("manicule.ui.render").set_display_mode(opts.args ~= "" and opts.args or nil)
+end, {
+  nargs = "?",
+  complete = function(arglead)
+    return prefix_filter(arglead, { "float", "eol", "inline", "hidden" })
+  end,
+})
 
 local function dispatch_jump(direction, opts)
   local count = 1
@@ -99,7 +202,7 @@ vim.keymap.set({ "n", "x" }, "<Plug>(manicule-add)", function()
 end, { silent = true })
 
 vim.keymap.set("n", "<Plug>(manicule-list)", function()
-  require("manicule").list()
+  require("manicule.review.panel").open_comments()
 end, { silent = true })
 
 local function jump_next()
@@ -138,11 +241,15 @@ vim.keymap.set("n", "<Plug>(manicule-delete)", function()
   require("manicule").delete(id)
 end, { silent = true })
 
--- Flip visuals on/off without touching the store. No default binding —
--- the command is enough for most users; expose the <Plug> for anyone
--- who wants a keymap.
-vim.keymap.set("n", "<Plug>(manicule-toggle)", function()
-  require("manicule.ui.render").toggle()
+-- Flip visuals on/off without touching the store (or show/hide the
+-- review panel during a session). No default binding — the command is
+-- enough for most users; expose the <Plug> for anyone who wants a keymap.
+vim.keymap.set("n", "<Plug>(manicule-toggle)", toggle, { silent = true })
+
+-- Cycle the comment display mode (float → eol → inline → hidden). No
+-- default binding — same policy as <Plug>(manicule-toggle).
+vim.keymap.set("n", "<Plug>(manicule-display-cycle)", function()
+  require("manicule.ui.render").set_display_mode()
 end, { silent = true })
 
 -- Default keymaps. The popup footer advertises `gca` / `gcd` so users
@@ -162,3 +269,81 @@ if vim.g.manicule_no_default_keymaps ~= 1 then
     desc = "Manicule: previous comment",
   })
 end
+
+-- Review mode commands. `:ManiculeReview` returns within one frame:
+-- review.start_async opens the shell (tab + panel with a resolving
+-- spinner) immediately and the resolver runs as async continuations —
+-- see review.start_async / sources.resolve_async. Errors resolve late
+-- and always notify from a scheduled callback, safely outside the
+-- command context (an ERROR notify inside nvim_cmd — the lazy-loading
+-- stub re-invocation path — behaves like :echoerr and is rethrown as
+-- a "Vim:" traceback).
+vim.api.nvim_create_user_command("ManiculeReview", function(opts)
+  -- Bare `pr`: pick an open PR via vim.ui.select, then proceed as if
+  -- `:ManiculeReview pr <n>` was typed. Intercepted BEFORE resolve —
+  -- the git resolver would otherwise try (and fail) to treat "pr" as
+  -- a ref.
+  if #opts.fargs == 1 and opts.fargs[1] == "pr" then
+    require("manicule.review.pr_picker").pick(function(number)
+      require("manicule.review").start_async({ "pr", number })
+    end)
+    return
+  end
+  require("manicule.review").start_async(opts.fargs)
+end, {
+  nargs = "*",
+  complete = function(arglead, cmdline)
+    return require("manicule.review.complete").candidates(arglead, cmdline)
+  end,
+})
+
+vim.api.nvim_create_user_command("ManiculeReviewNext", function()
+  require("manicule.review").next()
+end, {})
+
+vim.api.nvim_create_user_command("ManiculeReviewPrev", function()
+  require("manicule.review").prev()
+end, {})
+
+-- finish()/stop() are pure (ok, err returns); this command layer owns
+-- the user-facing notifications for their pre-flight failures.
+vim.api.nvim_create_user_command("ManiculeReviewFinish", function(opts)
+  local ok, err = require("manicule.review").finish({ sink = opts.args ~= "" and opts.args or nil })
+  if not ok then
+    vim.notify(err, vim.log.levels.WARN)
+  end
+end, {
+  nargs = "?",
+  complete = function()
+    return require("manicule.sinks").list()
+  end,
+})
+
+vim.api.nvim_create_user_command("ManiculeReviewStop", function()
+  local ok, err = require("manicule.review").stop()
+  if not ok then
+    vim.notify(err, vim.log.levels.WARN)
+  end
+end, {})
+
+-- `:ManiculeReviewDiffMode` with no argument toggles split <-> unified.
+vim.api.nvim_create_user_command("ManiculeReviewDiffMode", function(opts)
+  require("manicule.review").set_diff_mode(opts.args)
+end, {
+  nargs = "?",
+  complete = function(arglead)
+    return prefix_filter(arglead, { "split", "unified" })
+  end,
+})
+
+vim.keymap.set("n", "<Plug>(manicule-review-next)", function()
+  require("manicule.review").next()
+end, { silent = true })
+
+vim.keymap.set("n", "<Plug>(manicule-review-prev)", function()
+  require("manicule.review").prev()
+end, { silent = true })
+
+vim.keymap.set("n", "<Plug>(manicule-review-diff-mode)", function()
+  require("manicule.review").set_diff_mode()
+end, { silent = true })

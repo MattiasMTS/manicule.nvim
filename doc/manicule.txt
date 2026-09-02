@@ -1,4 +1,4 @@
-*manicule.txt*          For Neovim >= 0.10.0         Last change: 2026 June 13
+*manicule.txt*          For Neovim >= 0.12.0         Last change: 2026 June 13
 
 ==============================================================================
 Table of Contents                                 *manicule-table-of-contents*
@@ -48,7 +48,7 @@ event payloads.
 
 REQUIREMENTS                             *manicule-manicule.nvim-requirements*
 
-Neovim >= 0.10.
+Neovim >= 0.12.
 
 The default project store uses the local SQLite library through LuaJIT FFI.
 Most Neovim builds on macOS and Linux can load `libsqlite3` already; run

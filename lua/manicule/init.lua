@@ -28,7 +28,7 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local sync_timer
 
 local delete_undo_stack = {} -- LIFO stack of pre-delete record snapshots
@@ -158,12 +158,13 @@ end
 ---and the counter set (whole project / session, no resolved-filter)
 ---from those shared reads.
 ---
----`store.all_for_uri(uri, root)` internally re-reads `store.all(root)`
----via `for_uri`, and `counter_records_for_buffer` read `store.all(root)`
----again — two `store.all` calls per render, each running `M.sync`
----(`SELECT COALESCE(MAX(id))`) on a cache hit, plus two identity
----resolutions. Reading the project list once here and filtering it
----in-process collapses that to one identity + one `store.all`.
+---`store.all_for_uri(uri, { root = root })` internally re-reads `store.all(root)`
+---via `for_uri`, and deriving the counter set separately would read
+---`store.all(root)` again — two `store.all` calls per render, each
+---running `M.sync` (`SELECT COALESCE(MAX(id))`) on a cache hit, plus
+---two identity resolutions. Reading the project list once here and
+---filtering it in-process collapses that to one identity + one
+---`store.all`.
 ---@param bufnr integer
 ---@return table[] records, table[] counter_records, table? identity
 local function render_inputs(bufnr)
@@ -226,16 +227,6 @@ local function records_for_buffer(bufnr)
   return records
 end
 
----Return the records used for popup title counters. Project comments are
----numbered across the whole project, not just the current file; session
----comments are numbered across the session store.
----@param bufnr integer
----@return table[]
-local function counter_records_for_buffer(bufnr)
-  local _, counter_records = render_inputs(bufnr)
-  return counter_records
-end
-
 local refresh_viewport
 -- Forward-declared (like `refresh_viewport`) because `hide_popups_on_leave`
 -- below references it from a scheduled callback, but the definition lives
@@ -269,43 +260,46 @@ local function reconcile_records(bufnr, records, counter_records)
   end
 end
 
----Run reconcile for every buffer that already has an entry in `buffer_to_path`
----or is loaded and visible. Returns the records passed in.
+---True when `bufnr` is one of manicule's own UI surfaces — the review
+---panel (`manicule-panel`) or the comment rail (`manicule-rail`). These
+---scratch buffers can never hold records, so editor-wide sweeps (paint,
+---position sync, viewport refresh) skip them instead of paying an
+---identify + store read per pass on every mutation.
 ---@param bufnr integer
-local function reconcile_buffer(bufnr)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
-    return
-  end
-  -- Single-pass: one identify + one project/session read derives both
-  -- the per-buffer records and the counter set. `render_inputs` loads
-  -- the relevant stores internally (identity resolution routes staged
-  -- buffers to the real project cache, same as `project_root_for_bufnr`).
-  local records, counter_records = render_inputs(bufnr)
-  reconcile_records(bufnr, records, counter_records)
+---@return boolean
+local function is_own_surface(bufnr)
+  return vim.bo[bufnr].filetype:match("^manicule%-") ~= nil
 end
 
 ---Paint `bufnr` in a SINGLE pass: resolve `render_inputs` once, then feed
 ---the same records/counters into both reconcile (with orphan detection)
----and the (sticky-gated) viewport update. `attach_buffer` and
----`refresh_all_loaded` share this so an attach no longer runs two full
----identity+store passes (one in reconcile, one in the viewport refresh).
+---and the (sticky-gated) viewport update. Shared by `attach_buffer`,
+---`refresh_all_loaded`, and the mutation paths (add, rename) so none of
+---them runs two full identity+store passes (one in reconcile, one in
+---the viewport refresh).
 ---@param bufnr integer
 ---@param sticky boolean? whether sticky mode is on (pass the resolved flag to avoid re-reading config per buffer)
 local function paint_buffer(bufnr, sticky)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
     return
   end
+  if is_own_surface(bufnr) then
+    return
+  end
   if sticky == nil then
     local cfg = require("manicule.config").get()
-    sticky = (cfg.ui or {}).sticky
+    sticky = (cfg.ui or {}).always_show_popups
   end
   local render = require("manicule.ui.render")
   local records, counter_records = render_inputs(bufnr)
   reconcile_records(bufnr, records, counter_records)
   -- Mirror `refresh_viewport`: the non-sticky viewport update is a no-op
   -- under sticky (reconcile already schedules the popups), so skip the
-  -- call entirely when sticky to match the old behavior.
-  if not sticky and vim.api.nvim_buf_is_valid(bufnr) then
+  -- call entirely when sticky to match the old behavior. The "eol"
+  -- display mode is the exception — its cursor-line popup expansion is
+  -- driven by this viewport pass, so it always runs (sticky is a
+  -- float-mode concern).
+  if (not sticky or render.display_mode() == "eol") and vim.api.nvim_buf_is_valid(bufnr) then
     render.update_viewport_popups(bufnr, records, counter_records)
   end
 end
@@ -324,7 +318,7 @@ end
 ---buffer now resolves its inputs once instead of ~4×.
 local function refresh_all_loaded()
   local cfg = require("manicule.config").get()
-  local sticky = (cfg.ui or {}).sticky
+  local sticky = (cfg.ui or {}).always_show_popups
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(bufnr) then
       paint_buffer(bufnr, sticky)
@@ -357,7 +351,7 @@ local function hide_popups_on_leave(bufnr)
       -- so route through `attach_buffer` (reconcile re-schedules the
       -- sticky popups). `attach_buffer` covers both modes.
       local cfg = require("manicule.config").get()
-      if (cfg.ui or {}).sticky then
+      if (cfg.ui or {}).always_show_popups then
         attach_buffer(bufnr)
       else
         refresh_viewport(bufnr)
@@ -371,10 +365,8 @@ local function refresh_external_store_changes(roots)
     return
   end
   refresh_all_loaded()
-  local quickfix = require("manicule.ui.quickfix")
-  if quickfix.is_manicule_qf_open() then
-    quickfix.refresh()
-  end
+  -- The review panel subscribes to ManiculeSynced, so an open panel
+  -- (review or project mode) re-renders from the freshly synced store.
   emit("ManiculeSynced", { roots = roots })
 end
 
@@ -424,12 +416,17 @@ function refresh_viewport(bufnr)
     return
   end
   local cfg = require("manicule.config").get()
-  if (cfg.ui or {}).sticky then
+  -- Sticky suppresses the viewport pass only for float-style popups
+  -- (reconcile already scheduled them all). The "eol" display mode
+  -- drives its cursor-line popup expansion through this pass, so it
+  -- keeps receiving CursorMoved-fed updates regardless of
+  -- `ui.always_show_popups`.
+  if (cfg.ui or {}).always_show_popups and require("manicule.ui.render").display_mode() ~= "eol" then
     return
   end
   -- Single-pass: one identify + one store read derives both result sets,
-  -- instead of `records_for_buffer` + `counter_records_for_buffer` each
-  -- re-resolving identity and re-querying the store.
+  -- instead of resolving the per-buffer records and the counter set
+  -- separately (each re-resolving identity and re-querying the store).
   local records, counter_records = render_inputs(bufnr)
   require("manicule.ui.render").update_viewport_popups(bufnr, records, counter_records)
 end
@@ -442,6 +439,9 @@ end
 local function sync_positions_for_buffer(bufnr)
   local touched = { roots = {}, session = false, count = 0 }
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return touched
+  end
+  if is_own_surface(bufnr) then
     return touched
   end
 
@@ -458,7 +458,10 @@ local function sync_positions_for_buffer(bufnr)
   end
   store.session_load()
 
-  local records = store.all_for_uri(identity.uri, identity.project_root)
+  local records = store.all_for_uri(
+    identity.uri,
+    identity.project_root and { root = identity.project_root } or { session_only = true }
+  )
   if #records == 0 then
     return touched
   end
@@ -637,12 +640,12 @@ local function on_bufname_changed(bufnr)
   if #ids == 0 then
     return
   end
-  -- Re-reconcile the buffer so the render layer (which keyed handles
-  -- off the old URI via reconcile_buffer) rebuilds against the new
-  -- URI. Without this, BufWinEnter's reconcile during the saveas
-  -- flow tore down every handle before we rewrote the records.
-  reconcile_buffer(bufnr)
-  refresh_viewport(bufnr)
+  -- Re-paint the buffer (single-pass reconcile + viewport) so the
+  -- render layer, which keyed handles off the old URI, rebuilds
+  -- against the new URI. Without this, BufWinEnter's reconcile during
+  -- the saveas flow tore down every handle before we rewrote the
+  -- records.
+  paint_buffer(bufnr)
   emit("ManiculeRenamed", {
     bufnr = bufnr,
     old_uri = old_uri,
@@ -658,6 +661,9 @@ function M.setup(opts)
   opts = opts or {}
   local config = require("manicule.config")
   config.setup(opts)
+  -- The icons module caches its enabled/provider verdicts; a re-setup can
+  -- change ui.icons, so drop the caches with the config they came from.
+  require("manicule.ui.icons")._reset()
 
   -- Register bundled sinks/integrations unless the user opted out.
   require("manicule.sinks").setup(require("manicule.config").get().sinks)
@@ -693,6 +699,11 @@ function M.setup(opts)
       if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
         return
       end
+      -- Manicule's own surfaces (panel, rail) never hold records —
+      -- don't even schedule a refresh for cursor motion inside them.
+      if is_own_surface(bufnr) then
+        return
+      end
       -- Coalesce the burst: a single user action fires several of these
       -- events, but only the first schedules the refresh. Subsequent
       -- events in the same burst find the flag already set and no-op, so
@@ -721,7 +732,7 @@ function M.setup(opts)
     group = group,
     callback = function()
       local cfg = require("manicule.config").get()
-      if not (cfg.ui or {}).sticky then
+      if not (cfg.ui or {}).always_show_popups then
         return
       end
       -- The window is still in the layout inside the WinClosed callback, so
@@ -783,6 +794,11 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "BufUnload", "BufDelete" }, {
     group = group,
     callback = function(ev)
+      -- Drop any pending BufFilePre URI snapshot: a buffer that unloads
+      -- between BufFilePre and the deferred BufFilePost handler would
+      -- otherwise leak its entry forever (`on_bufname_changed`
+      -- early-returns on unloaded buffers before clearing the key).
+      pre_rename_uris[ev.buf] = nil
       require("manicule.ui.render").clear_buffer(ev.buf)
     end,
   })
@@ -802,6 +818,11 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("BufFilePost", {
     group = group,
     callback = function(ev)
+      -- A rename can retarget what a path resolves to (symlinks,
+      -- overwrite-by-rename). Drop the URI module's realpath memo
+      -- BEFORE the deferred rewrite recomputes the new URI, so the
+      -- rename path can never be served a stale resolution.
+      require("manicule.uri").invalidate_realpath_cache()
       vim.schedule(function()
         on_bufname_changed(ev.buf)
       end)
@@ -813,51 +834,6 @@ function M.setup(opts)
     callback = function()
       sync_all_loaded_positions()
       store.flush_all()
-    end,
-  })
-
-  -- Buffer-local keymaps for manicule quickfix lists. `FileType qf`
-  -- fires once per qf buffer; we check the list title to avoid
-  -- touching grep/diagnostic/other-plugin lists.
-  vim.api.nvim_create_autocmd("FileType", {
-    group = group,
-    pattern = "qf",
-    callback = function(ev)
-      local ok, info = pcall(vim.fn.getqflist, { title = 1 })
-      if not ok or type(info) ~= "table" then
-        return
-      end
-      if type(info.title) == "string" and info.title:match("^manicule") then
-        require("manicule.ui.quickfix_keymaps").attach(ev.buf)
-      end
-    end,
-  })
-
-  -- Live refresh: any mutation event regenerates the open manicule qf
-  -- list in place. `setqflist` mode `"r"` keeps the window open and
-  -- preserves the cursor line. A single pattern-matched autocmd
-  -- suffices; the refresh path no-ops when no manicule qf is visible.
-  vim.api.nvim_create_autocmd("User", {
-    group = group,
-    pattern = {
-      "ManiculeAdded",
-      "ManiculeEdited",
-      "ManiculeDeleted",
-      "ManiculeResolved",
-      "ManiculeOrphaned",
-      "ManiculeRenamed",
-      "ManiculeSynced",
-      "ManiculeRestored",
-    },
-    callback = function()
-      -- Defer so a burst of events coalesces and we don't mutate the
-      -- qflist from inside the autocmd dispatch.
-      vim.schedule(function()
-        local quickfix = require("manicule.ui.quickfix")
-        if quickfix.is_manicule_qf_open() then
-          quickfix.refresh()
-        end
-      end)
     end,
   })
 
@@ -896,6 +872,18 @@ local function finalize_add(body, bufnr, range)
     return
   end
 
+  -- Capture what the comment anchors to at creation time: the comment
+  -- card's quote line cites this excerpt even after the code changes,
+  -- and editing the comment keeps it (it quotes what was commented on).
+  -- Stored on `meta` — the extensible JSON blob persisted with the
+  -- record — so no store schema change is needed. Multi-line ranges
+  -- cite the first line with a `…` continuation marker.
+  local start_row = range and range.start and tonumber(range.start[1]) or 0
+  local end_row = range and range.end_ and tonumber(range.end_[1]) or start_row
+  local first_line = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
+  local meta = identity.ephemeral and { ephemeral = true } or {}
+  meta.excerpt = require("manicule.str").excerpt(first_line, end_row > start_row)
+
   local now = os.time()
   local record = {
     id = id_mod.new(),
@@ -908,7 +896,7 @@ local function finalize_add(body, bufnr, range)
     created_at = now,
     updated_at = now,
     resolved = false,
-    meta = identity.ephemeral and { ephemeral = true } or {},
+    meta = meta,
   }
   -- Invariant canary: re-run `identify` and refuse to persist if it
   -- doesn't reproduce the identity we built the record around. Guards
@@ -954,10 +942,10 @@ local function finalize_add(body, bufnr, range)
     notify_save_failed("new comment", err)
     return
   end
-  -- Reconcile rebuilds extmarks + popups idempotently; no need for a
-  -- per-mutation attach/detach API.
-  reconcile_buffer(bufnr)
-  refresh_viewport(bufnr)
+  -- Single-pass paint: reconcile (extmarks + popups, idempotent) and
+  -- the viewport update off ONE identity + store read — the same path
+  -- attach_buffer uses. No per-mutation attach/detach API needed.
+  paint_buffer(bufnr)
   emit("ManiculeAdded", record)
 end
 
@@ -1204,11 +1192,12 @@ local function find(id, locator)
     end
   end
 
-  -- Quickfix and picker paths may carry a root, but fall back to every
-  -- loaded project cache so ids remain actionable after the current window
-  -- moved to a qf/help/scratch buffer. This does not load arbitrary store
-  -- files from disk; it only searches roots already touched this session.
-  for cached_root in pairs(store._cache()) do
+  -- Panel and picker paths may carry a root, but fall back to every
+  -- loaded project store so ids remain actionable after the current window
+  -- moved to a panel/help/scratch buffer. `store.loaded_roots()` does not
+  -- load arbitrary store files from disk; it only lists roots already
+  -- touched this session.
+  for _, cached_root in ipairs(store.loaded_roots()) do
     local record, save, remove = find_project(cached_root)
     if record then
       return record, save, remove
@@ -1219,7 +1208,10 @@ local function find(id, locator)
   return find_session()
 end
 
----Edit an existing comment by id.
+---Edit an existing comment by id, prompting for the new body. Returns
+---nothing: failures NOTIFY instead — an unknown id WARNs, a failed
+---store write ERRORs (and rolls the in-memory record back). An empty
+---prompt answer cancels silently.
 ---@param id string
 ---@param opts? { scope?: "project"|"session", project_root?: string }
 function M.edit(id, opts)
@@ -1247,9 +1239,11 @@ function M.edit(id, opts)
   end)
 end
 
----Delete a comment by id.
+---Delete a comment by id. Returns true when a record was found,
+---removed, and persisted (nil on not-found or persistence failure).
 ---@param id string
----@param opts? { scope?: "project"|"session", project_root?: string, quiet?: boolean }
+---@param opts? { scope?: "project"|"session", project_root?: string, quiet?: boolean, no_refresh?: boolean }
+---@return boolean? deleted
 function M.delete(id, opts)
   opts = opts or {}
   local record, _, remove = find(id, opts)
@@ -1275,8 +1269,15 @@ function M.delete(id, opts)
   -- A fresh deletion invalidates the redo branch, mirroring Vim's
   -- undo-tree: a new edit discards any redo history.
   delete_redo_stack = {}
-  refresh_all_loaded()
+  -- `no_refresh` lets bulk callers (the auto-clear loop in `M.send`)
+  -- suppress the editor-wide repaint per record and run ONE
+  -- `refresh_all_loaded()` after their loop instead. Only the repaint is
+  -- batched — `ManiculeDeleted` still fires per record.
+  if not opts.no_refresh then
+    refresh_all_loaded()
+  end
   emit("ManiculeDeleted", { id = id, record = record })
+  return true
 end
 
 ---Restore the most recently deleted comment. Multi-level: call
@@ -1315,7 +1316,8 @@ function M.redo_delete()
   -- resolves to — that path could fail to surface the record and drop
   -- the snapshot from the redo stack permanently.
   local store = require("manicule.store")
-  local removed = store.remove_record(snapshot.scope, snapshot.id, snapshot.project_root)
+  local removed =
+    store.remove_record({ scope = snapshot.scope, id = snapshot.id, project_root = snapshot.project_root })
   local ok, err
   if snapshot.scope == "session" then
     ok, err = store.session_save()
@@ -1335,7 +1337,9 @@ function M.redo_delete()
   emit("ManiculeDeleted", { id = snapshot.id, record = removed or snapshot })
 end
 
----Mark a comment as resolved.
+---Mark a comment as resolved. Returns nothing: failures NOTIFY instead
+---— an unknown id WARNs, a failed store write ERRORs (and rolls the
+---in-memory record back).
 ---@param id string
 ---@param opts? { scope?: "project"|"session", project_root?: string }
 function M.resolve(id, opts)
@@ -1357,36 +1361,62 @@ function M.resolve(id, opts)
 end
 
 ---Sort records by uri → start line → id so every surface that lists
----records (quickfix, picker, completion) sees the same order. Returning
----a sorted list from `list()` itself — rather than relying on callers
----to re-sort — is load-bearing for the picker: positional numbers from
----tab-completion must resolve to the same records the user sees in
----`:ManiculeList`.
+---records (the comments panel, picker, completion) sees the same
+---order. Returning a sorted list from `list()` itself — rather than
+---relying on callers to re-sort — is load-bearing for the picker:
+---positional numbers from tab-completion must resolve to the same
+---records the user sees in `:ManiculeList`.
 ---@param records table[]
 ---@return table[]
 local function sort_records(records)
-  -- Sorts in place (callers own a fresh list). Ordering matches the
-  -- quickfix formatter via the shared `manicule.range.compare` so the
-  -- picker, completion, and quickfix all agree.
+  -- Sorts in place (callers own a fresh list). The shared
+  -- `manicule.range.compare` keeps the panel, picker, and completion
+  -- in agreement.
   table.sort(records, require("manicule.range").compare)
   return records
 end
 
 ---List comments, optionally filtered. Results are always sorted by
----`uri → start line → id` so the ordering seen in `:ManiculeList`,
----the picker, and the positional-number completer is identical.
----@param filter {uri?: string, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, _root?: string}|nil
+---`uri → start line → id` so the ordering seen in `:ManiculeList`, the
+---picker, and the positional-number completer is identical.
+---
+---`filter` holds record predicates only. `opts` controls how the query
+---runs:
+---
+---  * `sync` (default true) — before reading, walk every loaded buffer
+---    and fold moved anchor extmarks back into the records: positions
+---    are updated in memory and the touched stores are marked dirty for
+---    the debounced flush. It renders nothing, but it is NOT a pure
+---    read. Pass `sync = false` for a read of the records as stored —
+---    read-only surfaces (the review panel) render right after
+---    mutations whose paths already synced, so the editor-wide sweep
+---    (a store probe + root resolution per buffer) is pure overhead
+---    there. Writing paths (send, picker) keep the sync.
+---  * `root` — project root to query instead of resolving one from the
+---    current buffer/cwd. Review surfaces pass the session's cached
+---    root so panel/autoflush calls (whose current buffer may be a
+---    scratch buffer outside the project) still hit the right store.
+---@param filter {uri?: string, uris?: table<string, true>, path_suffix?: string, unresolved?: boolean, orphaned?: boolean, author?: string, exclude_imported?: boolean}|nil
+---@param opts {sync?: boolean, root?: string}|nil
 ---@return table[]
-function M.list(filter)
+function M.list(filter, opts)
   filter = filter or {}
-  sync_all_loaded_positions()
+  opts = opts or {}
+  -- `exclude_imported` drops records imported from an external review
+  -- system (meta.github.imported). Used by review.finish() so GitHub's
+  -- own comments are never echoed back; a plain :ManiculeSend still
+  -- includes them (explicit user action).
+  local is_import = filter.exclude_imported and require("manicule.review.import").is_import or nil
+  if opts.sync ~= false then
+    sync_all_loaded_positions()
+  end
   local store = require("manicule.store")
   local anchor = require("manicule.anchor")
   local render = require("manicule.ui.render")
   local uri_mod = require("manicule.uri")
   local bufnr = vim.api.nvim_get_current_buf()
   local mark_ids = render.mark_ids_for_buffer(bufnr)
-  -- Walk both stores. The picker/quickfix is per-run-short-lived; the
+  -- Walk both stores. The picker/panel listing is per-run-short-lived; the
   -- filter winnows and consumers can scope further. Keeps the scope
   -- transparent — no caller branches on `record.scope`.
   local all = {}
@@ -1395,7 +1425,7 @@ function M.list(filter)
   -- walking up through `stdpath('run')` to a dead end — raw
   -- `store.root()` here returned nil and left M.list blind to every
   -- record saved via `adapter.identify`'s reverse-map.
-  local root = filter._root or current_project_root()
+  local root = opts.root or current_project_root()
   if root then
     for _, r in ipairs(store.all(root)) do
       table.insert(all, r)
@@ -1408,6 +1438,9 @@ function M.list(filter)
     .iter(all)
     :filter(function(r)
       if filter.uri and r.uri ~= filter.uri then
+        return false
+      end
+      if filter.uris and not filter.uris[r.uri] then
         return false
       end
       if filter.path_suffix then
@@ -1427,6 +1460,9 @@ function M.list(filter)
       if filter.author and r.author ~= filter.author then
         return false
       end
+      if is_import and is_import(r) then
+        return false
+      end
       if filter.orphaned then
         local mid = mark_ids[tostring(r.id)]
         if not mid then
@@ -1442,32 +1478,30 @@ function M.list(filter)
     :totable()
 
   sort_records(results)
-
-  -- If called as a command (no filter, no caller return-use), push to quickfix.
-  if not filter._quiet and (filter.to_qflist or vim.tbl_count(filter) == 0) then
-    -- Pass the filter through so the quickfix module can cache it for
-    -- `refresh()` and regenerate the same list on `User Manicule*`.
-    require("manicule.ui.quickfix").show(results, { open = true, filter = filter })
-  end
   return results
 end
 
----Dispatch filtered comments to a named sink.
+---Dispatch filtered comments to a named sink. With a nil/"" sink name,
+---prompts through the sink picker first. Dispatch failures notify
+---(ERROR) from the async callback — there is no return value to carry
+---them.
 ---@param sink_name string|nil
----@param filter table|nil
----@param ctx table|nil
-function M.send(sink_name, filter, ctx)
+---@param filter table|nil record predicates (see M.list)
+---@param ctx table|nil sink dispatch context (passed to the sink's send)
+---@param opts {root?: string}|nil list options: `root` scopes the store
+---query the way M.list's `opts.root` does (review sessions pass the
+---session's cached root). The send path always keeps the position sync.
+function M.send(sink_name, filter, ctx, opts)
   if sink_name == nil or sink_name == "" then
     require("manicule.ui").select_sink(function(name)
       if name then
-        M.send(name, filter, ctx)
+        M.send(name, filter, ctx, opts)
       end
     end)
     return
   end
   filter = filter or {}
-  filter._quiet = true
-  local records = M.list(filter)
+  local records = M.list(filter, { root = opts and opts.root or nil })
   -- Fetch the spec up front so we can check `clear_on_success` after
   -- dispatch without a second registry lookup. Unknown sinks still flow
   -- through `dispatch`'s existing `cb(false, "unknown sink")` path below
@@ -1489,43 +1523,93 @@ function M.send(sink_name, filter, ctx)
       return
     end
     if sink and sink.clear_on_success and #records > 0 then
+      -- A sink may deliver only a SUBSET of the batch (github diverts
+      -- records with no repo-relative path and records imported from
+      -- GitHub out of the payload) yet still report overall success.
+      -- Such sinks declare `spec.sent_marker`: the `meta` key they
+      -- stamp on every record they actually delivered (github's
+      -- `mark_sent` sets `meta.github_sent` on the very record tables
+      -- dispatched here, so the marker is visible in-memory by the
+      -- time this callback runs). Clear only marked records; undelivered
+      -- ones must survive. Records marked by an EARLIER send also carry
+      -- the marker and are cleared deliberately — they were delivered
+      -- then, so clearing completes that hand-off. Sinks without
+      -- `sent_marker` keep the whole-batch behavior.
+      local marker = sink.sent_marker
       -- Reuse `M.delete` so each record goes through the full lifecycle
-      -- — store.remove + save, render.reconcile per buffer, and one
-      -- `User ManiculeDeleted` per record — exactly as if the user had
-      -- deleted them by hand. `M.delete` is idempotent on unknown ids
-      -- (returns early), so a sink that already cleared records itself
-      -- becomes a no-op here. Pass `quiet` so already-removed records
-      -- (e.g. a concurrent sync) don't spam a not-found WARN per id.
+      -- — store.remove + save and one `User ManiculeDeleted` per record
+      -- — exactly as if the user had deleted them by hand. `M.delete`
+      -- is idempotent on unknown ids (returns early), so a sink that
+      -- already cleared records itself becomes a no-op here. Pass
+      -- `quiet` so already-removed records (e.g. a concurrent sync)
+      -- don't spam a not-found WARN per id, and `no_refresh` so the
+      -- editor-wide repaint runs ONCE after the loop instead of once
+      -- per cleared record.
+      local cleared = false
       for _, record in ipairs(records) do
-        M.delete(record.id, { scope = record.scope, project_root = record.project_root, quiet = true })
+        local delivered = marker == nil or (type(record.meta) == "table" and record.meta[marker] ~= nil)
+        if delivered then
+          local deleted = M.delete(record.id, {
+            scope = record.scope,
+            project_root = record.project_root,
+            quiet = true,
+            no_refresh = true,
+          })
+          cleared = cleared or deleted == true
+        end
+      end
+      if cleared then
+        refresh_all_loaded()
       end
     end
   end)
 end
 
 ---Register a sink adapter. Delegates to the sinks registry.
----@param spec {name: string, send: fun(comments: table, ctx: table, cb: fun(ok, err)), format?: fun(c): string, validate?: fun(ctx): boolean, string?}
+---
+---Optional delivery-contract fields consumed by `M.send`:
+---`sent_marker` (string) names the `meta` key the sink stamps on each
+---record it actually delivered — with `clear_on_success`, only marked
+---records are cleared. `accepts_verdict` (boolean) advertises that the
+---sink consumes a `:ManiculeSend <sink> <verdict>` argument (ctx.event);
+---the command layer rejects verdicts for sinks without it.
+---@param spec {name: string, send: fun(comments: table, ctx: table, cb: fun(ok, err)), format?: fun(c): string, validate?: fun(ctx): boolean, string?, sent_marker?: string, accepts_verdict?: boolean}
 function M.register_sink(spec)
   return require("manicule.sinks").register(spec)
 end
 
--- Exposed for tests + <Plug> maps; not part of the stable public API.
--- Returns `{ [bufnr] = { [comment_id] = extmark_id, ... }, ... }` by
--- projecting from the render layer's handle table so there is exactly
--- one source of truth for anchor extmarks.
-function M._buffer_marks()
-  local render = require("manicule.ui.render")
-  local out = {}
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    local marks = render.mark_ids_for_buffer(bufnr)
-    if next(marks) then
-      out[bufnr] = marks
-    end
-  end
-  return out
+---Register a review panel tab. Delegates to the panel's tab registry.
+---@param spec manicule.PanelTab
+function M.register_review_tab(spec)
+  return require("manicule.review.panel").register_tab(spec)
 end
 
-function M._stop_sync_timer_for_tests()
+---Register a review source resolver for `:ManiculeReview`. Delegates to
+---the review sources registry; resolvers are PREPENDED, so a resolver
+---registered here shadows the builtins (dirs/git/pr) for any arguments
+---its `match` accepts.
+---@param resolver {name: string, match: fun(fargs: string[]): boolean, resolve: fun(fargs: string[], opts: table): table|nil, string|nil}
+function M.register_review_source(resolver)
+  return require("manicule.review.sources").register(resolver)
+end
+
+-- Exposed for the review layer (panel reply creation repaints the
+-- target buffer); not part of the stable public API. Repaints `bufnr`
+-- from the store — same path BufWinEnter uses.
+---@param bufnr integer
+function M._attach_buffer(bufnr)
+  attach_buffer(bufnr)
+end
+
+-- Exposed for tests (leak assertions on the BufFilePre snapshot table);
+-- not part of the stable public API.
+function M._pre_rename_uris()
+  return pre_rename_uris
+end
+
+-- Internal: exposed for tests (the `_reset` family) — drop the store
+-- poll timer so a headless run exits cleanly between specs.
+function M._reset_sync_timer()
   if sync_timer then
     sync_timer:stop()
     sync_timer:close()

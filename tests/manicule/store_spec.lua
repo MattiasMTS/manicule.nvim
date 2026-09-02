@@ -38,7 +38,7 @@ describe("manicule.store session scope", function()
 
   it("session_put then session_save lands records on disk and reloads", function()
     local store = require("manicule.store")
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
 
     local record = {
       id = "abc123",
@@ -174,7 +174,7 @@ describe("manicule.store session scope", function()
 
   it("flush_all flushes both caches", function()
     local store = require("manicule.store")
-    local uv = vim.uv or vim.loop
+    local uv = vim.uv
     store.put(tmp_root, {
       id = "p1",
       uri = "file://" .. tmp_root .. "/a.lua",
@@ -212,7 +212,7 @@ describe("manicule.store session scope", function()
     local info = store.sqlite_info(tmp_root)
     assert.is_true(info.available)
     assert.are.equal("wal", info.journal_mode)
-    assert.is_truthy((vim.uv or vim.loop).fs_stat(store.path(tmp_root)))
+    assert.is_truthy(vim.uv.fs_stat(store.path(tmp_root)))
   end)
 
   it("syncs project records written by another store client", function()
@@ -281,7 +281,7 @@ describe("manicule.store session scope", function()
     assert.are.equal("body from stale client", merged.body)
     assert.are.same({ start = { 4, 0 }, end_ = { 5, 0 } }, merged.range)
 
-    local events = fresh.events(tmp_root)
+    local events = fresh._events(tmp_root)
     local kinds = {}
     for _, event in ipairs(events) do
       table.insert(kinds, event.kind)
@@ -363,12 +363,57 @@ describe("manicule.store session scope", function()
 
     vim.cmd.enew()
 
-    local explicit = store.all_for_uri(uri, tmp_root)
-    assert.are.equal(2, #explicit)
+    local opts_root = store.all_for_uri(uri, { root = tmp_root })
+    assert.are.equal(2, #opts_root)
 
-    local session_only = store.all_for_uri(uri, nil)
-    assert.are.equal(1, #session_only)
-    assert.are.equal("s", session_only[1].id)
+    local opts_session = store.all_for_uri(uri, { session_only = true })
+    assert.are.equal(1, #opts_session)
+    assert.are.equal("s", opts_session[1].id)
+
+    -- The pre-opts positional form (a raw root / explicit nil as the
+    -- second argument) is gone: only nil or an opts table is accepted.
+    local ok, err = pcall(store.all_for_uri, uri, tmp_root)
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("opts must be a table", 1, true))
+  end)
+
+  it("remove_record dispatches by scope from a single identity table", function()
+    local store = require("manicule.store")
+    local uri = require("manicule.uri").for_path(tmp_root .. "/remove.lua")
+    local function record(id, scope)
+      return {
+        id = id,
+        uri = uri,
+        scope = scope,
+        project_root = scope == "project" and tmp_root or nil,
+        range = { start = { 0, 0 }, end_ = { 0, 0 } },
+        body = id,
+        author = "",
+        created_at = 0,
+        updated_at = 0,
+        resolved = false,
+        meta = {},
+      }
+    end
+    store.put(tmp_root, record("p1", "project"))
+    store.put(tmp_root, record("p2", "project"))
+    store.session_put(record("s1", "session"))
+
+    -- Table form, both scopes.
+    local removed_project = store.remove_record({ scope = "project", id = "p1", project_root = tmp_root })
+    assert.are.equal("p1", removed_project.id)
+    local removed_session = store.remove_record({ scope = "session", id = "s1" })
+    assert.are.equal("s1", removed_session.id)
+
+    -- The positional form (scope, id, project_root) is gone.
+    local ok, err = pcall(store.remove_record, "project", "p2", tmp_root)
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("opts must be a table", 1, true))
+
+    local removed_p2 = store.remove_record({ scope = "project", id = "p2", project_root = tmp_root })
+    assert.are.equal("p2", removed_p2.id)
+
+    assert.are.equal(0, #store.all_for_uri(uri, { root = tmp_root }))
   end)
 
   it("session_save keeps ephemeral unnamed-buffer records in memory but off disk", function()
@@ -442,6 +487,41 @@ describe("manicule.store session scope", function()
     local ok, err = store.restore_record({ id = "x", scope = "project" })
     assert.is_false(ok)
     assert.is_truthy(err)
+  end)
+
+  it("memoizes the branch-scoped store name until _reset", function()
+    -- `store_name` runs on every store read; with
+    -- `store.scope_by_branch = true` the un-memoized version forked
+    -- `git branch --show-current` per call. The memo pins the load-time
+    -- name for the whole session (keeping cache[root]/sqlite_dbs
+    -- coherent) and `_reset` drops it.
+    vim.fn.system({ "git", "init", "-q", tmp_root })
+    vim.fn.system({ "git", "-C", tmp_root, "checkout", "-q", "-b", "feature-a" })
+    require("manicule").setup({
+      store = {
+        dir = tmp_state .. "/",
+        format = "json",
+        canonicalize_symlinks = false,
+        poll_interval_ms = 0,
+        scope_by_branch = true,
+      },
+    })
+    local store = require("manicule.store")
+
+    local path_a = store.path(tmp_root)
+    assert.is_truthy(path_a:find("feature-a", 1, true))
+
+    -- Switching branches on disk does NOT re-key the already-resolved
+    -- store mid-session: reads and writes stay pinned to the database
+    -- the session loaded.
+    vim.fn.system({ "git", "-C", tmp_root, "checkout", "-q", "-b", "feature-b" })
+    assert.are.equal(path_a, store.path(tmp_root))
+
+    -- A reset (fresh session) resolves the new branch.
+    store._reset()
+    local path_b = store.path(tmp_root)
+    assert.is_truthy(path_b:find("feature-b", 1, true))
+    assert.are_not.equal(path_a, path_b)
   end)
 
   it("restore_record brings a removed session record back and survives reload", function()

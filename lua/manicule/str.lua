@@ -1,7 +1,7 @@
 -- manicule.nvim: small string helpers shared across surfaces.
 --
 -- Centralises two formatting primitives that were duplicated byte-for-byte
--- in the renderer, the quickfix formatter, and the floating editor:
+-- in the renderer, the review panel, and the floating editor:
 --   * `split_lines` — newline split with an empty-string guard so callers
 --     always get at least one line to render.
 --   * `truncate` — byte-length-based ellipsis truncation.
@@ -22,6 +22,36 @@ function M.split_lines(text)
     return { "" }
   end
   return lines
+end
+
+-- Composed-character cap for `M.excerpt` — an excerpt is a one-line
+-- citation, not a transcript, so anything past this is cut.
+local EXCERPT_MAX_CHARS = 200
+
+---Excerpt of an anchored range's text, as captured at comment-creation
+---time and quoted by the comment card: the range's first line trimmed,
+---capped at `EXCERPT_MAX_CHARS` composed characters, with a trailing
+---`…` when the text was cut or the range spans more lines. Returns nil
+---for a blank first line (no quote at all). Shared by the add-path
+---capture (`init.lua`) and the renderer's live-line fallback for
+---records that predate capture, so both cite identically.
+---@param first_line string?
+---@param spans_more boolean? Range covers lines beyond the first
+---@return string?
+function M.excerpt(first_line, spans_more)
+  local text = vim.trim(first_line or "")
+  if text == "" then
+    return nil
+  end
+  local cut = false
+  if vim.fn.strchars(text, 1) > EXCERPT_MAX_CHARS then
+    text = vim.fn.strcharpart(text, 0, EXCERPT_MAX_CHARS, 1)
+    cut = true
+  end
+  if cut or spans_more then
+    text = text .. "…"
+  end
+  return text
 end
 
 ---Truncate `text` to `max_width` bytes, appending an ellipsis when the

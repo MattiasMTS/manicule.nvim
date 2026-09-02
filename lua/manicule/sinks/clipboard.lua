@@ -31,10 +31,11 @@ local function build_spec(opts)
   return spec
 end
 
+---Build the clipboard sink spec.
+---@param opts? {pre_text?: string, post_text?: string}
+---@return table spec sink spec (see sinks.register)
 function M.setup(opts)
   return build_spec(opts)
 end
-
-M.spec = build_spec()
 
 return M
