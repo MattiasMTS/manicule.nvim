@@ -1,8 +1,9 @@
 -- manicule.nvim: command-line completion for :ManiculeReview.
 --
--- Candidates come from subprocesses (git, gh), so results are cached
--- for a short TTL: repeated <Tab> presses must not re-spawn processes.
--- Completion never errors — any failure degrades to an empty list.
+-- Candidates come from subprocesses (git, gh) or a transcript scan
+-- (chat), so results are cached for a short TTL: repeated <Tab> presses
+-- must not re-spawn processes or re-read files. Completion never errors
+-- — any failure degrades to an empty (or minimal) list.
 
 local M = {}
 
@@ -49,13 +50,14 @@ end
 
 ---First-argument candidates: local branches, remote-tracking branches
 ---(e.g. `origin/main` — the git resolver merge-bases any rev), and the
----literal `pr`.
+---literal resolver keywords `pr` and `chat`.
 ---@return string[]
 local function refs()
   return cached("refs:" .. tostring(uv.cwd()), function()
     local out = lines({ "git", "branch", "--format=%(refname:short)" })
     vim.list_extend(out, lines({ "git", "for-each-ref", "refs/remotes", "--format=%(refname:short)" }))
     table.insert(out, "pr")
+    table.insert(out, "chat")
     return out
   end)
 end
@@ -83,6 +85,30 @@ local function pr_numbers()
   end)
 end
 
+---`chat` position: `all` plus `1..n` for the kept turns of the newest
+---session (review/chat.lua's numbering, 1 = latest). File IO only, but a
+---big transcript is still a full read+scan, hence the same cache. Any
+---failure (no transcripts dir, unrecognized shape) degrades to `all`.
+---@return string[]
+local function chat_args()
+  return cached("chat:" .. tostring(uv.cwd()), function()
+    local out = { "all" }
+    local ok, count = pcall(function()
+      local chat = require("manicule.review.chat")
+      local sessions = chat.list_sessions()
+      if not sessions or #sessions == 0 then
+        return 0
+      end
+      local turns = chat.list_turns(sessions[1])
+      return turns and #turns or 0
+    end)
+    for i = 1, ok and count or 0 do
+      table.insert(out, tostring(i))
+    end
+    return out
+  end)
+end
+
 ---Completion candidates for :ManiculeReview, prefix-filtered by arglead.
 ---@param arglead string
 ---@param cmdline string
@@ -91,6 +117,8 @@ function M.candidates(arglead, cmdline)
   local items
   if cmdline:match("ManiculeReview%s+pr%s+%S*$") then
     items = pr_numbers()
+  elseif cmdline:match("ManiculeReview%s+chat%s+%S*$") then
+    items = chat_args()
   elseif cmdline:match("ManiculeReview%s+%S*$") then
     items = refs()
   else

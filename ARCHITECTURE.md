@@ -47,7 +47,8 @@ lua/manicule/review.lua         review session core (start/open/next/prev/finish
 lua/manicule/review/panel.lua   the comments/review panel (tabs, rows, project mode)
 lua/manicule/review/git.lua     git plumbing (rev-parse, merge-base, changed files, staging)
 lua/manicule/review/inline.lua  unified-mode diff paint (virtual lines, folds, hunk nav)
-lua/manicule/review/sources.lua resolver registry (dirs, git ref, pr via gh CLI)
+lua/manicule/review/sources.lua resolver registry (dirs, git ref, pr via gh CLI, chat)
+lua/manicule/review/chat.lua    Claude Code transcript reader behind the `chat` resolver
 lua/manicule/sinks/             sink registry and bundled sinks (clipboard, cmux, github, socket)
 ```
 
@@ -454,7 +455,26 @@ worktree right). One active session at a time, in its own tab page.
 - Turns `:ManiculeReview` arguments into staged file pairs.
 - Builtin resolvers: `<dirL> <dirR>` (walks dirR, pairs by rel-path, content
   diff), `<git-ref>` (merge-base vs HEAD, shows only your changes), bare
-  (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI).
+  (defaults to `HEAD`), `pr <n>` (via `gh pr view --json`, shells to gh CLI),
+  `chat [all|<n>]` (a Claude Code assistant turn as a markdown document).
+- `chat` (`lua/manicule/review/chat.lua`) is Claude-Code-specific and opt-in
+  by presence of `~/.claude/projects/<cwd-slug>/*.jsonl` (slug = the cwd
+  with every non-alphanumeric byte replaced by `-`); read-only and
+  best-effort — a missing dir or an unrecognized event shape fails the
+  resolve with a clear message. Sessions are listed by mtime (title from
+  the last `ai-title` event, else the first prompt's first line, else the
+  id); a turn is a run of consecutive `assistant` events ended by ANY
+  `user` event (tool results included), text blocks joined with blank
+  lines, sidechain events skipped, turns under 3 lines / 120 chars
+  dropped, and the kept turns numbered newest-first. Scans are linear and
+  prefix-filtered (`string.find` for the `"type":"…"` marker before any
+  json-decode) since transcripts run to many MB. The picked turn is
+  written to `stdpath("cache")/manicule/chat/<id8>-turn-<n>.md` with a
+  3-line comment header and paired with an empty staged left (`A`) in an
+  owned stage dir. Its `vim.ui.select` pickers run inside its own
+  `resolve_async` chain (the scan starts in a scheduled step, the picker
+  callbacks continue it), so they open over the already-visible review
+  shell without registry changes; cancelling a picker fails the resolve.
 - `register(resolver)` prepends to registry → user resolvers shadow builtins.
 - All resolvers return `{files: [{left, right, status, path}], label}`.
 - Two entry points share the registry. `resolve(fargs, opts)` blocks until

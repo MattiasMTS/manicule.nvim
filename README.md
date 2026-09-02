@@ -167,6 +167,7 @@ side as usual, then send the batch with `:ManiculeReviewFinish [sink]`.
     :ManiculeReview              " uncommitted changes (vs HEAD)
     :ManiculeReview main         " your branch vs merge-base with main
     :ManiculeReview pr 123       " a GitHub PR (requires gh CLI)
+    :ManiculeReview chat         " a Claude Code assistant turn, as a markdown document
     :ManiculeReview <dirA> <dirB> " any two directories
     :ManiculeReviewNext          " next changed file
     :ManiculeReviewPrev          " previous changed file
@@ -251,6 +252,19 @@ view, `r` replies to an imported comment's thread (the reply is stored
 locally and posted by the next `github` send) and `gr` toggles the
 thread's resolved state on GitHub; resolved threads are prefixed with `✓`.
 
+`:ManiculeReview chat` reviews what a coding agent *wrote* rather than what
+it changed. It lists the Claude Code sessions for the current directory
+(read from `~/.claude/projects`, newest first — `Title · age · branch ·
+size`), then the session's assistant turns (`HH:MM  first line  (n
+lines)`), and opens the picked turn's text as a markdown document in the
+normal review session: comment on the plan or report line by line, then
+send the batch with `:ManiculeReviewFinish`. `chat <n>` skips both pickers
+and takes the newest session's n-th turn (1 = latest; `<Tab>` completes the
+numbers), `chat all` picks across every project, and a single session for
+the directory skips straight to its turns. One-line narration between tool
+calls is left out of the picker. The transcripts are read, never modified;
+the keyword does nothing useful until Claude Code has run in the directory.
+
 External tools can drive a review session by writing a JSON job file and
 calling `require("manicule.review").start_from_job(path)`; comments return
 through the bundled `socket` sink as JSONL over a unix socket.
@@ -278,6 +292,7 @@ require("manicule").setup({
       submit_delay_ms = 120, -- delay before Enter, lets a large paste settle first
       paste_chunk_bytes = 1024, -- max bytes per paste chunk (large reviews are split to avoid PTY truncation)
       paste_chunk_delay_ms = 80, -- delay between paste chunks so the agent's terminal can drain
+      paste_retries = 2, -- re-upload + re-paste attempts per chunk (cmux can silently drop concurrent uploads)
       clear_on_success = false, -- keep comments until you verify and resolve them
       pre_text = "Optional instructions inserted before the comments.",
       post_text = "Optional follow-up instructions inserted after the comments.",

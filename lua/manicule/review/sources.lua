@@ -11,9 +11,11 @@
 --     (see review/git.lua's `_async` primitives), so the command
 --     returns within a frame while rev-parse/merge-base/changed-files/
 --     materialize (and, for `pr`, `gh pr view` + any fetch) run in the
---     background. Resolvers without a `resolve_async` (dirs, user
---     registrations) run their sync `resolve` inside one scheduled
---     step: still off the command's own frame, just not incremental.
+--     background. The `chat` resolver (review/chat.lua) schedules its
+--     transcript scan and continues through vim.ui.select callbacks.
+--     Resolvers without a `resolve_async` (dirs, user registrations)
+--     run their sync `resolve` inside one scheduled step: still off
+--     the command's own frame, just not incremental.
 --
 --   * `M.resolve(fargs, opts)` — the synchronous back-compat API
 --     (tests, external callers). For builtins it is a thin wrapper
@@ -448,6 +450,28 @@ M.register({
   end,
   resolve = sync_from_async(resolve_pr_async),
   resolve_async = resolve_pr_async,
+})
+
+-- Builtin: an assistant turn from a Claude Code session transcript,
+-- reviewed as a markdown document (review/chat.lua: `chat`, `chat <n>`,
+-- `chat all`). Registered unconditionally — like `pr` with gh missing, a
+-- missing ~/.claude/projects fails the resolve with a clear message
+-- instead of hiding the keyword. Registered AFTER git so it shadows the
+-- bare-ref match for `chat`. Its vim.ui.select pickers continue the
+-- resolve_async chain, so they open over the already-visible review
+-- shell and need no registry support beyond the per-resolver
+-- `resolve_async`; the module loads lazily, only when `chat` is used.
+local function resolve_chat_async(fargs, opts, cb)
+  return require("manicule.review.chat").resolve_async(fargs, opts, cb)
+end
+
+M.register({
+  name = "chat",
+  match = function(fargs)
+    return fargs[1] == "chat"
+  end,
+  resolve = sync_from_async(resolve_chat_async),
+  resolve_async = resolve_chat_async,
 })
 
 ---@param fargs string[]
